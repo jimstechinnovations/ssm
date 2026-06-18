@@ -18,7 +18,7 @@ import React from 'react'
 // Types
 // ---------------------------------------------------------------------------
 
-export type BadgeVariant = 'CORE' | 'PIVOT' | 'CHAOS' | 'default'
+export type BadgeVariant = 'CORE' | 'PIVOT' | 'BRIDGE' | 'CHAOS' | 'default'
 
 export interface BadgeProps {
   variant?: BadgeVariant
@@ -31,9 +31,10 @@ export interface BadgeProps {
 // ---------------------------------------------------------------------------
 
 const variantClasses: Record<BadgeVariant, string> = {
-  CORE: 'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
-  PIVOT: 'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200',
-  CHAOS: 'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
+  CORE:    'bg-blue-100 text-blue-800 dark:bg-blue-900 dark:text-blue-200',
+  PIVOT:   'bg-amber-100 text-amber-800 dark:bg-amber-900 dark:text-amber-200',
+  BRIDGE:  'bg-purple-100 text-purple-800 dark:bg-purple-900 dark:text-purple-200',
+  CHAOS:   'bg-red-100 text-red-800 dark:bg-red-900 dark:text-red-200',
   default: 'bg-zinc-100 text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300',
 }
 

@@ -1,7 +1,15 @@
 // lib/ssm/generator.ts
-// Pure 42-slip SSM matrix generator. No I/O, no side effects.
+// Pure 56-slip SSM matrix generator. No I/O, no side effects.
 //
-// Requirements: 1.1, 1.2, 1.3, 1.4, 1.5, 1.6, 1.7, 10.4, 10.5
+// v3.1: Added BRIDGE tier (14 slips) covering three-flip and four-flip
+// midpoint combinations — fills the statistical gap between PIVOT (single-flip)
+// and CHAOS (all-flip) that was the primary loss scenario in v3.
+//
+// Slip structure:
+//   CORE   slips  1–30  (30) — all-dominant + single-flip + two-flip
+//   PIVOT  slips 31–38  ( 8) — N-1 error-correcting single-flips
+//   BRIDGE slips 39–52  (14) — 12 three-flip + 2 four-flip midpoints (NEW)
+//   CHAOS  slips 53–56  ( 4) — extreme anchors
 
 import type { MatchSelection, SessionConfig, Slip, SlipLeg } from './types'
 
@@ -183,26 +191,120 @@ export function generatePivotSlips(
 }
 
 // ---------------------------------------------------------------------------
-// generateChaosSlips — 4 slips (Tier 3)
+// generateBridgeSlips — 14 slips (Tier 3 — NEW in v3.1)
 // ---------------------------------------------------------------------------
+
+/**
+ * Generates the 14 BRIDGE slips covering the statistical gap between
+ * single-flip (PIVOT) and all-flip (CHAOS).
+ *
+ * Three-flip coverage (12 slips):
+ *   All C(8,3)=56 three-flip combinations ranked by sum of volatility of the
+ *   three flipped positions (ascending). Take the 12 lowest — these are the
+ *   most probable three-flip patterns for the specific game set.
+ *
+ * Four-flip midpoint coverage (2 slips):
+ *   The two lowest-volatility four-flip combinations (from C(8,4)=70 candidates).
+ *   These cover the most likely 4/4 split sessions.
+ *
+ * slipId 39–52, tier 'BRIDGE'
+ *
+ * Why 14: 12 three-flip + 2 four-flip = 14. At ₦10,000 bankroll this gives
+ * exactly ₦100/slip (the Nigerian bookmaker minimum) via the 14% allocation.
+ */
+export function generateBridgeSlips(
+  selections: MatchSelection[],
+  stakePerSlip: number,
+  startId = 39,
+): Slip[] {
+  interface FlipCandidate {
+    v: (0 | 1)[]
+    score: number
+  }
+
+  // ── Three-flip candidates: C(8,3) = 56 combinations ──────────────────────
+  const threeFlipCandidates: FlipCandidate[] = []
+
+  for (let i = 0; i < 6; i++) {
+    for (let j = i + 1; j < 7; j++) {
+      for (let k = j + 1; k < 8; k++) {
+        const v: (0 | 1)[] = [0, 0, 0, 0, 0, 0, 0, 0]
+        v[i] = 1
+        v[j] = 1
+        v[k] = 1
+        const score = selections[i].volatility + selections[j].volatility + selections[k].volatility
+        threeFlipCandidates.push({ v, score })
+      }
+    }
+  }
+
+  // Sort ascending — lowest volatility sum = most probable three-flip pattern
+  threeFlipCandidates.sort((a, b) => a.score - b.score)
+  const top12ThreeFlip = threeFlipCandidates.slice(0, 12)
+
+  // ── Four-flip candidates: C(8,4) = 70 combinations ───────────────────────
+  const fourFlipCandidates: FlipCandidate[] = []
+
+  for (let i = 0; i < 5; i++) {
+    for (let j = i + 1; j < 6; j++) {
+      for (let k = j + 1; k < 7; k++) {
+        for (let l = k + 1; l < 8; l++) {
+          const v: (0 | 1)[] = [0, 0, 0, 0, 0, 0, 0, 0]
+          v[i] = 1
+          v[j] = 1
+          v[k] = 1
+          v[l] = 1
+          const score =
+            selections[i].volatility + selections[j].volatility +
+            selections[k].volatility + selections[l].volatility
+          fourFlipCandidates.push({ v, score })
+        }
+      }
+    }
+  }
+
+  fourFlipCandidates.sort((a, b) => a.score - b.score)
+  const top2FourFlip = fourFlipCandidates.slice(0, 2)
+
+  // ── Combine and build slips ───────────────────────────────────────────────
+  const allVectors = [...top12ThreeFlip, ...top2FourFlip]
+
+  if (allVectors.length !== 14) {
+    throw new Error(`generateBridgeSlips: expected 14 vectors, got ${allVectors.length}`)
+  }
+
+  return allVectors.map((candidate, idx) => {
+    const legs = buildLegs(selections, candidate.v)
+    const combinedOdds = productOfLegs(legs)
+    return {
+      slipId:          startId + idx,
+      tier:            'BRIDGE' as const,
+      tierIndex:       idx + 1,
+      legs,
+      combinedOdds,
+      stake:           stakePerSlip,
+      potentialPayout: combinedOdds * stakePerSlip,
+      sessionHash:     '',
+    }
+  })
+}
+
+
 
 /**
  * Generates the 4 CHAOS slips.
  *
- * Chaos slip 39 (idx 0): all 8 legs state 1 (full contrarian)
- * Chaos slip 40 (idx 1): top 4 volatile legs → OVER_UNDER_1.5 market if available
- *                         (fallback to state 1); rest → state 1
- * Chaos slip 41 (idx 2): even parity — positions 0,2,4,6 use state 1; odd use state 0
- * Chaos slip 42 (idx 3): top 4 volatile → state 1; bottom 4 → state 0
+ * Chaos slip 53 (idx 0): all 8 legs state 1 (full contrarian)
+ * Chaos slip 54 (idx 1): top 4 volatile legs → OVER_UNDER_1.5 if available; else state 1
+ * Chaos slip 55 (idx 2): even parity — positions 0,2,4,6 use state 1; odd use state 0
+ * Chaos slip 56 (idx 3): top 4 volatile → state 1; bottom 4 → state 0
  *
- * slipId 39–42, tier 'CHAOS'
- *
- * Requirements: 1.6, 1.7, 10.4, 10.5
+ * slipId 53–56, tier 'CHAOS'
  */
 export function generateChaosSlips(
   selections: MatchSelection[],
   stakePerSlip: number,
-  startId = 39,
+  startId = 53,
 ): Slip[] {
   // Sort indices descending by volatility to identify top 4
   const sortedIndices = selections
@@ -281,18 +383,18 @@ export function generateChaosSlips(
 // ---------------------------------------------------------------------------
 
 /**
- * Generates the complete 42-slip SSM matrix.
+ * Generates the complete 56-slip SSM matrix (v3.1).
  *
- * Assertions:
- *   - selections.length === 8
- *   - All selections have state0 and state1
- *   - config.stakePerSlip > 0
- *   - config.numAccounts in {6, 7}
+ * Slip structure:
+ *   CORE   1–30  (30 slips) — dominant coverage + two-flip pairs
+ *   PIVOT  31–38 ( 8 slips) — N-1 single-flip error-correcting
+ *   BRIDGE 39–52 (14 slips) — three-flip + four-flip midpoint coverage (NEW)
+ *   CHAOS  53–56 ( 4 slips) — extreme/all-breakout anchors
+ *
+ * Total: 56 slips
  *
  * Note: slips are returned with sessionHash = '' — the generate route handler
  * assigns sessionHash after account distribution.
- *
- * Requirements: 1.1–1.7, 10.4, 10.5
  */
 export function generateMatrix(
   selections: MatchSelection[],
@@ -321,16 +423,17 @@ export function generateMatrix(
   }
 
   // --- Generate each tier ---
-  const coreSlips  = generateCoreSlips(selections, config.stakePerSlip)         // 30
-  const pivotSlips = generatePivotSlips(selections, config.stakePerSlip, 31)    //  8
-  const chaosSlips = generateChaosSlips(selections, config.stakePerSlip, 39)    //  4
+  const coreSlips   = generateCoreSlips(selections, config.stakePerSlip)          // 30, ids  1–30
+  const pivotSlips  = generatePivotSlips(selections, config.stakePerSlip, 31)     //  8, ids 31–38
+  const bridgeSlips = generateBridgeSlips(selections, config.stakePerSlip, 39)    // 14, ids 39–52
+  const chaosSlips  = generateChaosSlips(selections, config.stakePerSlip, 53)     //  4, ids 53–56
 
-  const allSlips = [...coreSlips, ...pivotSlips, ...chaosSlips]
+  const allSlips = [...coreSlips, ...pivotSlips, ...bridgeSlips, ...chaosSlips]
 
   // --- Postcondition assertion ---
-  if (allSlips.length !== 42) {
+  if (allSlips.length !== 56) {
     throw new Error(
-      `generateMatrix: expected 42 slips, got ${allSlips.length}`,
+      `generateMatrix: expected 56 slips, got ${allSlips.length}`,
     )
   }
 

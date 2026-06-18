@@ -22,8 +22,11 @@ import { MARKET_COUNTERPART, OUTCOME_TO_LABEL } from './types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
 
-/** Minimum number of fixtures that must carry a market for it to be eligible */
-const MIN_COVERAGE = 6
+/** Minimum number of fixtures that must carry a market for it to be eligible.
+ *  Lowered from 6 to 1 — with free game selection there is no guarantee all
+ *  8 games carry every market. We use any market with at least 1 fixture and
+ *  rely on per-game profiling to fill gaps. */
+const MIN_COVERAGE = 1
 
 /** Ordered list of all candidate single-sided binary outcomes */
 const ALL_OUTCOMES: MarketOutcome[] = [
@@ -112,11 +115,10 @@ export function detectDominantMarket(fixtures: Fixture[]): DominantMarketResult 
     })
   }
 
-  if (outcomeProbabilities.length < 2) {
+  if (outcomeProbabilities.length < 1) {
     throw new Error(
-      `detectDominantMarket: fewer than 2 eligible outcomes found ` +
-      `(${outcomeProbabilities.length} outcomes had coverage ≥ ${MIN_COVERAGE}). ` +
-      `Ensure fixtures contain BTTS Yes/No odds.`,
+      `detectDominantMarket: no eligible outcomes found across the 8 fixtures. ` +
+      `Ensure fixtures contain at least one binary market (BTTS Yes/No, Over/Under 2.5, or DC 12).`,
     )
   }
 

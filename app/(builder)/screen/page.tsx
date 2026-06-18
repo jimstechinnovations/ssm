@@ -3,12 +3,13 @@
 /**
  * app/(builder)/screen/page.tsx
  *
- * Screen Page — Step 1 of the v2 SSM Builder flow.
+ * Screen Page — SSM v3 (Adaptive Profile-Based Selection)
+ *
+ * No gate rejection. Every fixture with odds gets a profile.
+ * The first 8 unclaimed fixtures become the session set automatically.
  *
  * State machine:
- *   idle → screening → screened_insufficient | screened_ready → generating → navigate
- *
- * Requirements: 2.1–2.6, 3.1–3.7, 4.5, 5.1–5.5, 13.1, 13.2, 13.4, 13.5
+ *   idle → screening → screened_ready (8 found) | screened_insufficient (<8) → generating → navigate
  */
 
 import React, { useState } from 'react'
@@ -20,7 +21,6 @@ import { DateRangePicker } from '@/components/screen/DateRangePicker'
 import { GateResultCard } from '@/components/screen/GateResultCard'
 import { ConfirmationPanel } from '@/components/screen/ConfirmationPanel'
 import { Button } from '@/components/ui/Button'
-import { detectDominantMarket } from '@/lib/ssm/market-detector'
 
 import type {
   BookmakerPlatform,
@@ -28,11 +28,12 @@ import type {
   Fixture,
   AccountAllocation,
   DominantMarketResult,
+  ProfiledFixture,
   Slip,
   TierAllocation,
 } from '@/lib/ssm/types'
 
-// ─── Page-level state machine ─────────────────────────────────────────────────
+// ─── Page state machine ───────────────────────────────────────────────────────
 
 type PageStatus =
   | 'idle'
@@ -40,17 +41,16 @@ type PageStatus =
   | 'screened_insufficient'
   | 'screened_ready'
   | 'generating'
-  | 'error'
 
 // ─── Generate API response shape ──────────────────────────────────────────────
 
 interface GenerateResponse {
-  slips: Slip[]
+  slips:               Slip[]
   accountDistribution: AccountAllocation[]
-  sessionId: string
-  dominantMarket?: DominantMarketResult
-  tierAllocation?: TierAllocation
-  groupId?: string
+  sessionId:           string
+  dominantMarket?:     DominantMarketResult
+  tierAllocation?:     TierAllocation
+  groupId?:            string
 }
 
 // ─── Page ─────────────────────────────────────────────────────────────────────
@@ -60,54 +60,34 @@ export default function ScreenPage() {
   const { dispatch, setScreeningResult, state } = useSession()
 
   // ── Form state ──────────────────────────────────────────────────────────
-  const [bookmaker, setBookmaker] = useState<BookmakerPlatform | ''>('')
-  const [dateFrom, setDateFrom] = useState<string>('')
-  const [dateTo, setDateTo] = useState<string>('')
+  const [bookmaker, setBookmaker]               = useState<BookmakerPlatform | ''>('')
+  const [dateFrom, setDateFrom]                 = useState<string>('')
+  const [dateTo, setDateTo]                     = useState<string>('')
   const [showBookmakerError, setShowBookmakerError] = useState(false)
 
-  // ── Page state machine ──────────────────────────────────────────────────
-  const [status, setStatus] = useState<PageStatus>('idle')
+  // ── Page state ──────────────────────────────────────────────────────────
+  const [status, setStatus]                     = useState<PageStatus>('idle')
+  const [screeningResult, setLocalResult]       = useState<ScreeningResult | null>(null)
+  const [screenError, setScreenError]           = useState<string | null>(null)
+  const [generateError, setGenerateError]       = useState<string | null>(null)
 
-  // ── Screening result ────────────────────────────────────────────────────
-  const [screeningResult, setLocalScreeningResult] = useState<ScreeningResult | null>(null)
-
-  // ── Dominant market (computed client-side from screening result) ─────────
-  const [dominantMarket, setDominantMarket] = useState<DominantMarketResult | null>(null)
-
-  // ── Error messages ──────────────────────────────────────────────────────
-  const [screenError, setScreenError] = useState<string | null>(null)
-  const [generateError, setGenerateError] = useState<string | null>(null)
-
-  // ── Date range handler ──────────────────────────────────────────────────
   function handleDateChange(from: string, to: string) {
     setDateFrom(from)
     setDateTo(to)
   }
 
-  // ── "Find Qualifying Games" ─────────────────────────────────────────────
+  // ── "Find Games" ────────────────────────────────────────────────────────
   async function handleScreen() {
-    // Req 2.5 — bookmaker must be selected
-    if (!bookmaker) {
-      setShowBookmakerError(true)
-      return
-    }
+    if (!bookmaker) { setShowBookmakerError(true); return }
     setShowBookmakerError(false)
     setScreenError(null)
     setGenerateError(null)
     setStatus('screening')
-    setLocalScreeningResult(null)
-    setDominantMarket(null)
+    setLocalResult(null)
 
     try {
-      const body: Record<string, unknown> = {
-        bookmaker,
-        date_from: dateFrom,
-        date_to: dateTo,
-      }
-      // Pass current groupId if re-screening an existing group
-      if (state.groupId) {
-        body.group_id = state.groupId
-      }
+      const body: Record<string, unknown> = { bookmaker, date_from: dateFrom, date_to: dateTo }
+      if (state.groupId) body.group_id = state.groupId
 
       const res = await fetch('/api/screen', {
         method: 'POST',
@@ -117,38 +97,17 @@ export default function ScreenPage() {
 
       if (!res.ok) {
         const text = await res.text().catch(() => '')
-        // Req 13.1 — partial-results error: still show retry
         setScreenError(text || `Screening failed (HTTP ${res.status})`)
         setStatus('idle')
         return
       }
 
       const result: ScreeningResult = await res.json()
-
-      // Store in SessionProvider
       setScreeningResult(result)
-      // Store locally for rendering
-      setLocalScreeningResult(result)
+      setLocalResult(result)
 
-      // Compute client-side market preview when ≥ 8 qualifying fixtures
-      if (result.unclaimedQualifying >= 8 && result.qualifyingFixtures.length >= 8) {
-        try {
-          const top8: Fixture[] = result.qualifyingFixtures
-            .slice(0, 8)
-            .map((fwg) => fwg.fixture)
-          const market = detectDominantMarket(top8)
-          setDominantMarket(market)
-        } catch {
-          // Non-fatal — market preview degrades gracefully
-          setDominantMarket(null)
-        }
-      }
-
-      if (result.unclaimedQualifying >= 8) {
-        setStatus('screened_ready')
-      } else {
-        setStatus('screened_insufficient')
-      }
+      // v3: ready as soon as 8 unclaimed profiled fixtures exist
+      setStatus(result.unclaimedQualifying >= 8 ? 'screened_ready' : 'screened_insufficient')
     } catch {
       setScreenError('Network error — please retry.')
       setStatus('idle')
@@ -161,9 +120,10 @@ export default function ScreenPage() {
     setGenerateError(null)
     setStatus('generating')
 
-    const qualifyingFixtures: Fixture[] = screeningResult.qualifyingFixtures
+    // Extract raw Fixture objects from ProfiledFixtures for the generate request
+    const top8Fixtures: Fixture[] = screeningResult.qualifyingFixtures
       .slice(0, 8)
-      .map((fwg) => fwg.fixture)
+      .map(p => p.fixture)
 
     const groupId = screeningResult.groupId
 
@@ -171,22 +131,15 @@ export default function ScreenPage() {
       const res = await fetch('/api/generate', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          groupId,
-          fixtures: qualifyingFixtures,
-          bankroll,
-          numAccounts,
-        }),
+        body: JSON.stringify({ groupId, fixtures: top8Fixtures, bankroll, numAccounts }),
       })
 
-      // Req 13.2 — 503 → show error banner, re-enable button
       if (res.status === 503) {
         const text = await res.text().catch(() => '')
         setGenerateError(text || 'Generation service unavailable — please retry.')
         setStatus('screened_ready')
         return
       }
-
       if (!res.ok) {
         const text = await res.text().catch(() => '')
         setGenerateError(text || `Generation failed (HTTP ${res.status})`)
@@ -196,7 +149,6 @@ export default function ScreenPage() {
 
       const data: GenerateResponse = await res.json()
 
-      // Dispatch SET_GENERATED to SessionProvider
       dispatch({
         type: 'SET_GENERATED',
         payload: {
@@ -208,7 +160,6 @@ export default function ScreenPage() {
         },
       })
 
-      // Navigate to matrix view
       router.push('/builder/matrix?group=' + groupId)
     } catch {
       setGenerateError('Network error — please retry.')
@@ -216,44 +167,35 @@ export default function ScreenPage() {
     }
   }
 
-  // ── Retry screening (Req 13.1) ──────────────────────────────────────────
   function handleRetry() {
     setStatus('idle')
-    setLocalScreeningResult(null)
-    setDominantMarket(null)
+    setLocalResult(null)
     setScreenError(null)
     setGenerateError(null)
   }
 
-  // ─── Render ──────────────────────────────────────────────────────────────
-
-  const isScreening = status === 'screening'
+  const isScreening  = status === 'screening'
   const isGenerating = status === 'generating'
 
   return (
     <main className="mx-auto max-w-3xl px-4 py-8 sm:px-6 lg:px-8">
 
-      {/* Page title */}
       <h1 className="mb-6 text-2xl font-bold text-zinc-900 dark:text-zinc-100">
-        Screen Fixtures
+        Find Session Fixtures
       </h1>
 
-      {/* ── Screening form ─────────────────────────────────────────────── */}
+      {/* ── Form ──────────────────────────────────────────────────────── */}
       <section
         aria-label="Screening form"
         className="flex flex-col gap-5 rounded-2xl border border-zinc-200 bg-white p-6 shadow-sm dark:border-zinc-700 dark:bg-zinc-900"
       >
-        {/* Bookmaker selector */}
         <BookmakerSelector
           value={bookmaker}
           onChange={setBookmaker}
           showError={showBookmakerError}
         />
-
-        {/* Date range picker */}
         <DateRangePicker onChange={handleDateChange} />
 
-        {/* Screen button */}
         <Button
           variant="primary"
           size="md"
@@ -261,135 +203,81 @@ export default function ScreenPage() {
           disabled={isScreening || isGenerating}
           onClick={handleScreen}
         >
-          {isScreening ? 'Searching…' : 'Find Qualifying Games'}
+          {isScreening ? 'Fetching fixtures…' : 'Find Games'}
         </Button>
 
-        {/* Screen-level error (Req 13.1) */}
         {screenError && (
-          <div
-            role="alert"
-            className="flex flex-col gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400"
-          >
+          <div role="alert" className="flex flex-col gap-2 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400">
             <p>{screenError}</p>
-            <Button variant="secondary" size="sm" onClick={handleRetry}>
-              Retry Screening
-            </Button>
+            <Button variant="secondary" size="sm" onClick={handleRetry}>Retry</Button>
           </div>
         )}
       </section>
 
-      {/* ── Generate error banner (Req 13.2) ───────────────────────────── */}
+      {/* ── Generate error ─────────────────────────────────────────────── */}
       {generateError && (
-        <div
-          role="alert"
-          className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400"
-        >
+        <div role="alert" className="mt-4 rounded-lg border border-red-200 bg-red-50 px-4 py-3 text-sm text-red-700 dark:border-red-800 dark:bg-red-950/30 dark:text-red-400">
           {generateError}
         </div>
       )}
 
-      {/* ── Results area ───────────────────────────────────────────────── */}
+      {/* ── Results ───────────────────────────────────────────────────── */}
       {screeningResult && (
         <div className="mt-8 flex flex-col gap-6">
 
-          {/* ── Insufficient fixtures (Req 3.5, Req 13.5) ──────────────── */}
-          {(status === 'screened_insufficient' || status === 'screened_ready' || status === 'generating') && (
-            <>
-              {/* Zero qualifying / all fixtures claimed — Req 13.5 */}
-              {screeningResult.unclaimedQualifying === 0 && (
-                <div
-                  role="alert"
-                  className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 text-sm text-amber-800 dark:border-amber-800 dark:bg-amber-950/30 dark:text-amber-400"
-                >
-                  <p className="font-semibold">No qualifying fixtures available</p>
-                  <p className="mt-1">
-                    All qualifying fixtures for this date range are currently claimed by
-                    other active session groups. Please wait for an active group to be
-                    flushed, or widen your date range and retry.
-                  </p>
-                </div>
-              )}
-
-              {/* Fewer than 8 — show count + exclusion reasons (Req 3.5) */}
-              {screeningResult.unclaimedQualifying > 0 &&
-               screeningResult.unclaimedQualifying < 8 && (
-                <div
-                  role="alert"
-                  className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30"
-                >
-                  <p className="text-sm font-semibold text-amber-800 dark:text-amber-400">
-                    Only {screeningResult.unclaimedQualifying} of 8 qualifying fixtures found
-                  </p>
-                  <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-amber-700 dark:text-amber-500">
-                    <li>
-                      {screeningResult.screenedCount} fixture
-                      {screeningResult.screenedCount !== 1 ? 's' : ''} screened
-                    </li>
-                    <li>
-                      {screeningResult.qualifyingCount} passed all gates
-                    </li>
-                    {screeningResult.excludedFixtureIds.length > 0 && (
-                      <li>
-                        {screeningResult.excludedFixtureIds.length} fixture
-                        {screeningResult.excludedFixtureIds.length !== 1 ? 's' : ''}{' '}
-                        excluded — claimed by other active groups
-                      </li>
-                    )}
-                  </ul>
-                  <p className="mt-2 text-xs text-amber-600 dark:text-amber-500">
-                    8 unclaimed qualifying fixtures are required. "Confirm &amp; Generate"
-                    is disabled until this threshold is met.
-                  </p>
-                </div>
-              )}
-            </>
+          {/* Insufficient fixtures notice */}
+          {status === 'screened_insufficient' && (
+            <div role="alert" className="rounded-lg border border-amber-200 bg-amber-50 px-4 py-3 dark:border-amber-800 dark:bg-amber-950/30">
+              <p className="text-sm font-semibold text-amber-800 dark:text-amber-400">
+                Only {screeningResult.unclaimedQualifying} of 8 fixtures available
+              </p>
+              <ul className="mt-2 list-inside list-disc space-y-1 text-sm text-amber-700 dark:text-amber-500">
+                <li>{screeningResult.screenedCount} fixture{screeningResult.screenedCount !== 1 ? 's' : ''} found with odds</li>
+                {screeningResult.excludedFixtureIds.length > 0 && (
+                  <li>{screeningResult.excludedFixtureIds.length} excluded — claimed by other active groups</li>
+                )}
+              </ul>
+              <p className="mt-2 text-xs text-amber-600 dark:text-amber-500">
+                8 fixtures are required. Try widening your date range or selecting a different bookmaker.
+              </p>
+            </div>
           )}
 
-          {/* ── Confirmation panel (when ≥ 8 unclaimed) — Req 3.6, 3.7 ── */}
-          {screeningResult.unclaimedQualifying >= 8 &&
-           (status === 'screened_ready' || status === 'generating') && (
+          {/* Confirmation panel — shown when 8 fixtures ready */}
+          {(status === 'screened_ready' || status === 'generating') && (
             <ConfirmationPanel
               qualifying={screeningResult.qualifyingFixtures.slice(0, 8)}
-              dominantMarket={dominantMarket}
+              dominantMarket={null}
               onConfirm={handleGenerate}
               loading={isGenerating}
               disabled={false}
             />
           )}
 
-          {/* ── All screened fixtures gate-result cards — Req 1.5, 3.1 ── */}
+          {/* All profiled fixtures */}
           {screeningResult.allFixtures.length > 0 && (
-            <section aria-label="Screened fixtures">
+            <section aria-label="All profiled fixtures">
               <h2 className="mb-3 text-base font-semibold text-zinc-700 dark:text-zinc-300">
-                All Screened Fixtures
+                All Fixtures Found
                 <span className="ml-2 text-sm font-normal text-zinc-400">
-                  ({screeningResult.allFixtures.length} found)
+                  ({screeningResult.allFixtures.length} with odds)
                 </span>
               </h2>
               <ul className="flex flex-col gap-3">
-                {screeningResult.allFixtures.map((fwg) => (
-                  <li key={fwg.fixture.id}>
-                    <GateResultCard
-                      fixture={fwg.fixture}
-                      gateResult={fwg.gateResult}
-                    />
+                {screeningResult.allFixtures.map((profiled: ProfiledFixture) => (
+                  <li key={profiled.fixture.id}>
+                    <GateResultCard profiled={profiled} />
                   </li>
                 ))}
               </ul>
             </section>
           )}
 
-          {/* ── Retry screening button (Req 13.1) ───────────────────────── */}
-          {(status === 'screened_insufficient' ||
-            status === 'screened_ready') && (
+          {/* Retry button */}
+          {(status === 'screened_insufficient' || status === 'screened_ready') && (
             <div className="flex justify-start">
-              <Button
-                variant="secondary"
-                size="sm"
-                onClick={handleRetry}
-                disabled={isGenerating}
-              >
-                ↺ Retry Screening
+              <Button variant="secondary" size="sm" onClick={handleRetry} disabled={isGenerating}>
+                ↺ Search Again
               </Button>
             </div>
           )}

@@ -274,21 +274,20 @@ describe('Integration: POST /api/screen → POST /api/generate (v2)', () => {
     expect(typeof screenBody.groupId).toBe('string')
     expect(screenBody.groupId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i)
 
-    // All 10 fixtures pass the gates, top-8 are returned
-    // Requirements 3.1: screening selects top-8 qualifying fixtures
+    // v3: all fixtures are profiled (no rejection), top-8 are returned
     expect(Array.isArray(screenBody.qualifyingFixtures)).toBe(true)
     expect(screenBody.qualifyingFixtures.length).toBe(8)
 
-    // All returned fixtures must be qualified
-    for (const fwg of screenBody.qualifyingFixtures) {
-      expect(fwg.gateResult.qualified).toBe(true)
+    // All returned fixtures must have a valid profile (not a gateResult)
+    for (const profiled of screenBody.qualifyingFixtures) {
+      expect(['GOAL_CERTAIN', 'BALANCED', 'DEFENSIVE']).toContain(profiled.profile)
     }
 
     const { groupId, qualifyingFixtures } = screenBody as {
       groupId: string
-      qualifyingFixtures: Array<{ fixture: (typeof TEST_FIXTURES)[0]; gateResult: unknown }>
+      qualifyingFixtures: Array<{ fixture: (typeof TEST_FIXTURES)[0]; profile: string }>
     }
-    const top8Fixtures = qualifyingFixtures.map((fwg) => fwg.fixture)
+    const top8Fixtures = qualifyingFixtures.map((p) => p.fixture)
 
     // ── Step 2: POST /api/generate (v2 body) ───────────────────────────────
     const BANKROLL = 10000
@@ -306,17 +305,19 @@ describe('Integration: POST /api/screen → POST /api/generate (v2)', () => {
 
     const genBody = await generateRes.json()
 
-    // Requirements 7.1: 42 slips are generated
+    // Requirements 7.1: 56 slips are generated (v3.1: 30 CORE + 8 PIVOT + 14 BRIDGE + 4 CHAOS)
     expect(Array.isArray(genBody.slips)).toBe(true)
-    expect(genBody.slips.length).toBe(42)
+    expect(genBody.slips.length).toBe(56)
 
-    // Requirements 7.2: tier distribution must be CORE=30, PIVOT=8, CHAOS=4
-    const coreSlips  = genBody.slips.filter((s: { tier: string }) => s.tier === 'CORE')
-    const pivotSlips = genBody.slips.filter((s: { tier: string }) => s.tier === 'PIVOT')
-    const chaosSlips = genBody.slips.filter((s: { tier: string }) => s.tier === 'CHAOS')
+    // Requirements 7.2: tier distribution 30/8/14/4
+    const coreSlips   = genBody.slips.filter((s: { tier: string }) => s.tier === 'CORE')
+    const pivotSlips  = genBody.slips.filter((s: { tier: string }) => s.tier === 'PIVOT')
+    const bridgeSlips = genBody.slips.filter((s: { tier: string }) => s.tier === 'BRIDGE')
+    const chaosSlips  = genBody.slips.filter((s: { tier: string }) => s.tier === 'CHAOS')
 
     expect(coreSlips.length).toBe(30)
     expect(pivotSlips.length).toBe(8)
+    expect(bridgeSlips.length).toBe(14)
     expect(chaosSlips.length).toBe(4)
 
     // Requirements 4.6: dominantMarket must be detected and present

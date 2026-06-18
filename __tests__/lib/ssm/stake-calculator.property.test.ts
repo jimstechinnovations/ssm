@@ -1,14 +1,16 @@
 /**
  * Property-based tests for lib/ssm/stake-calculator.ts
  *
- * Property 4: Stake allocation preserves the full bankroll
+ * v3.1: Four tiers — CORE (60%), PIVOT (14%), BRIDGE (14%), CHAOS (6%), Buffer (6%)
+ * 56 slips total. Minimum bankroll ₦10,000.
  *
+ * Property 4: Stake allocation preserves the full bankroll
  * Validates: Requirements 5.2, 5.7
  */
 
 import { describe, it, expect } from 'vitest'
 import * as fc from 'fast-check'
-import { calculateStakes, minBankroll } from '../../../lib/ssm/stake-calculator'
+import { calculateStakes, minBankroll, MIN_STAKE_PER_SLIP } from '../../../lib/ssm/stake-calculator'
 
 // ─── Unit tests ───────────────────────────────────────────────────────────────
 
@@ -16,10 +18,17 @@ describe('calculateStakes — unit tests', () => {
   it('works correctly at the ₦10,000 default', () => {
     const result = calculateStakes(10_000)
     expect(result.bankroll).toBe(10_000)
-    expect(result.coreStakePerSlip).toBe(246)   // floor(10000 * 0.74 / 30)
-    expect(result.pivotStakePerSlip).toBe(200)   // floor(10000 * 0.16 / 8)
-    expect(result.chaosStakePerSlip).toBe(100)   // floor(10000 * 0.04 / 4)
-    expect(result.buffer).toBe(620)              // 10000 - (246*30 + 200*8 + 100*4)
+    // Core:   floor(10000 * 0.60 / 30) = floor(200.00) = 200
+    expect(result.coreStakePerSlip).toBe(200)
+    // Pivot:  floor(10000 * 0.14 / 8)  = floor(175.00) = 175
+    expect(result.pivotStakePerSlip).toBe(175)
+    // Bridge: floor(10000 * 0.14 / 14) = floor(100.00) = 100
+    expect(result.bridgeStakePerSlip).toBe(100)
+    // Chaos:  floor(10000 * 0.06 / 4)  = floor(150.00) = 150
+    expect(result.chaosStakePerSlip).toBe(150)
+    // Buffer: 10000 - (200×30 + 175×8 + 100×14 + 150×4)
+    //       = 10000 - (6000 + 1400 + 1400 + 600) = 10000 - 9400 = 600
+    expect(result.buffer).toBe(600)
     expect(result.total).toBe(10_000)
   })
 
@@ -27,10 +36,12 @@ describe('calculateStakes — unit tests', () => {
     const result = calculateStakes(10_000)
     expect(Number.isInteger(result.coreStakePerSlip)).toBe(true)
     expect(Number.isInteger(result.pivotStakePerSlip)).toBe(true)
+    expect(Number.isInteger(result.bridgeStakePerSlip)).toBe(true)
     expect(Number.isInteger(result.chaosStakePerSlip)).toBe(true)
-    expect(result.coreStakePerSlip).toBeGreaterThan(0)
-    expect(result.pivotStakePerSlip).toBeGreaterThan(0)
-    expect(result.chaosStakePerSlip).toBeGreaterThan(0)
+    expect(result.coreStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
+    expect(result.pivotStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
+    expect(result.bridgeStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
+    expect(result.chaosStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
   })
 
   it('buffer is non-negative at ₦10,000', () => {
@@ -39,7 +50,11 @@ describe('calculateStakes — unit tests', () => {
 
   it('staked + buffer exactly equals bankroll at ₦10,000', () => {
     const r = calculateStakes(10_000)
-    const staked = r.coreStakePerSlip * 30 + r.pivotStakePerSlip * 8 + r.chaosStakePerSlip * 4
+    const staked =
+      r.coreStakePerSlip   * 30 +
+      r.pivotStakePerSlip  *  8 +
+      r.bridgeStakePerSlip * 14 +
+      r.chaosStakePerSlip  *  4
     expect(staked + r.buffer).toBe(10_000)
   })
 
@@ -51,61 +66,65 @@ describe('calculateStakes — unit tests', () => {
     expect(() => calculateStakes(-500)).toThrow()
   })
 
-  it('throws when bankroll is too small (< minBankroll)', () => {
+  it('throws when bankroll is below minBankroll()', () => {
     expect(() => calculateStakes(minBankroll() - 1)).toThrow()
   })
 
-  it('succeeds at exactly minBankroll()', () => {
+  it('succeeds at exactly minBankroll() = ₦10,000', () => {
     const min = minBankroll()
+    expect(min).toBe(10_000)
     const result = calculateStakes(min)
-    expect(result.coreStakePerSlip).toBeGreaterThan(0)
-    expect(result.pivotStakePerSlip).toBeGreaterThan(0)
-    expect(result.chaosStakePerSlip).toBeGreaterThan(0)
+    expect(result.coreStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
+    expect(result.pivotStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
+    expect(result.bridgeStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
+    expect(result.chaosStakePerSlip).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
   })
 
   it('scales correctly with a larger bankroll', () => {
     const result = calculateStakes(100_000)
-    expect(result.coreStakePerSlip).toBe(Math.floor(100_000 * 0.74 / 30))
-    expect(result.pivotStakePerSlip).toBe(Math.floor(100_000 * 0.16 / 8))
-    expect(result.chaosStakePerSlip).toBe(Math.floor(100_000 * 0.04 / 4))
+    expect(result.coreStakePerSlip).toBe(Math.floor(100_000 * 0.60 / 30))
+    expect(result.pivotStakePerSlip).toBe(Math.floor(100_000 * 0.14 / 8))
+    expect(result.bridgeStakePerSlip).toBe(Math.floor(100_000 * 0.14 / 14))
+    expect(result.chaosStakePerSlip).toBe(Math.floor(100_000 * 0.06 / 4))
   })
 })
 
-// ─── Property 4: Budget identity ─────────────────────────────────────────────
+// ─── Property 4: Budget identity (v3.1 — 4 tiers, 56 slips) ─────────────────
 
 /**
- * Validates: Requirements 5.2, 5.7
- *
  * For any bankroll >= minBankroll():
- * coreStake×30 + pivotStake×8 + chaosStake×4 + buffer = bankroll
- * All per-slip stakes are positive integers; buffer is non-negative.
+ *   coreStake×30 + pivotStake×8 + bridgeStake×14 + chaosStake×4 + buffer = bankroll
+ *   All per-slip stakes are positive integers >= ₦100; buffer >= 0.
+ *
+ * Validates: Requirements 5.2, 5.7
  */
 describe('Property 4: Stake allocation preserves the full bankroll', () => {
   const min = minBankroll()
-
   const bankrollArb = fc.integer({ min, max: 10_000_000 })
 
-  it('coreStake×30 + pivotStake×8 + chaosStake×4 + buffer === bankroll', () => {
+  it('coreStake×30 + pivotStake×8 + bridgeStake×14 + chaosStake×4 + buffer === bankroll', () => {
     fc.assert(
       fc.property(bankrollArb, (bankroll) => {
         const r = calculateStakes(bankroll)
-        const staked = r.coreStakePerSlip * 30 + r.pivotStakePerSlip * 8 + r.chaosStakePerSlip * 4
+        const staked =
+          r.coreStakePerSlip   * 30 +
+          r.pivotStakePerSlip  *  8 +
+          r.bridgeStakePerSlip * 14 +
+          r.chaosStakePerSlip  *  4
         expect(staked + r.buffer).toBe(bankroll)
       }),
       { numRuns: 1000 },
     )
   })
 
-  it('all per-slip stakes are positive integers', () => {
+  it('all per-slip stakes are integers >= ₦100 (Nigerian bookmaker minimum)', () => {
     fc.assert(
       fc.property(bankrollArb, (bankroll) => {
         const r = calculateStakes(bankroll)
-        expect(Number.isInteger(r.coreStakePerSlip)).toBe(true)
-        expect(Number.isInteger(r.pivotStakePerSlip)).toBe(true)
-        expect(Number.isInteger(r.chaosStakePerSlip)).toBe(true)
-        expect(r.coreStakePerSlip).toBeGreaterThan(0)
-        expect(r.pivotStakePerSlip).toBeGreaterThan(0)
-        expect(r.chaosStakePerSlip).toBeGreaterThan(0)
+        for (const stake of [r.coreStakePerSlip, r.pivotStakePerSlip, r.bridgeStakePerSlip, r.chaosStakePerSlip]) {
+          expect(Number.isInteger(stake)).toBe(true)
+          expect(stake).toBeGreaterThanOrEqual(MIN_STAKE_PER_SLIP)
+        }
       }),
       { numRuns: 1000 },
     )
@@ -114,8 +133,7 @@ describe('Property 4: Stake allocation preserves the full bankroll', () => {
   it('buffer is always non-negative', () => {
     fc.assert(
       fc.property(bankrollArb, (bankroll) => {
-        const r = calculateStakes(bankroll)
-        expect(r.buffer).toBeGreaterThanOrEqual(0)
+        expect(calculateStakes(bankroll).buffer).toBeGreaterThanOrEqual(0)
       }),
       { numRuns: 1000 },
     )
@@ -124,20 +142,7 @@ describe('Property 4: Stake allocation preserves the full bankroll', () => {
   it('total field always equals bankroll', () => {
     fc.assert(
       fc.property(bankrollArb, (bankroll) => {
-        const r = calculateStakes(bankroll)
-        expect(r.total).toBe(bankroll)
-      }),
-      { numRuns: 1000 },
-    )
-  })
-
-  it('floor is applied — all per-slip stakes are integers (not decimals)', () => {
-    fc.assert(
-      fc.property(bankrollArb, (bankroll) => {
-        const r = calculateStakes(bankroll)
-        expect(r.coreStakePerSlip % 1).toBe(0)
-        expect(r.pivotStakePerSlip % 1).toBe(0)
-        expect(r.chaosStakePerSlip % 1).toBe(0)
+        expect(calculateStakes(bankroll).total).toBe(bankroll)
       }),
       { numRuns: 1000 },
     )

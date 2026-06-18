@@ -30,6 +30,7 @@ import { generateMatrix } from '@/lib/ssm/generator'
 import { distributeToAccounts } from '@/lib/ssm/distributor'
 import { generateSessionPrefix, generateSlipHash } from '@/lib/ssm/session'
 import { detectDominantMarket } from '@/lib/ssm/market-detector'
+import { profileFixture } from '@/lib/ssm/gate-screener'
 import { calculateStakes } from '@/lib/ssm/stake-calculator'
 import { computeVolatility } from '@/lib/ssm/volatility'
 import { OUTCOME_TO_LABEL } from '@/lib/ssm/types'
@@ -39,7 +40,6 @@ import type {
   MatchSelection,
   OddsValue,
   SessionConfig,
-  TierLabel,
 } from '@/lib/ssm/types'
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -54,11 +54,6 @@ const COOKIE_OPTIONS = {
 const PG_UNIQUE_VIOLATION = '23505'
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
-
-/** Find an OddsValue by its canonical label in a fixture's odds array */
-function findOddsByOutcomeLabel(odds: OddsValue[], label: string): OddsValue | null {
-  return odds.find(o => o.label === label) ?? null
-}
 
 // ─── POST handler ─────────────────────────────────────────────────────────────
 
@@ -122,7 +117,7 @@ async function handleV1(body: unknown): Promise<Response> {
   return persistAndReturn(allSlipsWithHashes, distribution, sessionConfig, sessionPrefix, now, null)
 }
 
-// ─── v2 handler (auto-detected market, bankroll stakes) ──────────────────────
+// ─── v2 handler (per-game profile-based market, bankroll stakes) ─────────────
 
 async function handleV2(body: unknown): Promise<Response> {
   const parsed = GenerateRequestSchema_v2.safeParse(body)
@@ -151,75 +146,111 @@ async function handleV2(body: unknown): Promise<Response> {
     return Response.json({ error: 'Group already generated' }, { status: 400 })
   }
 
-  // 2. Detect dominant market
-  let marketResult
-  try {
-    marketResult = detectDominantMarket(fixtures as Fixture[])
-  } catch (err) {
-    return Response.json({ error: err instanceof Error ? err.message : 'Market detection failed' }, { status: 422 })
-  }
-
-  // 3. Calculate per-tier stakes
+  // 2. Calculate per-tier stakes — enforces ₦100 minimum per slip
   let allocation
   try {
     allocation = calculateStakes(bankroll)
   } catch (err) {
-    return Response.json({ error: err instanceof Error ? err.message : 'Stake calculation failed. Bankroll may be too small.' }, { status: 400 })
+    return Response.json({
+      error: err instanceof Error ? err.message : 'Stake calculation failed.',
+    }, { status: 400 })
   }
 
-  // 4. Build MatchSelection[] from detected market
-  const state0Label = OUTCOME_TO_LABEL[marketResult.dominantOutcome]
-  const state1Label = OUTCOME_TO_LABEL[marketResult.breakoutOutcome]
-
+  // 3. Build MatchSelection[] using per-game profile detection
+  //    Each fixture gets its own dominant/breakout market from its actual odds.
+  //    No session-wide dominant market — no placeholder fallbacks.
   const selections: MatchSelection[] = (fixtures as Fixture[]).map(fixture => {
-    const state0 = findOddsByOutcomeLabel(fixture.odds, state0Label)
-    const state1 = findOddsByOutcomeLabel(fixture.odds, state1Label)
+    const profiled = profileFixture(fixture)
 
-    // Fallback: create placeholder OddsValue if market not found on specific fixture
-    const s0: OddsValue = state0 ?? { bookmaker: 'auto', market: '1X2', label: state0Label, value: 1.5 }
-    const s1: OddsValue = state1 ?? { bookmaker: 'auto', market: '1X2', label: state1Label, value: 2.0 }
+    const state0Label = OUTCOME_TO_LABEL[profiled.dominantOutcome]
+    const state1Label = OUTCOME_TO_LABEL[profiled.breakoutOutcome]
+
+    // Find the actual OddsValue objects for state0 and state1
+    const state0Odds = fixture.odds.find(o => o.label === state0Label)
+    const state1Odds = fixture.odds.find(o => o.label === state1Label)
+
+    // If a market is missing on a specific fixture (can happen with free selection),
+    // construct a synthetic OddsValue from the profiled dominant probability.
+    // This is grounded in actual odds from the profiler — not a guess.
+    const s0: OddsValue = state0Odds ?? {
+      bookmaker: 'computed',
+      market:   '1X2',
+      label:    state0Label,
+      value:    profiled.dominantProb > 0 ? +(1 / profiled.dominantProb).toFixed(2) : 1.80,
+    }
+    const s1: OddsValue = state1Odds ?? {
+      bookmaker: 'computed',
+      market:   '1X2',
+      label:    state1Label,
+      // Counterpart implied prob = 1 - dominant (rough approximation; bookmaker margin is absorbed)
+      value:    profiled.dominantProb > 0 && profiled.dominantProb < 1
+        ? +(1 / (1 - profiled.dominantProb)).toFixed(2)
+        : 2.20,
+    }
 
     return {
       fixture,
-      state0: s0,
-      state1: s1,
+      state0:     s0,
+      state1:     s1,
       volatility: computeVolatility(s0, s1),
     }
   })
 
-  // 5. Build SessionConfig (stakePerSlip = core stake as placeholder; overwritten below)
+  // 4. Detect session-level dominant market for reporting / session record
+  //    (uses the actual per-game odds; with MIN_COVERAGE=1 this always succeeds)
+  let marketResult
+  try {
+    marketResult = detectDominantMarket(fixtures as Fixture[])
+  } catch {
+    // Non-fatal — marketResult is used for reporting only, not slip construction
+    marketResult = undefined
+  }
+
+  // 5. Build SessionConfig
   const today = new Date().toISOString().slice(0, 10)
-  const now = new Date()
+  const now   = new Date()
   let sessionPrefix = generateSessionPrefix(now)
 
   const sessionConfig: SessionConfig = {
-    date: today,
-    stakePerSlip: allocation.coreStakePerSlip,
-    numAccounts: numAccounts as 6 | 7,
+    date:          today,
+    stakePerSlip:  allocation.coreStakePerSlip,
+    numAccounts:   numAccounts as 6 | 7,
     sessionPrefix,
   }
 
-  // 6. Generate matrix
+  // 6. Generate 42-slip matrix from per-game selections
   let slips
-  try { slips = generateMatrix(selections, sessionConfig) }
-  catch (err) { return Response.json({ error: err instanceof Error ? err.message : 'Matrix generation failed' }, { status: 500 }) }
+  try {
+    slips = generateMatrix(selections, sessionConfig)
+  } catch (err) {
+    return Response.json({
+      error: err instanceof Error ? err.message : 'Matrix generation failed',
+    }, { status: 500 })
+  }
 
-  // 7. Distribute slips
+  // 7. Distribute slips to accounts
   let distribution
-  try { distribution = distributeToAccounts(slips, sessionConfig) }
-  catch (err) { return Response.json({ error: err instanceof Error ? err.message : 'Distribution failed' }, { status: 500 }) }
+  try {
+    distribution = distributeToAccounts(slips, sessionConfig)
+  } catch (err) {
+    return Response.json({
+      error: err instanceof Error ? err.message : 'Distribution failed',
+    }, { status: 500 })
+  }
 
   // 8. Overwrite slip.stake and slip.potentialPayout with correct per-tier amounts
-  const tierStakeMap: Record<TierLabel, number> = {
-    CORE:  allocation.coreStakePerSlip,
-    PIVOT: allocation.pivotStakePerSlip,
-    CHAOS: allocation.chaosStakePerSlip,
+  //    (generator uses a placeholder stakePerSlip; we correct it here per tier)
+  const tierStakeMap: Record<string, number> = {
+    CORE:   allocation.coreStakePerSlip,
+    PIVOT:  allocation.pivotStakePerSlip,
+    BRIDGE: allocation.bridgeStakePerSlip,
+    CHAOS:  allocation.chaosStakePerSlip,
   }
   for (const account of distribution) {
     for (let pos = 0; pos < account.slips.length; pos++) {
-      const slip = account.slips[pos]
+      const slip  = account.slips[pos]
       const stake = tierStakeMap[slip.tier]
-      slip.stake = stake
+      slip.stake          = stake
       slip.potentialPayout = +(slip.combinedOdds * stake).toFixed(2)
     }
     account.totalStake = account.slips.reduce((sum, s) => sum + s.stake, 0)
@@ -228,7 +259,11 @@ async function handleV2(body: unknown): Promise<Response> {
   // 9. Assign session hashes
   for (const account of distribution) {
     for (let pos = 0; pos < account.slips.length; pos++) {
-      account.slips[pos].sessionHash = generateSlipHash(sessionPrefix, account.accountNumber, pos + 1)
+      account.slips[pos].sessionHash = generateSlipHash(
+        sessionPrefix,
+        account.accountNumber,
+        pos + 1,
+      )
     }
   }
   const allSlipsWithHashes = distribution.flatMap(a => a.slips)

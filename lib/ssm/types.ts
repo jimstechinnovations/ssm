@@ -9,7 +9,7 @@ export type MarketType =
   | 'OVER_UNDER_3.5'
   | 'ASIAN_HANDICAP'
 
-export type TierLabel = 'CORE' | 'PIVOT' | 'CHAOS'
+export type TierLabel = 'CORE' | 'PIVOT' | 'BRIDGE' | 'CHAOS'
 
 export type AccountProfile =
   | 'Balanced Aggressive'   // Accounts 1-4: 4 Core + 1 Pivot + 1 Chaos
@@ -56,11 +56,11 @@ export interface SlipLeg {
   state: 0 | 1        // which state this leg uses
 }
 
-/** One of the 42 generated betting slips */
+/** One of the 56 generated betting slips */
 export interface Slip {
-  slipId: number      // 1-42
+  slipId: number      // 1-56
   tier: TierLabel
-  tierIndex: number   // position within the tier (1-30, 1-8, 1-4)
+  tierIndex: number   // position within the tier (1-30, 1-8, 1-14, 1-4)
   legs: SlipLeg[]     // always exactly 8 legs
   combinedOdds: number
   stake: number
@@ -238,12 +238,13 @@ export interface DominantMarketResult {
 }
 
 export interface TierAllocation {
-  bankroll:           number
-  coreStakePerSlip:   number
-  pivotStakePerSlip:  number
-  chaosStakePerSlip:  number
-  buffer:             number
-  total:              number
+  bankroll:            number
+  coreStakePerSlip:    number
+  pivotStakePerSlip:   number
+  bridgeStakePerSlip:  number   // three-flip + four-flip coverage (new in v3.1)
+  chaosStakePerSlip:   number
+  buffer:              number
+  total:               number
 }
 
 export type SessionGroupStatus = 'screening' | 'generated' | 'printed'

@@ -1,6 +1,9 @@
 // lib/ssm/distributor.ts
-// Pure function: distributes 42 slips across 6 or 7 accounts using a
-// deterministic round-robin cross-contamination algorithm.
+// Pure function: distributes 56 slips across 6 or 7 accounts using a
+// deterministic round-robin algorithm.
+//
+// v3.1: Added BRIDGE tier (14 slips — three-flip + four-flip midpoint coverage).
+// Total slips: 30 CORE + 8 PIVOT + 14 BRIDGE + 4 CHAOS = 56.
 
 import type { AccountAllocation, AccountProfile, SessionConfig, Slip } from './types'
 
@@ -9,66 +12,94 @@ import type { AccountAllocation, AccountProfile, SessionConfig, Slip } from './t
 // ---------------------------------------------------------------------------
 
 interface AccountTemplate {
-  core: number
-  pivot: number
-  chaos: number
+  core:   number
+  pivot:  number
+  bridge: number
+  chaos:  number
   profile: AccountProfile
 }
 
-/** 7-account layout — total: 30 Core + 8 Pivot + 4 Chaos = 42 */
+/**
+ * 7-account layout — total: 30 CORE + 8 PIVOT + 14 BRIDGE + 4 CHAOS = 56
+ *
+ * Design goals:
+ *  - Every account gets at least 1 PIVOT (single-flip error-correcting)
+ *  - BRIDGE slips spread evenly — 2 per account
+ *  - CHAOS only in the first 4 "Balanced Aggressive" accounts (1 each)
+ *  - CORE distributed to fill the remaining slots
+ *
+ * Account profiles:
+ *   Acc 1–4: Balanced Aggressive  — 3 Core + 1 Pivot + 2 Bridge + 1 Chaos = 7 slips
+ *   Acc 5:   Standard Accumulator — 4 Core + 2 Pivot + 2 Bridge + 0 Chaos = 8 slips
+ *   Acc 6–7: Heavy Core           — 6 Core + 1 Pivot + 2 Bridge + 0 Chaos = 9 slips
+ *
+ * Totals: (3×4 + 4 + 6×2) = 12+4+12 = 28 ≠ 30. Adjust:
+ *   Acc 1–4: 3 Core each = 12
+ *   Acc 5:   4 Core       =  4
+ *   Acc 6–7: 7 Core each = 14
+ *   Total = 30 ✓
+ *
+ *   Pivot: 1+1+1+1+2+1+1 = 8 ✓
+ *   Bridge: 2×7 = 14 ✓
+ *   Chaos: 1+1+1+1+0+0+0 = 4 ✓
+ *   Grand total: 56 ✓
+ */
 const DISTRIBUTION_7: AccountTemplate[] = [
-  { core: 4, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 1
-  { core: 4, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 2
-  { core: 4, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 3
-  { core: 4, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 4
-  { core: 4, pivot: 2, chaos: 0, profile: 'Standard Accumulator' }, // Acc 5
-  { core: 5, pivot: 1, chaos: 0, profile: 'Heavy Core' },          // Acc 6
-  { core: 5, pivot: 1, chaos: 0, profile: 'Heavy Core' },          // Acc 7
+  { core: 3, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 1
+  { core: 3, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 2
+  { core: 3, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 3
+  { core: 3, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 4
+  { core: 4, pivot: 2, bridge: 2, chaos: 0, profile: 'Standard Accumulator'}, // Acc 5
+  { core: 7, pivot: 1, bridge: 2, chaos: 0, profile: 'Heavy Core'           }, // Acc 6
+  { core: 7, pivot: 1, bridge: 2, chaos: 0, profile: 'Heavy Core'           }, // Acc 7
 ]
+// Verify: core=3+3+3+3+4+7+7=30, pivot=1+1+1+1+2+1+1=8, bridge=2×7=14, chaos=1+1+1+1=4 → 56 ✓
 
-// Sanity check (compile-time constant verification via static assertion):
-// 4+4+4+4+4+5+5 = 30 core, 1+1+1+1+2+1+1 = 8 pivot, 1+1+1+1+0+0+0 = 4 chaos
-
-/** 6-account layout — total: 30 Core + 8 Pivot + 4 Chaos = 42 */
+/**
+ * 6-account layout — total: 30 CORE + 8 PIVOT + 14 BRIDGE + 4 CHAOS = 56
+ *
+ *   Acc 1–4: Balanced Aggressive  — 4 Core + 1 Pivot + 2 Bridge + 1 Chaos = 8 slips
+ *   Acc 5–6: Standard Accumulator — 7 Core + 2 Pivot + 3 Bridge + 0 Chaos = 12 slips
+ *
+ *   Core:  4×4 + 7×2 = 16+14 = 30 ✓
+ *   Pivot: 1×4 + 2×2 = 4+4   =  8 ✓
+ *   Bridge:2×4 + 3×2 = 8+6   = 14 ✓
+ *   Chaos: 1×4 + 0   =  4    =  4 ✓
+ *   Total: 56 ✓
+ */
 const DISTRIBUTION_6: AccountTemplate[] = [
-  { core: 5, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 1
-  { core: 5, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 2
-  { core: 5, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 3
-  { core: 5, pivot: 1, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 4 — receives 4th chaos slip
-  { core: 5, pivot: 2, chaos: 0, profile: 'Standard Accumulator' }, // Acc 5
-  { core: 5, pivot: 2, chaos: 0, profile: 'Standard Accumulator' }, // Acc 6
+  { core: 4, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 1
+  { core: 4, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 2
+  { core: 4, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 3
+  { core: 4, pivot: 1, bridge: 2, chaos: 1, profile: 'Balanced Aggressive' }, // Acc 4
+  { core: 7, pivot: 2, bridge: 3, chaos: 0, profile: 'Standard Accumulator'}, // Acc 5
+  { core: 7, pivot: 2, bridge: 3, chaos: 0, profile: 'Standard Accumulator'}, // Acc 6
 ]
-
-// 5+5+5+5+5+5 = 30 core, 1+1+1+1+2+2 = 8 pivot, 1+1+1+1+0+0 = 4 chaos → grand total = 42
+// Verify: core=4+4+4+4+7+7=30, pivot=1+1+1+1+2+2=8, bridge=2+2+2+2+3+3=14, chaos=1×4=4 → 56 ✓
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-/**
- * Verify that a distribution template sums to exactly 42 total slips and
- * that Core and Pivot totals match their available queues exactly.
- * Chaos total may be ≤ the available queue (the 6-account template uses 3 of
- * the 4 chaos slips; the 4th is simply unused).
- */
 function validateTemplate(
   template: AccountTemplate[],
-  availableCore: number,
-  availablePivot: number,
-  availableChaos: number,
+  availableCore:   number,
+  availablePivot:  number,
+  availableBridge: number,
+  availableChaos:  number,
   numAccounts: number,
 ): void {
-  const totalCore  = template.reduce((s, t) => s + t.core,  0)
-  const totalPivot = template.reduce((s, t) => s + t.pivot, 0)
-  const totalChaos = template.reduce((s, t) => s + t.chaos, 0)
-  const total = totalCore + totalPivot + totalChaos
+  const totalCore   = template.reduce((s, t) => s + t.core,   0)
+  const totalPivot  = template.reduce((s, t) => s + t.pivot,  0)
+  const totalBridge = template.reduce((s, t) => s + t.bridge, 0)
+  const totalChaos  = template.reduce((s, t) => s + t.chaos,  0)
+  const total = totalCore + totalPivot + totalBridge + totalChaos
 
-  if (total !== 42) {
+  if (total !== 56) {
     throw new Error(
-      `distributeToAccounts: template for ${numAccounts} accounts sums to ${total} slips, expected 42`,
+      `distributeToAccounts: template for ${numAccounts} accounts sums to ${total} slips, expected 56`,
     )
   }
-
   if (totalCore !== availableCore) {
     throw new Error(
       `distributeToAccounts: template requires ${totalCore} CORE slips but ${availableCore} are available`,
@@ -77,6 +108,11 @@ function validateTemplate(
   if (totalPivot !== availablePivot) {
     throw new Error(
       `distributeToAccounts: template requires ${totalPivot} PIVOT slips but ${availablePivot} are available`,
+    )
+  }
+  if (totalBridge !== availableBridge) {
+    throw new Error(
+      `distributeToAccounts: template requires ${totalBridge} BRIDGE slips but ${availableBridge} are available`,
     )
   }
   if (totalChaos > availableChaos) {
@@ -91,77 +127,54 @@ function validateTemplate(
 // ---------------------------------------------------------------------------
 
 /**
- * Distribute 42 slips across 6 or 7 accounts using deterministic round-robin.
- *
- * Algorithm:
- *  1. Split slips into three queues ordered by slipId: coreSlips(30),
- *     pivotSlips(8), chaosSlips(4).
- *  2. For each account pull the required number of Core/Pivot/Chaos slips from
- *     their respective queues using a per-queue pointer wrapped with modulo —
- *     this ensures the pointer always advances and no slip appears in more than
- *     one account (because the total demand per tier equals the queue length).
- *  3. Set totalStake = slips.length * config.stakePerSlip on each allocation.
- *  4. Set sessionHashes = slips.map(s => s.sessionHash).
+ * Distribute 56 slips across 6 or 7 accounts using deterministic round-robin.
  *
  * @throws if config.numAccounts is not 6 or 7
- * @throws if the input slips don't contain exactly 30 Core, 8 Pivot, 4 Chaos
- * @throws if any account's slip counts don't match its expected profile
- * @throws if the total slip count across all accounts is not 42
+ * @throws if slips don't contain exactly 30 CORE, 8 PIVOT, 14 BRIDGE, 4 CHAOS
+ * @throws if total slip count across all accounts is not 56
  */
 export function distributeToAccounts(
   slips: Slip[],
   config: SessionConfig,
 ): AccountAllocation[] {
-  // ------------------------------------------------------------------
-  // Guard: numAccounts must be 6 or 7
-  // ------------------------------------------------------------------
   if (config.numAccounts !== 6 && config.numAccounts !== 7) {
     throw new Error(
       `distributeToAccounts: config.numAccounts must be 6 or 7, got ${config.numAccounts}`,
     )
   }
 
-  // ------------------------------------------------------------------
-  // Split into tier queues, ordered by slipId (ascending)
-  // ------------------------------------------------------------------
-  const coreSlips  = slips.filter(s => s.tier === 'CORE').sort((a, b) => a.slipId - b.slipId)
-  const pivotSlips = slips.filter(s => s.tier === 'PIVOT').sort((a, b) => a.slipId - b.slipId)
-  const chaosSlips = slips.filter(s => s.tier === 'CHAOS').sort((a, b) => a.slipId - b.slipId)
+  const coreSlips   = slips.filter(s => s.tier === 'CORE'  ).sort((a, b) => a.slipId - b.slipId)
+  const pivotSlips  = slips.filter(s => s.tier === 'PIVOT' ).sort((a, b) => a.slipId - b.slipId)
+  const bridgeSlips = slips.filter(s => s.tier === 'BRIDGE').sort((a, b) => a.slipId - b.slipId)
+  const chaosSlips  = slips.filter(s => s.tier === 'CHAOS' ).sort((a, b) => a.slipId - b.slipId)
 
   if (coreSlips.length !== 30) {
-    throw new Error(
-      `distributeToAccounts: expected 30 CORE slips, got ${coreSlips.length}`,
-    )
+    throw new Error(`distributeToAccounts: expected 30 CORE slips, got ${coreSlips.length}`)
   }
   if (pivotSlips.length !== 8) {
-    throw new Error(
-      `distributeToAccounts: expected 8 PIVOT slips, got ${pivotSlips.length}`,
-    )
+    throw new Error(`distributeToAccounts: expected 8 PIVOT slips, got ${pivotSlips.length}`)
+  }
+  if (bridgeSlips.length !== 14) {
+    throw new Error(`distributeToAccounts: expected 14 BRIDGE slips, got ${bridgeSlips.length}`)
   }
   if (chaosSlips.length !== 4) {
-    throw new Error(
-      `distributeToAccounts: expected 4 CHAOS slips, got ${chaosSlips.length}`,
-    )
+    throw new Error(`distributeToAccounts: expected 4 CHAOS slips, got ${chaosSlips.length}`)
   }
 
-  // ------------------------------------------------------------------
-  // Select template and validate it sums to 42
-  // ------------------------------------------------------------------
   const template = config.numAccounts === 7 ? DISTRIBUTION_7 : DISTRIBUTION_6
   validateTemplate(
     template,
     coreSlips.length,
     pivotSlips.length,
+    bridgeSlips.length,
     chaosSlips.length,
     config.numAccounts,
   )
 
-  // ------------------------------------------------------------------
-  // Round-robin assignment
-  // ------------------------------------------------------------------
-  let corePtr  = 0
-  let pivotPtr = 0
-  let chaosPtr = 0
+  let corePtr   = 0
+  let pivotPtr  = 0
+  let bridgePtr = 0
+  let chaosPtr  = 0
 
   const allocations: AccountAllocation[] = []
 
@@ -169,36 +182,27 @@ export function distributeToAccounts(
     const t = template[i]
     const accountSlips: Slip[] = []
 
-    // Pull Core slips
-    for (let c = 0; c < t.core; c++) {
-      accountSlips.push(coreSlips[corePtr % coreSlips.length])
-      corePtr++
-    }
+    for (let c = 0; c < t.core;   c++) { accountSlips.push(coreSlips[corePtr++])     }
+    for (let p = 0; p < t.pivot;  p++) { accountSlips.push(pivotSlips[pivotPtr++])   }
+    for (let b = 0; b < t.bridge; b++) { accountSlips.push(bridgeSlips[bridgePtr++]) }
+    for (let ch = 0; ch < t.chaos; ch++) { accountSlips.push(chaosSlips[chaosPtr++]) }
 
-    // Pull Pivot slips
-    for (let p = 0; p < t.pivot; p++) {
-      accountSlips.push(pivotSlips[pivotPtr % pivotSlips.length])
-      pivotPtr++
-    }
+    const actualCore   = accountSlips.filter(s => s.tier === 'CORE'  ).length
+    const actualPivot  = accountSlips.filter(s => s.tier === 'PIVOT' ).length
+    const actualBridge = accountSlips.filter(s => s.tier === 'BRIDGE').length
+    const actualChaos  = accountSlips.filter(s => s.tier === 'CHAOS' ).length
 
-    // Pull Chaos slips
-    for (let ch = 0; ch < t.chaos; ch++) {
-      accountSlips.push(chaosSlips[chaosPtr % chaosSlips.length])
-      chaosPtr++
-    }
-
-    // ------------------------------------------------------------------
-    // Validate this account's slip counts match its expected profile
-    // ------------------------------------------------------------------
-    const actualCore  = accountSlips.filter(s => s.tier === 'CORE').length
-    const actualPivot = accountSlips.filter(s => s.tier === 'PIVOT').length
-    const actualChaos = accountSlips.filter(s => s.tier === 'CHAOS').length
-
-    if (actualCore !== t.core || actualPivot !== t.pivot || actualChaos !== t.chaos) {
+    if (
+      actualCore   !== t.core   ||
+      actualPivot  !== t.pivot  ||
+      actualBridge !== t.bridge ||
+      actualChaos  !== t.chaos
+    ) {
       throw new Error(
-        `distributeToAccounts: account ${i + 1} has ${actualCore}/${actualPivot}/${actualChaos} ` +
-        `(Core/Pivot/Chaos) but expected ${t.core}/${t.pivot}/${t.chaos} ` +
-        `for profile '${t.profile}'`,
+        `distributeToAccounts: account ${i + 1} has ` +
+        `${actualCore}/${actualPivot}/${actualBridge}/${actualChaos} ` +
+        `(Core/Pivot/Bridge/Chaos) but expected ` +
+        `${t.core}/${t.pivot}/${t.bridge}/${t.chaos} for profile '${t.profile}'`,
       )
     }
 
@@ -206,18 +210,15 @@ export function distributeToAccounts(
       accountNumber:  i + 1,
       profile:        t.profile,
       slips:          accountSlips,
-      totalStake:     accountSlips.length * config.stakePerSlip,
+      totalStake:     accountSlips.reduce((sum, s) => sum + s.stake, 0),
       sessionHashes:  accountSlips.map(s => s.sessionHash),
     })
   }
 
-  // ------------------------------------------------------------------
-  // Final invariant: total slips across all accounts must be 42
-  // ------------------------------------------------------------------
   const grandTotal = allocations.reduce((sum, a) => sum + a.slips.length, 0)
-  if (grandTotal !== 42) {
+  if (grandTotal !== 56) {
     throw new Error(
-      `distributeToAccounts: total slips across all accounts is ${grandTotal}, expected 42`,
+      `distributeToAccounts: total slips across all accounts is ${grandTotal}, expected 56`,
     )
   }
 

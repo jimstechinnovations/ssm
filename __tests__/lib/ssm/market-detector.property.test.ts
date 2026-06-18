@@ -81,8 +81,9 @@ describe('detectDominantMarket — unit tests', () => {
     expect(result.dominantOutcome).not.toBe(result.breakoutOutcome)
   })
 
-  it('allOutcomes only includes outcomes with coverageCount >= 6', () => {
+  it('allOutcomes only includes outcomes with coverageCount >= 1 (v3: MIN_COVERAGE lowered)', () => {
     // 4 of 8 fixtures are missing 'Odd' and 'Even' labels
+    // In v3 MIN_COVERAGE=1, so Odd/Even still appear if at least 1 fixture has them
     const fixtures = Array.from({ length: 8 }, (_, i) => {
       const oddsEntries = i < 4
         ? Object.entries(FULL_ODDS).map(([label, value]) => ({ label, value }))
@@ -93,7 +94,8 @@ describe('detectDominantMarket — unit tests', () => {
     })
     const result = detectDominantMarket(fixtures)
     for (const op of result.allOutcomes) {
-      expect(op.coverageCount).toBeGreaterThanOrEqual(6)
+      // MIN_COVERAGE is now 1 — any outcome with at least 1 fixture is included
+      expect(op.coverageCount).toBeGreaterThanOrEqual(1)
     }
   })
 

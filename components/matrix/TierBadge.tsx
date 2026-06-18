@@ -24,9 +24,10 @@ export interface TierBadgeProps {
 // ---------------------------------------------------------------------------
 
 const tierLabels: Record<TierLabel, string> = {
-  CORE: 'Core',
-  PIVOT: 'Pivot',
-  CHAOS: 'Chaos',
+  CORE:   'Core',
+  PIVOT:  'Pivot',
+  BRIDGE: 'Bridge',
+  CHAOS:  'Chaos',
 }
 
 // ---------------------------------------------------------------------------

@@ -10,7 +10,7 @@
  */
 
 import React, { useState, useMemo } from 'react'
-import type { FixtureWithGates, DominantMarketResult, TierAllocation } from '@/lib/ssm/types'
+import type { ProfiledFixture, DominantMarketResult, TierAllocation } from '@/lib/ssm/types'
 import { calculateStakes } from '@/lib/ssm/stake-calculator'
 import { QualifyingFixtureList } from '@/components/screen/QualifyingFixtureList'
 import { MarketSummary } from '@/components/screen/MarketSummary'
@@ -20,11 +20,11 @@ import { Button } from '@/components/ui/Button'
 // ─── Types ────────────────────────────────────────────────────────────────────
 
 export interface ConfirmationPanelProps {
-  qualifying: FixtureWithGates[]           // the top-8 selected fixtures
+  qualifying: ProfiledFixture[]            // the 8 selected fixtures with profiles
   dominantMarket: DominantMarketResult | null
   onConfirm: (bankroll: number, numAccounts: 6 | 7) => void
-  loading?: boolean    // true while POST /api/generate is in-flight
-  disabled?: boolean   // true when qualifying.length < 8
+  loading?: boolean
+  disabled?: boolean
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -122,12 +122,13 @@ export function ConfirmationPanel({
       {allocation ? (
         <div className="rounded-xl border border-zinc-200 bg-zinc-50 px-4 py-3 dark:border-zinc-700 dark:bg-zinc-800/50">
           <h3 className="mb-2 text-xs font-semibold uppercase tracking-wider text-zinc-500 dark:text-zinc-400">
-            Tier Allocation Preview
+            Tier Allocation Preview (56 slips)
           </h3>
           <div className="divide-y divide-zinc-200 dark:divide-zinc-700">
-            <TierRow label="Core"  stakePerSlip={allocation.coreStakePerSlip}  slipCount={30} />
-            <TierRow label="Pivot" stakePerSlip={allocation.pivotStakePerSlip} slipCount={8}  />
-            <TierRow label="Chaos" stakePerSlip={allocation.chaosStakePerSlip} slipCount={4}  />
+            <TierRow label="Core"   stakePerSlip={allocation.coreStakePerSlip}   slipCount={30} />
+            <TierRow label="Pivot"  stakePerSlip={allocation.pivotStakePerSlip}  slipCount={8}  />
+            <TierRow label="Bridge" stakePerSlip={allocation.bridgeStakePerSlip} slipCount={14} />
+            <TierRow label="Chaos"  stakePerSlip={allocation.chaosStakePerSlip}  slipCount={4}  />
           </div>
           <div className="mt-2 flex items-center justify-between border-t border-zinc-200 pt-2 text-sm dark:border-zinc-700">
             <span className="text-zinc-500 dark:text-zinc-400">Buffer</span>

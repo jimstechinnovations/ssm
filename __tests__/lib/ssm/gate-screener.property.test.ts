@@ -1,173 +1,187 @@
 /**
  * Property-based tests for lib/ssm/gate-screener.ts
  *
- * Property 1: Qualification iff all gates pass
- * Property 2: Gate screener is deterministic and side-effect free
+ * SSM v3: Gates replaced by adaptive profile classification.
+ * runGateScreener is now a compatibility shim that always returns qualified=true.
+ * The new profileFixture function is the primary API — tested here.
+ *
+ * Property 1: profileFixture always returns a valid GameProfile
+ * Property 2: profileFixture is deterministic and side-effect free
+ * Property 3: dominant/breakout outcomes are always valid counterparts
  *
  * Validates: Requirements 1.1, 1.2, 1.3, 1.4, 1.6
  */
 
 import { describe, it, expect } from 'vitest'
 import * as fc from 'fast-check'
-import { runGateScreener } from '../../../lib/ssm/gate-screener'
+import { runGateScreener, profileFixture } from '../../../lib/ssm/gate-screener'
+import { MARKET_COUNTERPART } from '../../../lib/ssm/types'
+import type { Fixture, OddsValue, GameProfile } from '../../../lib/ssm/types'
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Build a Map with all 5 required keys. */
-function buildOddsMap(
+const VALID_PROFILES: GameProfile[] = ['GOAL_CERTAIN', 'BALANCED', 'DEFENSIVE']
+
+const MARKET_TYPE = 'OVER_UNDER_2.5' as const
+
+/** Build a minimal Fixture with given odds labels */
+function makeFixture(oddsEntries: { label: string; value: number }[]): Fixture {
+  const odds: OddsValue[] = oddsEntries.map(e => ({
+    bookmaker: 'test',
+    market:    MARKET_TYPE,
+    label:     e.label,
+    value:     e.value,
+  }))
+  return {
+    id:       1,
+    homeTeam: 'A',
+    awayTeam: 'B',
+    league:   'Test',
+    leagueId: 1,
+    kickoff:  '2026-07-01T15:00:00Z',
+    odds,
+  }
+}
+
+/** A full odds set covering all gate-relevant markets */
+function makeFullOddsFixture(
   over05: number,
   under05: number,
   bttsYes: number,
   bttsNo: number,
   dc12: number,
-): Map<string, number> {
-  return new Map([
-    ['Over 0.5',  over05],
-    ['Under 0.5', under05],
-    ['BTTS Yes',  bttsYes],
-    ['BTTS No',   bttsNo],
-    ['DC 12',     dc12],
+): Fixture {
+  return makeFixture([
+    { label: 'Over 0.5',  value: over05  },
+    { label: 'Under 0.5', value: under05 },
+    { label: 'BTTS Yes',  value: bttsYes },
+    { label: 'BTTS No',   value: bttsNo  },
+    { label: 'DC 12',     value: dc12    },
+    { label: 'Over 2.5',  value: 1.90    },
+    { label: 'Under 2.5', value: 1.95    },
   ])
 }
 
-/** A known fully-passing odds set (based on the FK Sveikata template). */
-const PASSING_MAP = buildOddsMap(1.03, 6.75, 1.65, 2.00, 1.27)
+// ─── Backward-compatibility shim tests ───────────────────────────────────────
+//
+// runGateScreener now always returns qualified=true (no rejection in v3).
+// These tests verify the shim contract.
 
-// ─── Unit tests: known values ─────────────────────────────────────────────────
-
-describe('runGateScreener — unit tests', () => {
-  it('qualifies a fixture that passes all four gates', () => {
-    const result = runGateScreener(1, PASSING_MAP)
+describe('runGateScreener — backward-compat shim (v3)', () => {
+  it('always returns qualified=true regardless of odds', () => {
+    const anyMap = new Map([
+      ['Over 0.5', 2.50],   // would have failed G1 in v2
+      ['Under 0.5', 1.20],  // would have failed G2 in v2
+      ['BTTS Yes',  3.00],  // would have failed G3 in v2
+      ['BTTS No',   1.10],  // would have failed G3 in v2
+      ['DC 12',     2.50],  // would have failed G4 in v2
+    ])
+    const result = runGateScreener(1, anyMap)
     expect(result.qualified).toBe(true)
-    expect(result.gates).toHaveLength(4)
-    expect(result.gates.every(g => g.passed)).toBe(true)
+    expect(result.gates).toHaveLength(0)
     expect(result.rejectReason).toBeUndefined()
   })
 
-  it('rejects on G1 (Over 0.5 >= 1.15) and short-circuits — gates[] has only 1 entry', () => {
-    const map = buildOddsMap(1.20, 6.75, 1.65, 2.00, 1.27)
-    const result = runGateScreener(1, map)
-    expect(result.qualified).toBe(false)
-    expect(result.gates).toHaveLength(1)
-    expect(result.gates[0].gate).toBe('G1')
-    expect(result.gates[0].passed).toBe(false)
-    expect(result.rejectReason).toBe('GATE_FAILURE')
+  it('returns qualified=true even with empty odds map', () => {
+    const result = runGateScreener(42, new Map())
+    expect(result.qualified).toBe(true)
   })
 
-  it('rejects on G2 (Under 0.5 <= 5.00) and short-circuits — gates[] has 2 entries', () => {
-    const map = buildOddsMap(1.03, 4.50, 1.65, 2.00, 1.27)
-    const result = runGateScreener(1, map)
-    expect(result.qualified).toBe(false)
-    expect(result.gates).toHaveLength(2)
-    expect(result.gates[1].gate).toBe('G2')
-    expect(result.gates[1].passed).toBe(false)
-    expect(result.rejectReason).toBe('GATE_FAILURE')
-  })
-
-  it('rejects on G3 (BTTS Yes out of range) and short-circuits — gates[] has 3 entries', () => {
-    const map = buildOddsMap(1.03, 6.75, 1.90, 2.00, 1.27) // Yes too high
-    const result = runGateScreener(1, map)
-    expect(result.qualified).toBe(false)
-    expect(result.gates).toHaveLength(3)
-    expect(result.gates[2].gate).toBe('G3')
-    expect(result.gates[2].passed).toBe(false)
-  })
-
-  it('rejects on G4 (DC 12 >= 1.40) — gates[] has 4 entries', () => {
-    const map = buildOddsMap(1.03, 6.75, 1.65, 2.00, 1.55)
-    const result = runGateScreener(1, map)
-    expect(result.qualified).toBe(false)
-    expect(result.gates).toHaveLength(4)
-    expect(result.gates[3].gate).toBe('G4')
-    expect(result.gates[3].passed).toBe(false)
-  })
-
-  it('returns ODDS_UNAVAILABLE when Over 0.5 is missing', () => {
-    const map = new Map([['Under 0.5', 6.75], ['BTTS Yes', 1.65], ['BTTS No', 2.00], ['DC 12', 1.27]])
-    const result = runGateScreener(42, map)
-    expect(result.qualified).toBe(false)
-    expect(result.rejectReason).toBe('ODDS_UNAVAILABLE')
-    expect(result.gates).toHaveLength(0)
-  })
-
-  it('returns ODDS_UNAVAILABLE when DC 12 is missing (after G1–G3 pass)', () => {
-    const map = new Map([['Over 0.5', 1.03], ['Under 0.5', 6.75], ['BTTS Yes', 1.65], ['BTTS No', 2.00]])
-    const result = runGateScreener(99, map)
-    expect(result.qualified).toBe(false)
-    expect(result.rejectReason).toBe('ODDS_UNAVAILABLE')
-    // G1, G2, G3 were evaluated before DC 12 lookup
-    expect(result.gates).toHaveLength(3)
-  })
-
-  it('preserves the fixtureId in the returned GateResult', () => {
-    expect(runGateScreener(12345, PASSING_MAP).fixtureId).toBe(12345)
-    const failMap = buildOddsMap(2.0, 1.0, 3.0, 0.5, 2.0)
-    expect(runGateScreener(99999, failMap).fixtureId).toBe(99999)
+  it('preserves the fixtureId', () => {
+    expect(runGateScreener(99999, new Map()).fixtureId).toBe(99999)
   })
 })
 
-// ─── Property 1: Qualification iff all four gates pass ───────────────────────
+// ─── profileFixture — unit tests ─────────────────────────────────────────────
 
-/**
- * Validates: Requirements 1.1, 1.2, 1.3
- *
- * result.qualified = true iff G1 ∧ G2 ∧ G3 ∧ G4 all pass.
- */
-describe('Property 1: Qualification iff all gates pass', () => {
+describe('profileFixture — unit tests', () => {
+  it('returns GOAL_CERTAIN for a clear goal-certain fixture', () => {
+    const fixture = makeFullOddsFixture(1.03, 6.75, 1.65, 2.00, 1.27)
+    const profiled = profileFixture(fixture)
+    expect(profiled.profile).toBe('GOAL_CERTAIN')
+    expect(profiled.dominantOutcome).toBeTruthy()
+    expect(profiled.breakoutOutcome).toBeTruthy()
+    expect(profiled.dominantProb).toBeGreaterThan(0)
+  })
+
+  it('returns DEFENSIVE for a low-scoring fixture', () => {
+    // Under 2.5 at 1.30 → clearly below DEFENSIVE_UNDER25_MAX (1.50) → DEFENSIVE
+    // Build fixture manually so Under 2.5 is 1.30
+    const fixture = makeFixture([
+      { label: 'Over 0.5',  value: 1.35 },
+      { label: 'Under 0.5', value: 3.50 },
+      { label: 'BTTS Yes',  value: 2.10 },
+      { label: 'BTTS No',   value: 1.65 },
+      { label: 'DC 12',     value: 1.55 },
+      { label: 'Over 2.5',  value: 3.20 },
+      { label: 'Under 2.5', value: 1.30 }, // ← below DEFENSIVE_UNDER25_MAX=1.50
+    ])
+    const profiled = profileFixture(fixture)
+    expect(profiled.profile).toBe('DEFENSIVE')
+  })
+
+  it('returns BALANCED for a typical open match', () => {
+    // Over 0.5 at 1.22, Under 2.5 at 1.75 → balanced
+    const fixture = makeFullOddsFixture(1.22, 3.25, 1.95, 1.75, 1.50)
+    const profiled = profileFixture(fixture)
+    expect(profiled.profile).toBe('BALANCED')
+  })
+
+  it('breakout is always the counterpart of dominant', () => {
+    const fixture = makeFullOddsFixture(1.03, 6.75, 1.65, 2.00, 1.27)
+    const profiled = profileFixture(fixture)
+    expect(MARKET_COUNTERPART[profiled.dominantOutcome]).toBe(profiled.breakoutOutcome)
+    expect(profiled.dominantOutcome).not.toBe(profiled.breakoutOutcome)
+  })
+
+  it('works with a fixture that has no odds at all', () => {
+    const fixture = makeFixture([])
+    // Should not throw — falls back to DC12/DC1X defaults
+    const profiled = profileFixture(fixture)
+    expect(profiled.profile).toBe('BALANCED')
+    expect(profiled.dominantOutcome).toBeTruthy()
+    expect(profiled.breakoutOutcome).toBeTruthy()
+  })
+
+  it('signals object reflects the actual fixture odds', () => {
+    const fixture = makeFullOddsFixture(1.03, 6.75, 1.65, 2.00, 1.27)
+    const { signals } = profileFixture(fixture)
+    expect(signals.over05).toBe(1.03)
+    expect(signals.under05).toBe(6.75)
+    expect(signals.bttsYes).toBe(1.65)
+    expect(signals.bttsNo).toBe(2.00)
+    expect(signals.dc12).toBe(1.27)
+  })
+})
+
+// ─── Property 1: Profile is always a valid GameProfile ───────────────────────
+
+describe('Property 1: profileFixture always returns a valid profile', () => {
   const oddsArb = fc.float({ min: Math.fround(1.01), max: Math.fround(20), noNaN: true, noDefaultInfinity: true })
 
-  it('result.qualified matches the logical AND of all four gate conditions', () => {
+  it('profile is always one of GOAL_CERTAIN | BALANCED | DEFENSIVE', () => {
     fc.assert(
       fc.property(
         oddsArb, oddsArb, oddsArb, oddsArb, oddsArb,
         (over05, under05, bttsYes, bttsNo, dc12) => {
-          const map = buildOddsMap(over05, under05, bttsYes, bttsNo, dc12)
-          const result = runGateScreener(1, map)
-
-          const g1Pass = over05 < 1.15
-          const g2Pass = under05 > 5.00
-          const g3Pass = bttsYes >= 1.50 && bttsYes <= 1.80 && bttsNo >= 1.80 && bttsNo <= 2.20
-          const g4Pass = dc12 < 1.40
-
-          const allPass = g1Pass && g2Pass && g3Pass && g4Pass
-
-          expect(result.qualified).toBe(allPass)
+          const fixture = makeFullOddsFixture(over05, under05, bttsYes, bttsNo, dc12)
+          const profiled = profileFixture(fixture)
+          expect(VALID_PROFILES).toContain(profiled.profile)
         },
       ),
       { numRuns: 500 },
     )
   })
 
-  it('gates.length <= 4 for any input', () => {
+  it('dominantProb is always in (0, 1]', () => {
     fc.assert(
       fc.property(
         oddsArb, oddsArb, oddsArb, oddsArb, oddsArb,
         (over05, under05, bttsYes, bttsNo, dc12) => {
-          const map = buildOddsMap(over05, under05, bttsYes, bttsNo, dc12)
-          const result = runGateScreener(1, map)
-          expect(result.gates.length).toBeLessThanOrEqual(4)
-        },
-      ),
-      { numRuns: 500 },
-    )
-  })
-
-  it('when qualified=false, the last gate in gates[] is the failing one', () => {
-    fc.assert(
-      fc.property(
-        oddsArb, oddsArb, oddsArb, oddsArb, oddsArb,
-        (over05, under05, bttsYes, bttsNo, dc12) => {
-          const map = buildOddsMap(over05, under05, bttsYes, bttsNo, dc12)
-          const result = runGateScreener(1, map)
-
-          if (!result.qualified && result.gates.length > 0) {
-            const lastGate = result.gates[result.gates.length - 1]
-            // All gates before the last must have passed
-            const allButLast = result.gates.slice(0, -1)
-            expect(allButLast.every(g => g.passed)).toBe(true)
-            // The last gate must have failed
-            expect(lastGate.passed).toBe(false)
-          }
+          const fixture = makeFullOddsFixture(over05, under05, bttsYes, bttsNo, dc12)
+          const profiled = profileFixture(fixture)
+          expect(profiled.dominantProb).toBeGreaterThan(0)
+          expect(profiled.dominantProb).toBeLessThanOrEqual(1)
         },
       ),
       { numRuns: 500 },
@@ -175,52 +189,68 @@ describe('Property 1: Qualification iff all gates pass', () => {
   })
 })
 
-// ─── Property 2: Determinism and no side effects ─────────────────────────────
+// ─── Property 2: Determinism ──────────────────────────────────────────────────
 
-/**
- * Validates: Requirements 1.1, 1.4
- *
- * Same oddsMap always produces the same GateResult.
- * The input map is not mutated.
- */
-describe('Property 2: Gate screener is deterministic and side-effect free', () => {
+describe('Property 2: profileFixture is deterministic and side-effect free', () => {
   const oddsArb = fc.float({ min: Math.fround(1.01), max: Math.fround(20), noNaN: true, noDefaultInfinity: true })
 
-  it('produces identical results on two calls with the same input', () => {
+  it('produces identical results on two calls with the same fixture', () => {
     fc.assert(
       fc.property(
         oddsArb, oddsArb, oddsArb, oddsArb, oddsArb,
         (over05, under05, bttsYes, bttsNo, dc12) => {
-          const map = buildOddsMap(over05, under05, bttsYes, bttsNo, dc12)
-          const r1 = runGateScreener(1, map)
-          const r2 = runGateScreener(1, map)
-          expect(r1.qualified).toBe(r2.qualified)
-          expect(r1.gates.length).toBe(r2.gates.length)
-          expect(r1.rejectReason).toBe(r2.rejectReason)
+          const fixture = makeFullOddsFixture(over05, under05, bttsYes, bttsNo, dc12)
+          const r1 = profileFixture(fixture)
+          const r2 = profileFixture(fixture)
+          expect(r1.profile).toBe(r2.profile)
+          expect(r1.dominantOutcome).toBe(r2.dominantOutcome)
+          expect(r1.breakoutOutcome).toBe(r2.breakoutOutcome)
+          expect(r1.dominantProb).toBe(r2.dominantProb)
         },
       ),
       { numRuns: 300 },
     )
   })
 
-  it('does not mutate the input Map', () => {
+  it('does not mutate the input fixture', () => {
     fc.assert(
       fc.property(
         oddsArb, oddsArb, oddsArb, oddsArb, oddsArb,
         (over05, under05, bttsYes, bttsNo, dc12) => {
-          const map = buildOddsMap(over05, under05, bttsYes, bttsNo, dc12)
-          const originalSize = map.size
-          const originalValues = Array.from(map.entries())
+          const fixture = makeFullOddsFixture(over05, under05, bttsYes, bttsNo, dc12)
+          const originalOddsLength = fixture.odds.length
+          const originalFirstOdds  = fixture.odds[0]?.value
 
-          runGateScreener(1, map)
+          profileFixture(fixture)
 
-          expect(map.size).toBe(originalSize)
-          for (const [key, val] of originalValues) {
-            expect(map.get(key)).toBe(val)
+          expect(fixture.odds.length).toBe(originalOddsLength)
+          if (originalFirstOdds !== undefined) {
+            expect(fixture.odds[0].value).toBe(originalFirstOdds)
           }
         },
       ),
       { numRuns: 200 },
+    )
+  })
+})
+
+// ─── Property 3: Dominant/Breakout are always valid counterparts ──────────────
+
+describe('Property 3: dominant and breakout are always valid counterparts', () => {
+  const oddsArb = fc.float({ min: Math.fround(1.01), max: Math.fround(20), noNaN: true, noDefaultInfinity: true })
+
+  it('breakoutOutcome is always MARKET_COUNTERPART[dominantOutcome]', () => {
+    fc.assert(
+      fc.property(
+        oddsArb, oddsArb, oddsArb, oddsArb, oddsArb,
+        (over05, under05, bttsYes, bttsNo, dc12) => {
+          const fixture  = makeFullOddsFixture(over05, under05, bttsYes, bttsNo, dc12)
+          const profiled = profileFixture(fixture)
+          expect(MARKET_COUNTERPART[profiled.dominantOutcome]).toBe(profiled.breakoutOutcome)
+          expect(profiled.dominantOutcome).not.toBe(profiled.breakoutOutcome)
+        },
+      ),
+      { numRuns: 500 },
     )
   })
 })

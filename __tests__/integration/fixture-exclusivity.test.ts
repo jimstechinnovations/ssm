@@ -268,7 +268,7 @@ describe('Integration: fixture exclusivity across session groups', () => {
 
     const bodyA = await resA.json() as {
       groupId:             string
-      qualifyingFixtures:  Array<{ fixture: { id: number }; gateResult: { qualified: boolean } }>
+      qualifyingFixtures:  Array<{ fixture: { id: number }; profile: string }>
       claimedFixtureIds?:  number[]
       unclaimedQualifying: number
     }
@@ -276,14 +276,15 @@ describe('Integration: fixture exclusivity across session groups', () => {
     // Group A gets its UUID
     expect(bodyA.groupId).toBe(GROUP_A_UUID)
 
-    // All 10 fixtures pass gates; top-8 are returned as qualifyingFixtures
+    // All 10 fixtures have odds → all are profiled → top-8 returned
     expect(bodyA.qualifyingFixtures.length).toBe(8)
-    for (const fwg of bodyA.qualifyingFixtures) {
-      expect(fwg.gateResult.qualified).toBe(true)
+    for (const profiled of bodyA.qualifyingFixtures) {
+      // v3: every fixture gets a profile (no rejection)
+      expect(['GOAL_CERTAIN', 'BALANCED', 'DEFENSIVE']).toContain(profiled.profile)
     }
 
     // The IDs that Group A claimed are the top-8 fixture IDs (sorted by kickoff: 100–107)
-    const groupAClaimedIds = bodyA.qualifyingFixtures.map(fwg => fwg.fixture.id)
+    const groupAClaimedIds = bodyA.qualifyingFixtures.map((p: { fixture: { id: number } }) => p.fixture.id)
 
     // Confirm supabaseState was populated (verifies the mock captured the insert data)
     expect(supabaseState.groupAClaimedIds).toEqual(groupAClaimedIds)
@@ -296,29 +297,27 @@ describe('Integration: fixture exclusivity across session groups', () => {
 
     const bodyB = await resB.json() as {
       groupId:             string
-      qualifyingFixtures:  Array<{ fixture: { id: number }; gateResult: { qualified: boolean } }>
+      qualifyingFixtures:  Array<{ fixture: { id: number }; profile: string }>
       unclaimedQualifying: number
     }
 
     // Group B gets its own UUID
     expect(bodyB.groupId).toBe(GROUP_B_UUID)
 
-    // Requirement 6.3: Group B's qualifyingFixtures (top unclaimed, capped at 8) must NOT
-    // overlap with Group A's claimed IDs
+    // Requirement 6.3: Group B's qualifyingFixtures must NOT overlap with Group A's claimed IDs
     const groupAClaimedSet  = new Set(groupAClaimedIds)
-    const groupBFixtureIds  = bodyB.qualifyingFixtures.map(fwg => fwg.fixture.id)
+    const groupBFixtureIds  = bodyB.qualifyingFixtures.map((p: { fixture: { id: number } }) => p.fixture.id)
 
     for (const id of groupBFixtureIds) {
       expect(groupAClaimedSet.has(id)).toBe(false)
     }
 
-    // Requirement 6.2: Only 2 of the 10 qualifying fixtures remain unclaimed (10 − 8 = 2),
-    // which is less than the 8 required — so Group B returns fewer than 8 qualifyingFixtures
+    // Requirement 6.2: Only 2 of 10 fixtures remain unclaimed → fewer than 8
     expect(bodyB.unclaimedQualifying).toBeLessThan(8)
 
-    // The qualifying fixtures Group B does receive are the 2 unclaimed ones (IDs 108, 109)
-    for (const fwg of bodyB.qualifyingFixtures) {
-      expect(fwg.gateResult.qualified).toBe(true)
+    // All of Group B's fixtures still have a valid profile
+    for (const profiled of bodyB.qualifyingFixtures) {
+      expect(['GOAL_CERTAIN', 'BALANCED', 'DEFENSIVE']).toContain(profiled.profile)
     }
   })
 })
