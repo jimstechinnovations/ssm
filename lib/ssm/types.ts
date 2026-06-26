@@ -4,9 +4,13 @@
 export type MarketType =
   | '1X2'
   | 'BTTS'
+  | 'OVER_UNDER_0.5'
   | 'OVER_UNDER_1.5'
   | 'OVER_UNDER_2.5'
   | 'OVER_UNDER_3.5'
+  | 'OVER_UNDER_4.5'
+  | 'OVER_UNDER_5.5'
+  | 'OVER_UNDER_6.5'
   | 'ASIAN_HANDICAP'
 
 export type TierLabel = 'CORE' | 'PIVOT' | 'BRIDGE' | 'CHAOS'

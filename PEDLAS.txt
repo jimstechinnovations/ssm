@@ -1,0 +1,996 @@
+Yes. In fact, I think this is where **PEDLAS becomes an actual decision engine rather than just a filtering algorithm.**
+
+The important shift is this:
+
+> **PEDLAS should not predict football. It should predict which Betway markets are mispriced relative to historical behaviour and then optimize them for the user's budget.**
+
+That is a much more achievable engineering problem.
+
+---
+
+# PEDLAS 2.0 Architecture
+
+Instead of
+
+```
+User
+   ↓
+Current Betway Odds
+   ↓
+PEDLAS Filters
+   ↓
+Slip
+```
+
+it becomes
+
+```
+                Football History API
+                        │
+                        ▼
+              Historical Match Database
+                        │
+                        ▼
+Current Betway Odds API ─────► PEDLAS Engine ◄──── User Budget
+                        │              │
+                        │              ▼
+                        │       LLM Reasoning
+                        │              │
+                        ▼              ▼
+                Slip Optimizer
+                        │
+                        ▼
+                  10 Optimized Slips
+```
+
+Notice something important.
+
+The LLM never decides matches.
+
+It only reasons over statistics.
+
+---
+
+# Component 1
+
+## Football History API
+
+Examples
+
+* last 10 matches
+* goals
+* xG
+* shots
+* corners
+* cards
+* league averages
+* home strength
+* away strength
+* scoring distribution
+* probability curves
+
+PEDLAS can compute things like
+
+```
+Probability of ≤4 goals
+
+Probability of ≤5 goals
+
+Probability of exactly 4 goals
+
+Probability of 5+
+
+Probability of both scoring
+
+Probability of comeback
+
+etc.
+```
+
+Now PEDLAS has evidence.
+
+---
+
+# Component 2
+
+## Betway Odds Reader
+
+Instead of manually entering
+
+```
+Under 4.5
+
+1.39
+```
+
+PEDLAS reads
+
+```
+Match
+
+Every available market
+
+Every odds
+
+Boost qualification
+
+Special promotions
+
+Maximum payout
+
+Minimum odds
+```
+
+Now PEDLAS knows
+
+```
+Betway says
+
+Under 4.5
+
+1.39
+
+Historical model says
+
+95%
+
+This is good.
+```
+
+or
+
+```
+Historical probability
+
+82%
+
+Betway implies
+
+71%
+
+Positive edge.
+
+Keep.
+```
+
+---
+
+# Component 3
+
+## PEDLAS Mathematical Layer
+
+This is where your algorithm becomes unique.
+
+Example
+
+Suppose
+
+Historical data says
+
+```
+Under 4.5
+
+97%
+```
+
+Betway
+
+```
+1.22
+```
+
+Expected value
+
+Very high.
+
+Confidence
+
+High.
+
+PEDLAS keeps it.
+
+---
+
+Another match
+
+Historical
+
+87%
+
+Betway
+
+1.41
+
+Confidence
+
+Medium
+
+League volatility
+
+High
+
+PEDLAS removes it.
+
+```
+
+So PEDLAS is not asking
+
+"Will this match finish under?"
+
+It asks
+
+"Is this market worth buying?"
+
+Big difference.
+
+---
+
+# Component 4
+
+## LLM Layer
+
+Many people misuse LLMs.
+
+I wouldn't.
+
+I would use it like this.
+
+PEDLAS calculates
+
+```
+
+League volatility
+
+Goal variance
+
+Recent form
+
+Market edge
+
+Home attack
+
+Away defense
+
+Injuries
+
+Weather
+
+Head-to-head
+
+Travel distance
+
+Fatigue
+
+Schedule congestion
+
+```
+
+Now feed ONLY those values.
+
+Example
+
+```
+
+League volatility
+
+0.83
+
+Historical under hit rate
+
+91%
+
+Current odds
+
+1.36
+
+Expected value
+
++7%
+
+Last 5 goals average
+
+2.6
+
+Weather
+
+Heavy rain
+
+Travel fatigue
+
+Low
+
+Question
+
+Should this remain in the slip?
+
+```
+
+The LLM explains
+
+```
+
+Yes.
+
+Reason
+
+Heavy rain lowers scoring.
+
+Both teams average below league goals.
+
+Historical edge remains positive.
+
+Confidence
+
+91%.
+
+```
+
+The LLM becomes an analyst.
+
+Not a predictor.
+
+---
+
+# Component 5
+
+## Budget Optimizer
+
+This is where PEDLAS becomes interesting.
+
+Suppose user has
+
+```
+
+₦1000
+
+```
+
+PEDLAS already knows
+
+```
+
+Betway win boost
+
+10+ selections
+
+Minimum odds
+
+Promotion rules
+
+Maximum payout
+
+```
+
+Now PEDLAS searches thousands of combinations.
+
+Example
+
+Instead of
+
+```
+
+40 matches
+
+```
+
+It may produce
+
+```
+
+Slip A
+
+11 matches
+
+Odds
+
+17
+
+Confidence
+
+94%
+
+Stake
+
+₦100
+
+---
+
+Slip B
+
+13 matches
+
+Odds
+
+29
+
+Confidence
+
+91%
+
+Stake
+
+₦100
+
+---
+
+Slip C
+
+15 matches
+
+Odds
+
+54
+
+Confidence
+
+87%
+
+Stake
+
+₦100
+
+---
+
+...
+
+10 slips
+
+```
+
+Every slip is intentionally different.
+
+---
+
+# Slip Diversity
+
+This is very important.
+
+Current betting
+
+```
+
+Slip 1
+
+A B C D E
+
+Slip 2
+
+A B C D E F
+
+Slip 3
+
+A B C D E G
+
+```
+
+Almost identical.
+
+PEDLAS shouldn't do that.
+
+Instead
+
+```
+
+Slip 1
+
+A B C D
+
+Slip 2
+
+E F G H
+
+Slip 3
+
+A E I J
+
+Slip 4
+
+B D G K
+
+Slip 5
+
+L M N O
+
+...
+
+```
+
+One upset only kills a subset of slips instead of every slip.
+
+---
+
+# Compression
+
+Suppose there are
+
+```
+
+250 possible matches
+
+```
+
+Historically
+
+Only
+
+```
+
+60
+
+meet
+
+PEDLAS core filters.
+
+```
+
+History removes
+
+```
+
+250
+
+↓
+
+60
+
+```
+
+Now
+
+LLM
+
+↓
+
+```
+
+60
+
+↓
+
+34
+
+```
+
+Now
+
+Budget optimizer
+
+↓
+
+```
+
+34
+
+↓
+
+10 slips
+
+```
+
+This is massive compression.
+
+---
+
+# Learning Loop
+
+This is the part I like most.
+
+Every week
+
+PEDLAS stores
+
+```
+
+Chosen matches
+
+Won
+
+Lost
+
+Reason
+
+League
+
+Odds
+
+Goal count
+
+Which filter passed
+
+Which filter failed
+
+```
+
+Now after
+
+```
+
+100,000 matches
+
+```
+
+PEDLAS starts discovering things humans miss.
+
+Example
+
+```
+
+League X
+
+Under 4.5
+
+Odds
+
+1.20–1.28
+
+Actually wins
+
+98%
+
+while
+
+1.35–1.45
+
+only wins
+
+83%
+
+```
+
+Now PEDLAS adjusts automatically.
+
+---
+
+# Long-term Evolution
+
+Eventually the engine becomes:
+
+```
+
+Football History
+│
+▼
+Statistical Feature Builder
+│
+▼
+PEDLAS Core Mathematics
+│
+▼
+Expected Value Calculator
+│
+▼
+Risk Scorer
+│
+▼
+LLM Analyst
+│
+▼
+Budget Optimizer
+│
+▼
+Slip Diversifier
+│
+▼
+Promotion Optimizer
+│
+▼
+Final Slips
+│
+▼
+Learning Database
+
+```
+
+## My biggest recommendation
+
+I would make the **LLM optional, not central**.
+
+The deterministic **PEDLAS Core** should make every numerical decision: filtering, probability estimation, expected value, risk scoring, and budget allocation. The LLM should sit on top as an explanation and strategy layer—interpreting why a match is risky, highlighting unusual patterns, suggesting alternative slip compositions, and explaining decisions to the user.
+
+That design has several advantages:
+
+- **Deterministic and reproducible:** The same inputs always produce the same slips.
+- **Lower cost:** Most computations are performed locally without paying for an LLM call on every match.
+- **Higher speed:** Mathematical filtering is much faster than language-model inference.
+- **Easy backtesting:** You can replay historical data and verify exactly why each slip was generated.
+- **Better continuous learning:** As you collect more outcomes, you can improve the statistical models independently of the LLM.
+
+In that architecture, the LLM becomes an intelligent advisor rather than the decision-maker. That keeps PEDLAS explainable, testable, and scalable while still benefiting from AI where it adds the most value.
+```
+I think this is actually the direction PEDLAS should evolve.
+
+Since you've confirmed that **Betway Nigeria's minimum stake is ₦100**, then a ₦1,000 budget naturally becomes **10 slips × ₦100**. That makes the budget allocation much simpler because PEDLAS doesn't need to decide stake sizes below ₦100—it decides **which 10 slips deserve the available stake.** Public sources describing Betway Nigeria also indicate a ₦100 minimum stake/deposit for many users. ([NaijaBettingGuide][1])
+
+## The architecture I'd build
+
+```text
+                  USER
+                     │
+        Budget = ₦1000
+        Slips = 10
+                     │
+                     ▼
+             PEDLAS Engine
+                     │
+   ┌─────────────────┼─────────────────┐
+   │                 │                 │
+   ▼                 ▼                 ▼
+Football API   Playwright Bot     PEDLAS History
+(match data)   (Betway odds)      Database
+   │                 │                 │
+   └────────────┬────┴─────────────────┘
+                ▼
+        Feature Generation
+                │
+                ▼
+      NVIDIA NIM Reasoning
+                │
+                ▼
+        Slip Optimization
+                │
+                ▼
+      10 Recommended Slips
+```
+
+## Playwright is actually a good fit
+
+Since Betway doesn't expose a public odds API, a **Playwright service** that reads publicly available pages (without logging in or bypassing access controls) can be an effective way to collect the information your system needs. You should still expect the site structure to change over time and ensure your implementation respects the website's terms of use and applicable laws. ([Betway][2])
+
+PEDLAS only needs information like:
+
+```text
+Match
+
+League
+
+Kickoff time
+
+Markets
+
+Odds
+
+Win Boost eligibility
+
+Market availability
+```
+
+Example output
+
+```json
+{
+  "match":"Arsenal vs Chelsea",
+  "market":"Under 4.5",
+  "odd":1.34,
+  "winBoost":true,
+  "league":"Premier League",
+  "time":"18:30"
+}
+```
+
+This is far simpler than scraping every piece of information on the page.
+
+---
+
+# Football API
+
+Then your football API supplies
+
+```text
+Home form
+
+Away form
+
+Goals scored
+
+Goals conceded
+
+H2H
+
+League averages
+
+Recent matches
+
+Injuries
+
+Lineups
+
+Expected goals
+
+Standings
+```
+
+---
+
+# PEDLAS Feature Generator
+
+This is where everything is merged.
+
+For one match PEDLAS creates something like
+
+```json
+{
+ "league":"MLS Next Pro",
+ "market":"Under 4.5",
+ "odd":1.32,
+ "under45Rate":94,
+ "avgGoals":2.7,
+ "homeAvg":1.8,
+ "awayAvg":1.1,
+ "homeForm":"WWDWW",
+ "awayForm":"LDWDL",
+ "goalStdDev":0.81,
+ "winBoost":true
+}
+```
+
+Notice this is **PEDLAS data**, not AI data.
+
+---
+
+# NVIDIA NIM
+
+Now the AI receives maybe
+
+40 candidate matches.
+
+Prompt
+
+```text
+Rank these matches.
+
+Do NOT predict football.
+
+Do NOT invent statistics.
+
+Only use the supplied parameters.
+
+Return
+
+Confidence
+
+Hidden risk
+
+League stability
+
+Reasoning
+
+Score 0-100
+```
+
+Now AI becomes a **reasoning engine** instead of a prediction engine.
+
+---
+
+# PEDLAS Optimizer
+
+Suppose AI returns
+
+```text
+Match A
+
+96
+
+Match B
+
+94
+
+Match C
+
+93
+
+...
+
+Match Z
+
+58
+```
+
+PEDLAS now builds
+
+Slip 1
+
+```text
+96
+
+94
+
+93
+
+92
+```
+
+Slip 2
+
+```text
+96
+
+94
+
+91
+
+89
+```
+
+Slip 3
+
+```text
+95
+
+94
+
+92
+
+88
+```
+
+Instead of random combinations.
+
+---
+
+# Even better: PEDLAS learns
+
+Every finished match is stored.
+
+```text
+Betway Odds
+
+↓
+
+Historical Result
+
+↓
+
+Did Under 4.5 win?
+
+↓
+
+Did PEDLAS choose it?
+
+↓
+
+Did AI rank it highly?
+
+↓
+
+Store outcome
+```
+
+Eventually you'll have tens or hundreds of thousands of examples.
+
+PEDLAS starts learning things like
+
+> Norwegian Division 3 matches with Under 4.5 at odds between 1.25 and 1.35 only succeed 82%.
+
+or
+
+> Iceland Women's league at Under 4.5 above 1.38 fails much more often.
+
+These become **empirical observations from your own dataset**, rather than assumptions.
+
+---
+
+## I would also add a "PEDLAS Knowledge Base"
+
+This is something I haven't mentioned before, but I think it would make PEDLAS substantially stronger.
+
+The system would maintain a database with tables such as:
+
+* **Match History** – every analyzed match and final result.
+* **Market History** – every Under 4.5, Under 5.5, Under 6.5 market with opening and closing odds.
+* **League Statistics** – average goals, volatility, and historical success rates by league.
+* **PEDLAS Decisions** – which matches were selected, skipped, or rejected and why.
+* **AI Reasoning Logs** – NVIDIA NIM's confidence scores and explanations.
+* **Slip Outcomes** – which slips won or lost.
+* **Budget Performance** – return on investment for budgets like ₦500, ₦1,000, ₦2,000, etc.
+
+With that history, PEDLAS can answer questions such as:
+
+* "For a ₦1,000 budget, what slip structure historically performed best?"
+* "Which leagues should be avoided for Under 4.5?"
+* "When Under 4.5 odds are between 1.20 and 1.30, how often did they actually hit?"
+* "Has Win Boost qualification improved long-term returns?"
+
+At that point, PEDLAS is no longer just filtering today's fixtures—it becomes a continuously improving decision-support system that uses its own historical evidence to refine future slip construction.
+
+[1]: https://naijabettingguide.com/lowest-minimum-deposit-betting-sites-nigeria/?utm_source=chatgpt.com "Lowest Minimum Deposit Betting Sites Nigeria (2026)"
+[2]: https://betway.com/p/terms/en-ie/?utm_source=chatgpt.com "Betway - The Official Website. Bookmaker & Casino"
