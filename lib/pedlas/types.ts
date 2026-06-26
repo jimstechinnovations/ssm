@@ -89,6 +89,7 @@ export interface PedlasLeg {
   fixtureId: number
   game:      string
   league:    string
+  kickoff:   string
   line:      GoalLine
   side:      'Under' | 'Over'
   market:    string         // e.g. "OVER_UNDER_4.5"

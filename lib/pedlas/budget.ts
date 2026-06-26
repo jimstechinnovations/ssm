@@ -34,6 +34,7 @@ export function buildLegs(vector: (0 | 1)[], axes: BinaryAxis[]): PedlasLeg[] {
       fixtureId: a.fixtureId,
       game:      a.game,
       league:    a.league,
+      kickoff:   a.kickoff,
       line:      a.line,
       side:      isOver ? 'Over' : 'Under',
       market:    `OVER_UNDER_${a.line}`,

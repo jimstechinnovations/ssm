@@ -11,7 +11,6 @@
 
 import React from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
 
 import { useSession } from '@/components/session/SessionProvider'
 import { SlipCard } from '@/components/matrix/SlipCard'
@@ -122,8 +121,6 @@ export default function MatrixPage() {
   const { state } = useSession()
   const { status, slips } = state
 
-  const searchParams = useSearchParams()
-  const group = searchParams.get('group')
 
   // ── Loading state ────────────────────────────────────────────────────────
 

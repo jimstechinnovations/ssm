@@ -6,7 +6,7 @@ import { z } from 'zod'
 // OddsValueSchema
 export const OddsValueSchema = z.object({
   bookmaker: z.string().min(1),
-  market: z.enum(['1X2', 'BTTS', 'OVER_UNDER_1.5', 'OVER_UNDER_2.5', 'OVER_UNDER_3.5', 'ASIAN_HANDICAP']),
+  market: z.enum(['1X2', 'BTTS', 'OVER_UNDER_0.5', 'OVER_UNDER_1.5', 'OVER_UNDER_2.5', 'OVER_UNDER_3.5', 'OVER_UNDER_4.5', 'OVER_UNDER_5.5', 'OVER_UNDER_6.5', 'ASIAN_HANDICAP']),
   label: z.string().min(1),
   value: z.number().positive(),
 })
@@ -17,7 +17,7 @@ export const SlipLegSchema = z.object({
   fixtureId: z.number().int().positive(),
   homeTeam: z.string().min(1),
   awayTeam: z.string().min(1),
-  market: z.enum(['1X2', 'BTTS', 'OVER_UNDER_1.5', 'OVER_UNDER_2.5', 'OVER_UNDER_3.5', 'ASIAN_HANDICAP']),
+  market: z.enum(['1X2', 'BTTS', 'OVER_UNDER_0.5', 'OVER_UNDER_1.5', 'OVER_UNDER_2.5', 'OVER_UNDER_3.5', 'OVER_UNDER_4.5', 'OVER_UNDER_5.5', 'OVER_UNDER_6.5', 'ASIAN_HANDICAP']),
   outcome: z.string().min(1),
   odds: z.number().positive(),
   state: z.union([z.literal(0), z.literal(1)]),

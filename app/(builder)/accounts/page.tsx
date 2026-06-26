@@ -11,7 +11,6 @@
 
 import React from 'react'
 import Link from 'next/link'
-import { useSearchParams } from 'next/navigation'
 
 import { useSession } from '@/components/session/SessionProvider'
 import { DistributionTable } from '@/components/accounts/DistributionTable'
@@ -70,8 +69,6 @@ function LoadingSkeleton() {
 export default function AccountsPage() {
   const { state } = useSession()
   const { status, distribution, config } = state
-  const searchParams = useSearchParams()
-  const group = searchParams.get('group')
 
   // ── Loading state ────────────────────────────────────────────────────────
 

@@ -8,7 +8,7 @@ import type { Fixture, OddsValue } from '../ssm/types'
 import type { BinaryAxis, GoalLine } from './types'
 
 /** Total-goals lines PEDLAS considers, low → high. */
-export const PEDLAS_LINES: GoalLine[] = [2.5, 3.5, 4.5, 5.5, 6.5]
+export const PEDLAS_LINES: GoalLine[] = [4.5, 5.5, 6.5]
 export const MIN_UNDER_ODDS = 1.20
 
 interface SideOdds { under: number | null; over: number | null }

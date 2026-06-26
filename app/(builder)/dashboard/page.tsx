@@ -1,22 +1,16 @@
 /**
- * app/(builder)/dashboard/page.tsx
+ * Group Dashboard - Server Component.
  *
- * Group Dashboard — Server Component.
- *
- * Fetches all active session_groups directly from Supabase (service role client)
- * and renders them as a list of GroupCard components sorted by created_at DESC.
- *
- * Requirements: 6.6
+ * Loads active session groups from Supabase. If Supabase is temporarily
+ * unreachable, the dashboard still renders so the user can continue into the
+ * screening flow instead of being blocked by an error page.
  */
 
 import { createServerClient } from '@/lib/supabase/server'
+import Link from 'next/link'
 import { GroupCard } from '@/components/dashboard/GroupCard'
 import { NewGroupButton } from '@/components/dashboard/NewGroupButton'
 import type { SessionGroup, SessionGroupStatus, BookmakerPlatform } from '@/lib/ssm/types'
-
-// ---------------------------------------------------------------------------
-// DB row shape (snake_case) returned by Supabase
-// ---------------------------------------------------------------------------
 
 interface SessionGroupRow {
   id:                  string
@@ -33,10 +27,6 @@ interface SessionGroupRow {
   created_at:          string
   updated_at:          string
 }
-
-// ---------------------------------------------------------------------------
-// Map a DB row to the SessionGroup TypeScript interface (camelCase)
-// ---------------------------------------------------------------------------
 
 function mapRow(row: SessionGroupRow): SessionGroup {
   return {
@@ -56,53 +46,86 @@ function mapRow(row: SessionGroupRow): SessionGroup {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Page
-// ---------------------------------------------------------------------------
-
-export default async function DashboardPage() {
-  // ── Fetch groups from Supabase ─────────────────────────────────────────
+async function loadGroups(): Promise<{ groups: SessionGroup[]; warning: string | null }> {
   const supabase = createServerClient()
 
-  const { data, error } = await supabase
-    .from('session_groups')
-    .select('*')
-    .neq('status', 'deleted')
-    .order('created_at', { ascending: false })
+  try {
+    const { data, error } = await supabase
+      .from('session_groups')
+      .select('*')
+      .neq('status', 'deleted')
+      .order('created_at', { ascending: false })
 
-  // ── Error state ────────────────────────────────────────────────────────
+    if (error) {
+      return { groups: [], warning: error.message }
+    }
 
-  if (error) {
-    return (
-      <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-        <div className="flex flex-col items-start gap-4">
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">
-            Group Dashboard
-          </h1>
-          <p className="text-sm text-red-600 dark:text-red-400" role="alert">
-            Failed to load groups: {error.message}
-          </p>
-        </div>
-      </main>
-    )
+    return {
+      groups: ((data ?? []) as SessionGroupRow[]).map(mapRow),
+      warning: null,
+    }
+  } catch (err) {
+    return {
+      groups: [],
+      warning: err instanceof Error ? err.message : 'Unable to reach Supabase',
+    }
   }
+}
 
-  const groups: SessionGroup[] = (data ?? []).map(mapRow)
-
-  // ── Render ─────────────────────────────────────────────────────────────
+export default async function DashboardPage() {
+  const { groups, warning } = await loadGroups()
 
   return (
     <main className="mx-auto max-w-7xl px-4 py-8 sm:px-6 lg:px-8">
-
-      {/* Page heading + action */}
-      <div className="mb-8 flex items-center justify-between gap-4">
+      <div className="mb-8">
         <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">
-          Group Dashboard
+          Builder Dashboard
         </h1>
-        <NewGroupButton />
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Choose PEDLAS for real Betway total-goals slips, or continue with the SSM group workflow.
+        </p>
       </div>
 
-      {/* Empty state */}
+      {warning && (
+        <div
+          className="mb-6 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200"
+          role="status"
+        >
+          Supabase is currently unreachable, so saved groups could not be loaded. You can still start a new screening flow.
+        </div>
+      )}
+
+      <section className="mb-8 grid gap-4 md:grid-cols-2" aria-label="Builder modes">
+        <div className="rounded-lg border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+          <div className="mb-3">
+            <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+              PEDLAS Odds Builder
+            </h2>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              Build real Betway total-goals slips from public odds using only 4.5, 5.5, and 6.5 lines.
+            </p>
+          </div>
+          <Link
+            href="/builder/pedlas"
+            className="inline-flex items-center justify-center rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white transition-colors hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300"
+          >
+            Open PEDLAS
+          </Link>
+        </div>
+
+        <div className="rounded-lg border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-700 dark:bg-zinc-900">
+          <div className="mb-3">
+            <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">
+              SSM Group Pipeline
+            </h2>
+            <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+              Screen fixtures, generate the matrix, distribute accounts, and print the SSM slips.
+            </p>
+          </div>
+          <NewGroupButton />
+        </div>
+      </section>
+
       {groups.length === 0 ? (
         <div className="flex flex-col items-center justify-center rounded-xl border border-dashed border-zinc-300 py-20 text-center dark:border-zinc-700">
           <p className="mb-2 text-base font-medium text-zinc-600 dark:text-zinc-400">
@@ -113,7 +136,6 @@ export default async function DashboardPage() {
           </p>
         </div>
       ) : (
-        /* Group list */
         <ul className="grid grid-cols-1 gap-4 sm:grid-cols-2 lg:grid-cols-3">
           {groups.map((group) => (
             <li key={group.id}>
@@ -122,7 +144,6 @@ export default async function DashboardPage() {
           ))}
         </ul>
       )}
-
     </main>
   )
 }

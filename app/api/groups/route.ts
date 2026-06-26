@@ -26,18 +26,33 @@ const CreateGroupSchema = z.object({
 export async function GET(_request: Request): Promise<Response> {
   const supabase = createServerClient()
 
-  // eslint-disable-next-line @typescript-eslint/no-explicit-any
-  const { data, error } = await (supabase
-    .from('session_groups')
-    .select('*')
-    .in('status', ['screening', 'generated', 'printed'])
-    .order('created_at', { ascending: false })) as { data: unknown[] | null; error: unknown }
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const { data, error } = await (supabase
+      .from('session_groups')
+      .select('*')
+      .in('status', ['screening', 'generated', 'printed'])
+      .order('created_at', { ascending: false })) as {
+        data: unknown[] | null
+        error: { message?: string } | null
+      }
 
-  if (error) {
-    return Response.json({ error: 'Failed to load session groups' }, { status: 503 })
+    if (error) {
+      return Response.json({
+        groups: [],
+        warning: 'Failed to load session groups',
+        detail: error.message ?? 'Supabase query failed',
+      })
+    }
+
+    return Response.json({ groups: data ?? [] })
+  } catch (err) {
+    return Response.json({
+      groups: [],
+      warning: 'Failed to load session groups',
+      detail: err instanceof Error ? err.message : 'Supabase request failed',
+    })
   }
-
-  return Response.json({ groups: data ?? [] })
 }
 
 // ─── POST — create a new session group ───────────────────────────────────────

@@ -28,13 +28,15 @@ export default function BuilderLayout({ children }: { children: React.ReactNode 
           <nav aria-label="Builder steps" className="flex flex-1 items-center justify-center gap-1 sm:gap-2">
             <StepLink href="/builder/dashboard" step={1} label="Dashboard" />
             <StepDivider />
-            <StepLink href="/builder/screen" step={2} label="Screen" />
+            <StepLink href="/builder/pedlas" step={2} label="PEDLAS" />
             <StepDivider />
-            <StepLink href="/builder/matrix" step={3} label="Matrix" />
+            <StepLink href="/builder/screen" step={3} label="Screen" />
             <StepDivider />
-            <StepLink href="/builder/accounts" step={4} label="Accounts" />
+            <StepLink href="/builder/matrix" step={4} label="Matrix" />
             <StepDivider />
-            <StepLink href="/builder/print" step={5} label="Print" />
+            <StepLink href="/builder/accounts" step={5} label="Accounts" />
+            <StepDivider />
+            <StepLink href="/builder/print" step={6} label="Print" />
           </nav>
 
           {/* Flush button — client component, Next.js handles the boundary */}

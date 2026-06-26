@@ -16,11 +16,24 @@ import type { PedlasBook, PedlasSlip } from '@/lib/pedlas/types'
 
 interface PedlasResponse {
   book: PedlasBook
-  meta: { scanned: number; fixturesFound: number; qualifyingAxes: number; usedAxes: number }
+  meta: {
+    scanned: number
+    fixturesFound: number
+    qualifyingAxes: number
+    usedAxes: number
+    minKickoffGapMinutes?: number
+  }
 }
 
 const naira = (x: number) => '₦' + Math.round(x).toLocaleString('en-US')
 const pct = (x: number, dp = 2) => (x * 100).toFixed(dp) + '%'
+const kickoffTime = (iso: string) =>
+  new Intl.DateTimeFormat(undefined, {
+    month: 'short',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+  }).format(new Date(iso))
 
 function todayPlus(days: number): string {
   const d = new Date()
@@ -36,6 +49,7 @@ export default function PedlasPage() {
   const [minAnchorDistance, setMinAnchor] = useState(3)
   const [minSlipSeparation, setMinSep] = useState(4)
   const [maxPerLeague, setMaxPerLeague] = useState(3)
+  const [minKickoffGapMinutes, setMinKickoffGapMinutes] = useState(60)
 
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
@@ -50,7 +64,7 @@ export default function PedlasPage() {
         body: JSON.stringify({
           bookmaker: 'betway_nigeria',
           date_from: dateFrom, date_to: dateTo,
-          budget, legCount,
+          budget, legCount, minKickoffGapMinutes,
           params: { minAnchorDistance, minSlipSeparation, maxPerLeague },
         }),
       })
@@ -94,6 +108,7 @@ export default function PedlasPage() {
         <Field label="Min Over-flips (A)"><input type="number" min={0} max={legCount} value={minAnchorDistance} onChange={e => setMinAnchor(+e.target.value)} className={inputCls} /></Field>
         <Field label="Slip separation (S)"><input type="number" min={1} max={legCount} value={minSlipSeparation} onChange={e => setMinSep(+e.target.value)} className={inputCls} /></Field>
         <Field label="Max legs / league (D)"><input type="number" min={1} value={maxPerLeague} onChange={e => setMaxPerLeague(+e.target.value)} className={inputCls} /></Field>
+        <Field label="Kickoff gap (min)"><input type="number" min={0} step={15} value={minKickoffGapMinutes} onChange={e => setMinKickoffGapMinutes(+e.target.value)} className={inputCls} /></Field>
         <div className="flex items-end">
           <button
             onClick={build}
@@ -125,6 +140,7 @@ export default function PedlasPage() {
             <Stat label="Compression" value={`${Math.round(book.compressionRatio)}×`} />
             <Stat label="P(any hit)" value={pct(book.meta.pAnyHit)} />
             <Stat label="Ranked by" value={book.meta.ranked === 'nim' ? 'NIM' : 'deterministic'} />
+            <Stat label="Kickoff gap" value={`${data.meta.minKickoffGapMinutes ?? minKickoffGapMinutes} min`} />
           </div>
 
           <div className="mb-6 rounded-lg border border-zinc-200 bg-zinc-50 px-4 py-3 text-sm dark:border-zinc-700 dark:bg-zinc-800/50">
@@ -192,11 +208,12 @@ function SlipRow({ slip, stake }: { slip: PedlasSlip; stake: number }) {
         )}
         <table className="w-full text-left text-xs">
           <thead className="text-zinc-500">
-            <tr><th className="py-1 pr-4">Match</th><th className="pr-4">League</th><th className="pr-4">Pick</th><th>Odds</th></tr>
+            <tr><th className="py-1 pr-4">Kickoff</th><th className="py-1 pr-4">Match</th><th className="pr-4">League</th><th className="pr-4">Pick</th><th>Odds</th></tr>
           </thead>
           <tbody>
             {slip.legs.map((l, i) => (
               <tr key={i} className="border-t border-zinc-100 dark:border-zinc-800">
+                <td className="py-1 pr-4 text-zinc-500">{kickoffTime(l.kickoff)}</td>
                 <td className="py-1 pr-4 text-zinc-800 dark:text-zinc-200">{l.game}</td>
                 <td className="pr-4 text-zinc-500">{l.league}</td>
                 <td className={`pr-4 font-medium ${l.side === 'Over' ? 'text-orange-600 dark:text-orange-400' : 'text-zinc-700 dark:text-zinc-300'}`}>{l.outcome}</td>

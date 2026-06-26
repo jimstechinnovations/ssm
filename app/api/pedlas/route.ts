@@ -1,18 +1,8 @@
 /**
- * app/api/pedlas/route.ts
+ * POST /api/pedlas
  *
- * POST /api/pedlas — PEDLAS total-goals odds builder (small stake → big hit).
- *
- * Flow (stateless — no DB write in v1):
- *   1. Validate body
- *   2. Fetch fixtures for the date range (chosen bookmaker)
- *   3. Scan up to `scanLimit` fixtures: fetch odds → enrich
- *   4. selectAxes() — keep only total-goals Under ≥ 1.20 (Win-Boost qualifying)
- *   5. Order by kickoff, take the target leg count
- *   6. buildPedlasBook() — NIM-central ranking (auto), E/D/A/S, budget K, ₦50M cap
- *   7. Return the PedlasBook + scan meta
- *
- * HONEST: the response is a structured −vig lottery. The route never reports +EV.
+ * PEDLAS total-goals odds builder. Betway Nigeria uses the public Betway feed
+ * through Playwright; other bookmakers keep the API-Football fallback.
  */
 
 import { z } from 'zod'
@@ -22,6 +12,11 @@ import type { Fixture } from '@/lib/ssm/types'
 import { BookmakerPlatformSchema } from '@/lib/ssm/schemas'
 import { selectAxes, PEDLAS_LINES } from '@/lib/pedlas/market-select'
 import { buildPedlasBook } from '@/lib/pedlas/build'
+import { DEFAULT_PARAMS } from '@/lib/pedlas/types'
+import type { BinaryAxis } from '@/lib/pedlas/types'
+import { fetchBetwayPedlasFixtures } from '@/lib/betway/playwright'
+
+export const runtime = 'nodejs'
 
 const PedlasRequestSchema = z.object({
   bookmaker: BookmakerPlatformSchema.default('betway_nigeria'),
@@ -32,6 +27,7 @@ const PedlasRequestSchema = z.object({
   maxPayout: z.number().positive().optional(),
   legCount:  z.number().int().min(3).max(18).optional(),
   scanLimit: z.number().int().min(1).max(80).optional(),
+  minKickoffGapMinutes: z.number().int().min(0).max(10_080).optional(),
   rank:      z.enum(['nim', 'deterministic', 'auto']).optional(),
   params: z.object({
     minAnchorDistance: z.number().int().min(0).optional(),
@@ -44,6 +40,46 @@ const PedlasRequestSchema = z.object({
   const maxTo = new Date(from); maxTo.setDate(maxTo.getDate() + 7)
   return to >= from && to <= maxTo
 }, { message: 'date_to must be between date_from and date_from + 7 days' })
+
+async function apiFootballFixtures(
+  dateFrom: string,
+  dateTo: string,
+  bookmakerId: number | null,
+  scanLimit: number,
+): Promise<{ allFixtures: Fixture[]; enriched: Fixture[]; scanned: number }> {
+  const allFixtures = await searchFixturesByDateRange(dateFrom, dateTo, bookmakerId)
+  const enriched: Fixture[] = []
+  let scanned = 0
+
+  for (const fx of allFixtures) {
+    if (scanned >= scanLimit) break
+    scanned++
+    try {
+      const { odds, oddsUnavailable } = await fetchFixtureOdds(fx.id, bookmakerId)
+      if (oddsUnavailable || odds.length === 0) continue
+      enriched.push({ ...fx, odds })
+    } catch {
+      continue
+    }
+  }
+
+  return { allFixtures, enriched, scanned }
+}
+
+function selectDiverseAxes(axes: BinaryAxis[], targetLegs: number, maxPerLeague: number): BinaryAxis[] {
+  const counts = new Map<number, number>()
+  const selected: BinaryAxis[] = []
+
+  for (const axis of axes) {
+    if (selected.length >= targetLegs) break
+    const count = counts.get(axis.leagueId) ?? 0
+    if (count >= maxPerLeague) continue
+    counts.set(axis.leagueId, count + 1)
+    selected.push(axis)
+  }
+
+  return selected
+}
 
 export async function POST(request: Request): Promise<Response> {
   let body: unknown
@@ -65,41 +101,58 @@ export async function POST(request: Request): Promise<Response> {
   const minStake = parsed.data.minStake ?? 100
   const targetLegs = parsed.data.legCount ?? 11
   const scanLimit = parsed.data.scanLimit ?? 30
+  const minKickoffGapMinutes = parsed.data.minKickoffGapMinutes ?? 60
   const bookmakerId = BOOKMAKER_IDS[bookmaker]
 
-  // Fetch fixtures for the range.
   let allFixtures: Fixture[]
-  try {
-    allFixtures = await searchFixturesByDateRange(date_from, date_to, bookmakerId)
-  } catch {
-    return Response.json({ error: 'Failed to fetch fixtures' }, { status: 503 })
-  }
+  let enriched: Fixture[]
+  let scanned: number
+  const sourceMeta: Record<string, unknown> = {}
 
-  // Scan a bounded number of fixtures for odds, enrich, and collect total-goals axes.
-  const enriched: Fixture[] = []
-  let scanned = 0
-  for (const fx of allFixtures) {
-    if (scanned >= scanLimit) break
-    scanned++
+  if (bookmaker === 'betway_nigeria') {
     try {
-      const { odds, oddsUnavailable } = await fetchFixtureOdds(fx.id, bookmakerId)
-      if (oddsUnavailable || odds.length === 0) continue
-      enriched.push({ ...fx, odds })
+      const betway = await fetchBetwayPedlasFixtures({
+        dateFrom: date_from,
+        dateTo: date_to,
+        scanLimit,
+        minKickoffGapMinutes,
+      })
+      allFixtures = betway.fixtures
+      enriched = betway.fixtures
+      scanned = betway.fixtures.length
+      sourceMeta.oddsSource = betway.source
+      sourceMeta.feedUrl = betway.feedUrl
+      sourceMeta.minKickoffGapMinutes = minKickoffGapMinutes
+    } catch (err) {
+      return Response.json({
+        error: 'Failed to fetch Betway public odds with Playwright',
+        detail: err instanceof Error ? err.message : String(err),
+      }, { status: 503 })
+    }
+  } else {
+    try {
+      const result = await apiFootballFixtures(date_from, date_to, bookmakerId, scanLimit)
+      allFixtures = result.allFixtures
+      enriched = result.enriched
+      scanned = result.scanned
+      sourceMeta.oddsSource = 'api-football'
     } catch {
-      continue
+      return Response.json({ error: 'Failed to fetch fixtures' }, { status: 503 })
     }
   }
 
-  // PEDLAS market policy → axes, ordered by kickoff, trimmed to the target leg count.
   const axesAll = selectAxes(enriched).sort((a, b) => a.kickoff.localeCompare(b.kickoff))
-  const axes = axesAll.slice(0, targetLegs)
+  const maxPerLeague = parsed.data.params?.maxPerLeague ?? DEFAULT_PARAMS.maxPerLeague
+  const axes = selectDiverseAxes(axesAll, targetLegs, maxPerLeague)
 
   if (axes.length < 3) {
     return Response.json({
       error: 'Not enough qualifying total-goals markets',
-      detail: `Found ${axesAll.length} fixture(s) with an Under ≥ 1.20 total-goals line (need ≥ 3). ` +
-        `Scanned ${scanned} fixture(s). Try a wider date range or a different bookmaker.`,
+      detail: `Found ${axesAll.length} fixture(s) with an Under >= 1.20 total-goals line (need >= 3). ` +
+        `Scanned ${scanned} fixture(s). PEDLAS only uses ${PEDLAS_LINES.join(', ')} lines, ` +
+        `max ${maxPerLeague} legs per league, and kickoff gap >= ${minKickoffGapMinutes} minutes.`,
       lines: PEDLAS_LINES,
+      source: sourceMeta,
     }, { status: 422 })
   }
 
@@ -114,7 +167,13 @@ export async function POST(request: Request): Promise<Response> {
     })
     return Response.json({
       book,
-      meta: { scanned, fixturesFound: allFixtures.length, qualifyingAxes: axesAll.length, usedAxes: axes.length },
+      meta: {
+        scanned,
+        fixturesFound: allFixtures.length,
+        qualifyingAxes: axesAll.length,
+        usedAxes: axes.length,
+        ...sourceMeta,
+      },
     })
   } catch (err) {
     return Response.json(
