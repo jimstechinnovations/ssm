@@ -46,20 +46,19 @@ function pool(n: number): BinaryAxis[] {
 }
 
 // ── boost ──────────────────────────────────────────────────────────────────────
-describe('PEDLAS boost (winnings-boost, real Betway schedule)', () => {
+describe('PEDLAS boost (Betway displayed-return boost, real Betway schedule)', () => {
   it('reuses leg-stacker boostFor as the single source of truth', () => {
     expect(boostPercent(11)).toBe(20)   // 11 legs → +20%
     expect(boostPercent(50)).toBe(1000) // 50 legs → +1000%
     expect(boostPercent(2)).toBe(0)     // below tier
   })
 
-  it('boosts winnings (profit), not total return', () => {
+  it('matches Betway Nigeria betslip display: stake * odds * (1 + boost)', () => {
     // stake 100, odds 15.1, 11 legs, b=0.20: payout = 100·(1 + 14.1·1.2) = 100·17.92 = 1792
     const stake = 100, O = 15.1, L = 11
-    const expected = stake * (1 + (O - 1) * (1 + boostFor(L)))
+    const expected = stake * O * (1 + boostFor(L))
     expect(boostedPayout(stake, O, L)).toBeCloseTo(expected, 6)
     // strictly less than the naive stake·O·(1+b) convention
-    expect(boostedPayout(stake, O, L)).toBeLessThan(stake * O * (1 + boostFor(L)))
   })
 })
 
