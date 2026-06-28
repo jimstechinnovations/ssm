@@ -12,6 +12,8 @@ import type { Fixture } from '@/lib/ssm/types'
 import { BookmakerPlatformSchema } from '@/lib/ssm/schemas'
 import { selectAxes, PEDLAS_LINES } from '@/lib/pedlas/market-select'
 import { buildPedlasBook } from '@/lib/pedlas/build'
+import { savePedlasBook } from '@/lib/pedlas/store'
+import { enrichAxes, advisoryCoverage } from '@/lib/pedlas/enrich'
 import { DEFAULT_PARAMS } from '@/lib/pedlas/types'
 import type { BinaryAxis } from '@/lib/pedlas/types'
 import { fetchBetwayPedlasFixtures } from '@/lib/betway/playwright'
@@ -23,6 +25,8 @@ const PedlasRequestSchema = z.object({
   date_from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date_from must be YYYY-MM-DD'),
   date_to:   z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'date_to must be YYYY-MM-DD'),
   budget:    z.number().int().positive().min(100),
+  objective: z.enum(['moonshot', 'coverage']).optional(),
+  save:      z.boolean().optional(),   // default true; auto-refresh ticks pass false to avoid history spam
   minStake:  z.number().int().positive().optional(),
   maxPayout: z.number().positive().optional(),
   legCount:  z.number().int().min(3).max(18).optional(),
@@ -156,25 +160,36 @@ export async function POST(request: Request): Promise<Response> {
     }, { status: 422 })
   }
 
+  // Enrich with team-history advisory leans (apifootball H2H/last-N). Advisory only — does NOT
+  // change odds/EV. No-op when APIFOOTBALL_KEY is unset or a fixture's teams can't be matched.
+  const axesWithForm = await enrichAxes(axes)
+
   try {
     const book = await buildPedlasBook({
-      axes,
+      axes: axesWithForm,
       budget,
+      objective: parsed.data.objective ?? 'moonshot',
       minStake,
       maxPayout: parsed.data.maxPayout,
       params: parsed.data.params,
       rank: parsed.data.rank ?? 'auto',
     })
-    return Response.json({
-      book,
-      meta: {
-        scanned,
-        fixturesFound: allFixtures.length,
-        qualifyingAxes: axesAll.length,
-        usedAxes: axes.length,
-        ...sourceMeta,
-      },
-    })
+    const meta = {
+      scanned,
+      fixturesFound: allFixtures.length,
+      qualifyingAxes: axesAll.length,
+      usedAxes: axes.length,
+      advisory: advisoryCoverage(axesWithForm),
+      ...sourceMeta,
+    }
+
+    // Persist (default on). Soft-fails if the migration isn't applied yet.
+    let bookId: string | null = null
+    if (parsed.data.save !== false) {
+      bookId = await savePedlasBook({ book, meta, dateFrom: date_from, dateTo: date_to })
+    }
+
+    return Response.json({ book, meta, bookId, saved: bookId != null })
   } catch (err) {
     return Response.json(
       { error: 'PEDLAS build failed', detail: err instanceof Error ? err.message : String(err) },

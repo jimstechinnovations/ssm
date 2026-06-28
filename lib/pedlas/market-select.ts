@@ -1,15 +1,22 @@
 // lib/pedlas/market-select.ts
-// PEDLAS market policy: keep ONLY total-goals Under/Over markets whose Under price
-// is ≥ 1.20 (so every leg qualifies for Betway Win Boost). For each fixture we pick
-// the single most-dominant qualifying line (highest Under probability that still
-// clears 1.20) and express it as a binary axis (state 0 = Under, state 1 = Over).
+// PEDLAS market policy (generalised): for each fixture, across total-goals lines 1.5–6.5, pick the
+// most RELIABLE dominant side whose odds still clear 1.20 (so the anchor leg qualifies for Betway
+// Win Boost). The dominant side is whichever of Under/Over is more likely — Over 1.5 for high-scoring
+// fixtures, Under 4.5 for low-scoring ones. That dominant side is state 0 (the anchor); the breakout
+// is state 1. Reliable dominant legs make Coverage's floor strong and slips robust to single upsets.
+//
+// IMPORTANT: this does NOT create edge (pedlas_v2.md — no model beats the book on any market). It
+// only swaps fragile Over-4.5 anchors for reliable ones; the book stays −vig.
 
 import type { Fixture, OddsValue } from '../ssm/types'
 import type { BinaryAxis, GoalLine } from './types'
 
-/** Total-goals lines PEDLAS considers, low → high. */
-export const PEDLAS_LINES: GoalLine[] = [4.5, 5.5, 6.5]
-export const MIN_UNDER_ODDS = 1.20
+/** Total-goals lines PEDLAS considers, low → high. Low lines anchor on Over, high lines on Under. */
+export const PEDLAS_LINES: GoalLine[] = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
+/** The dominant (anchor) leg must clear this to count toward Win Boost and add meaningful odds. */
+export const MIN_DOMINANT_ODDS = 1.20
+/** @deprecated kept for back-compat; use MIN_DOMINANT_ODDS. */
+export const MIN_UNDER_ODDS = MIN_DOMINANT_ODDS
 
 interface SideOdds { under: number | null; over: number | null }
 
@@ -32,58 +39,58 @@ function devig(underOdds: number, overOdds: number) {
   const iU = 1 / underOdds
   const iO = 1 / overOdds
   const sum = iU + iO
-  const underProb = iU / sum
-  const overProb = iO / sum
-  return { underProb, overProb, margin: sum - 1 }
+  return { underProb: iU / sum, overProb: iO / sum, margin: sum - 1 }
 }
 
 export interface MarketSelectOptions {
-  lines?: GoalLine[]        // default PEDLAS_LINES
-  minUnderOdds?: number     // default 1.20
+  lines?: GoalLine[]          // default PEDLAS_LINES
+  minDominantOdds?: number    // default 1.20
 }
 
 /**
- * Build one BinaryAxis per fixture, applying the PEDLAS market policy.
- * A fixture contributes an axis iff at least one requested line has BOTH sides priced
- * AND Under odds ≥ minUnderOdds. Among qualifying lines we choose the most-dominant
- * Under (lowest Under odds that still clears the threshold = highest qualifying line).
- * Fixtures with no qualifying line are dropped.
+ * Build one BinaryAxis per fixture. For each line with both sides priced, the dominant side is the
+ * more probable one; the line qualifies iff the dominant side's odds ≥ minDominantOdds. Among
+ * qualifying lines we keep the MOST reliable dominant (lowest dominant odds ≥ threshold). Fixtures
+ * with no qualifying line are dropped.
  */
 export function selectAxes(fixtures: Fixture[], opts: MarketSelectOptions = {}): BinaryAxis[] {
   const lines = opts.lines ?? PEDLAS_LINES
-  const minUnderOdds = opts.minUnderOdds ?? MIN_UNDER_ODDS
+  const minDominantOdds = opts.minDominantOdds ?? MIN_DOMINANT_ODDS
 
   const axes: BinaryAxis[] = []
 
   for (const fx of fixtures) {
     let best: BinaryAxis | null = null
+    let bestDomOdds = Infinity
 
     for (const line of lines) {
       const { under, over } = sidesForLine(fx.odds, line)
-      if (under == null || over == null) continue
-      if (under < minUnderOdds) continue       // Under must qualify for Win Boost
-      if (over <= 1) continue                   // sanity
+      if (under == null || over == null || under <= 1 || over <= 1) continue
 
       const { underProb, overProb, margin } = devig(under, over)
-      const volatility = 2 * Math.min(underProb, overProb)
+      const dominantSide: 'Over' | 'Under' = underProb >= overProb ? 'Under' : 'Over'
+      const dominantOdds = dominantSide === 'Under' ? under : over
+      if (dominantOdds < minDominantOdds) continue // anchor leg must qualify for Win Boost
 
-      const candidate: BinaryAxis = {
-        fixtureId:  fx.id,
-        game:       `${fx.homeTeam} vs ${fx.awayTeam}`,
-        league:     fx.league,
-        leagueId:   fx.leagueId,
-        kickoff:    fx.kickoff,
-        line,
-        underOdds:  under,
-        underProb,
-        overOdds:   over,
-        overProb,
-        margin,
-        volatility,
+      // Prefer the most reliable dominant (lowest dominant odds that still clears the gate).
+      if (dominantOdds < bestDomOdds) {
+        bestDomOdds = dominantOdds
+        best = {
+          fixtureId: fx.id,
+          game:      `${fx.homeTeam} vs ${fx.awayTeam}`,
+          league:    fx.league,
+          leagueId:  fx.leagueId,
+          kickoff:   fx.kickoff,
+          line,
+          underOdds: under,
+          underProb,
+          overOdds:  over,
+          overProb,
+          dominantSide,
+          margin,
+          volatility: 2 * Math.min(underProb, overProb),
+        }
       }
-
-      // Prefer the most-dominant qualifying Under (lowest Under odds ≥ threshold).
-      if (best === null || candidate.underOdds < best.underOdds) best = candidate
     }
 
     if (best) axes.push(best)

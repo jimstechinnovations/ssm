@@ -162,6 +162,40 @@ profitability") and `coverage-optimizer.ts`'s EV-invariance note. Honest pitch t
 
 ---
 
+## 5b. Coverage mode — the floor (added after the 2026-06-26 near-miss)
+
+The original build is **Moonshot**: rank by payout, push slips apart with Slip Separation (S), flat
+₦100 — rare huge win, ~1% hit. Real play (slip #4, betslip 556632591) went **6/7**: it lost only on
+`Cambrian Over 4.5` (1-0). Reality was the *single-flip neighbor* of the placed slip — which S had
+deliberately excluded. That motivates the opposite end of the dial.
+
+**Coverage mode** targets *"one hit covers the total stake"*:
+
+- Rank candidate vectors by **probability** (most-likely first), not payout.
+- **Keep neighbors** (skip S / S=1) so a near-miss is caught by an adjacent slip.
+- **A ≥ 1** (default for coverage) excludes only the all-Under anchor, so every placed slip's boosted
+  payout clears the total stake — the floor guarantee.
+- Flat ₦100 (Nigerian min); place the top **K** by probability.
+
+**Worked maths (L=7, p(Under)≈0.74, oU≈1.30, oO≈3.50, boost(7)=+12%, K=10, total stake ₦1,000):**
+
+| band | P(reality lands here) | covered? | hit payout (₦100) |
+|---|---:|---|---:|
+| all-Under (0 Over) | 0.74⁷ = **12.1%** | excluded by A≥1 (pays ₦694 < ₦1,000) | — |
+| exactly 1 Over (7 vectors) | 7·0.74⁶·0.26 = **29.9%** | ✅ all 7 covered | ~₦1,900 (+90%) |
+| exactly 2 Over (covered subset) | part of 31% | ✅ top few | ~₦5,000 |
+
+So coverage converts "≈1% chance of a moonshot" into **≈30%+ chance of a profitable hit** that always
+clears the ₦1,000 total stake. **EV is unchanged (still −vig ≈ 0.63)** — the `coverage-optimizer`
+invariant holds; this only reshapes variance from "rare big" to "often small". Blind spot: a
+high-scoring night (≥3 Overs, like 26 Jun) falls outside the covered band and loses — there is no
+setting that catches every slate at fixed −vig. Moonshot vs Coverage is the user's variance choice.
+
+NIM ranking applies to **Moonshot only** (ranking high-payout candidates by hidden risk). Coverage is
+pure probability math — deterministic and reproducible.
+
+---
+
 ## 6. Architecture (new `lib/pedlas/`, reuses primitives)
 
 ```

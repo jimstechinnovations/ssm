@@ -25,8 +25,37 @@ export interface BinaryAxis {
   overOdds:   number
   overProb:   number    // de-vigged P(Over)
 
+  /**
+   * Which literal side is the DOMINANT (anchor / state-0) side for this line.
+   * Defaults to 'Under' when absent (back-compat: high lines anchor on Under). For low lines
+   * (e.g. Over 1.5) the dominant side is 'Over'. state 0 = dominant, state 1 = breakout.
+   */
+  dominantSide?: 'Over' | 'Under'
+
+  /** ADVISORY ONLY (from team match-history). Never used in odds/EV math — backtested no edge. */
+  advisory?: AxisAdvisory
+
   margin:     number    // two-way overround = 1/underOdds + 1/overOdds − 1
   volatility: number    // [0,1] — axis closeness (1 = coin-flip, 0 = lopsided); a ranking feature
+}
+
+/** History-model view of an axis. Advisory: shown + fed to NIM, but does NOT change odds/EV. */
+export interface AxisAdvisory {
+  pHat: number                          // model p̂ of the DOMINANT side from recent form
+  edge: number                          // p̂_dominant / p_book_dominant  (>1 = model likes the anchor)
+  lean: 'back' | 'fade' | 'neutral'     // back = model agrees with the dominant pick
+  note: string                          // short human note (e.g. "form λ 1.8–1.1")
+}
+
+/** The opposite total-goals side. */
+export function otherSide(s: 'Over' | 'Under'): 'Over' | 'Under' { return s === 'Over' ? 'Under' : 'Over' }
+/** Odds / prob for a literal side of an axis. */
+export function sideOdds(a: BinaryAxis, side: 'Over' | 'Under'): number { return side === 'Over' ? a.overOdds : a.underOdds }
+export function sideProb(a: BinaryAxis, side: 'Over' | 'Under'): number { return side === 'Over' ? a.overProb : a.underProb }
+/** The literal side a state bit maps to: 0 = dominant (default Under), 1 = breakout. */
+export function stateSide(a: BinaryAxis, bit: 0 | 1): 'Over' | 'Under' {
+  const dom = a.dominantSide ?? 'Under'
+  return bit === 0 ? dom : otherSide(dom)
 }
 
 /** The PEDLAS structural parameters (E, D, A, S). P and L are derived from the pool. */
@@ -123,19 +152,27 @@ export interface PedlasVerdict {
   honestLabel: string       // MANDATORY disclosure string (see budget.ts)
 }
 
+/** Moonshot = rare big payout (payout-ranked, separated). Coverage = frequent small win (probability-ranked, neighbours kept). */
+export type PedlasObjective = 'moonshot' | 'coverage'
+
 export interface PedlasBook {
   mode:             'pedlas'
+  objective:        PedlasObjective
   params:           PedlasParams
   legCount:         number     // L
   budget:           number
   stakePerSlip:     number
   K:                number     // floor(budget / stakePerSlip)
+  totalStake:       number     // Σ slip stakes actually placed
+  guaranteedFloor:  boolean    // every placed slip's payout ≥ totalStake (one hit ≥ stake back)
+  minPayout:        number     // smallest placed-slip payout (the worst hit)
   compressionRatio: number     // 2^L / candidateCount
+  pool:             BinaryAxis[] // the axes used (both Under/Over sides) — enables editing/flipping legs
   slips:            PedlasSlip[]
   verdict:          PedlasVerdict
   meta: {
     candidateCount: number
-    pAnyHit:        number     // disjoint approximation: Σ trueProb over kept slips
+    pAnyHit:        number     // disjoint exact: Σ trueProb over placed slips = P(≥1 slip hits)
     ranked:         'nim' | 'deterministic'
   }
 }
@@ -143,8 +180,9 @@ export interface PedlasBook {
 export interface PedlasConfig {
   axes:        BinaryAxis[]
   budget:      number
+  objective?:  PedlasObjective                      // default 'moonshot' (preserves prior behaviour)
   minStake?:   number                              // default 100 (Nigerian bookmaker minimum)
   maxPayout?:  number                              // Betway max-win cap (default ₦50,000,000)
   params?:     Partial<PedlasParams>
-  rank?:       'nim' | 'deterministic' | 'auto'    // 'auto' = nim if NVIDIA_API_KEY present, else deterministic
+  rank?:       'nim' | 'deterministic' | 'auto'    // 'auto' = nim if NVIDIA_API_KEY present, else deterministic (moonshot only)
 }

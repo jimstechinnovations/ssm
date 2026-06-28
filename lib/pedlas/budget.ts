@@ -6,6 +6,7 @@
 import type {
   BinaryAxis, PedlasLeg, PedlasSlip, PedlasVerdict, RankedVector,
 } from './types'
+import { sideOdds, stateSide } from './types'
 import { boostPercent, boostedPayout, honestEvMultiple } from './boost'
 
 /** Nigerian bookmaker minimum stake per slip. */
@@ -26,20 +27,20 @@ export function budgetSlots(budget: number, minStake: number = DEFAULT_MIN_STAKE
   return Math.floor(budget / minStake)
 }
 
-/** Build the L legs for a vector (one Under/Over leg per axis). */
+/** Build the L legs for a vector. state 0 = dominant side, state 1 = breakout (per axis). */
 export function buildLegs(vector: (0 | 1)[], axes: BinaryAxis[]): PedlasLeg[] {
   return axes.map((a, i) => {
-    const isOver = vector[i] === 1
+    const side = stateSide(a, vector[i])
     return {
       fixtureId: a.fixtureId,
       game:      a.game,
       league:    a.league,
       kickoff:   a.kickoff,
       line:      a.line,
-      side:      isOver ? 'Over' : 'Under',
+      side,
       market:    `OVER_UNDER_${a.line}`,
-      outcome:   `${isOver ? 'Over' : 'Under'} ${a.line}`,
-      odds:      isOver ? a.overOdds : a.underOdds,
+      outcome:   `${side} ${a.line}`,
+      odds:      sideOdds(a, side),
     }
   })
 }

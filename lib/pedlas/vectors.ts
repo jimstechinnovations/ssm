@@ -6,6 +6,7 @@
 // (= L) is constant across slips; only the Under/Over pattern (and thus odds/prob) varies.
 
 import type { BinaryAxis, PedlasVector, VectorFeatures } from './types'
+import { sideOdds, sideProb, stateSide } from './types'
 import { honestEvMultiple } from './boost'
 
 /** Hard cap on full enumeration: 2^18 = 262,144 vectors. Larger pools need sampling (future work). */
@@ -13,13 +14,13 @@ export const MAX_ENUMERATE_LEGS = 18
 
 export function combinedOddsOf(vector: (0 | 1)[], axes: BinaryAxis[]): number {
   let o = 1
-  for (let i = 0; i < axes.length; i++) o *= vector[i] === 0 ? axes[i].underOdds : axes[i].overOdds
+  for (let i = 0; i < axes.length; i++) o *= sideOdds(axes[i], stateSide(axes[i], vector[i]))
   return o
 }
 
 export function trueProbOf(vector: (0 | 1)[], axes: BinaryAxis[]): number {
   let p = 1
-  for (let i = 0; i < axes.length; i++) p *= vector[i] === 0 ? axes[i].underProb : axes[i].overProb
+  for (let i = 0; i < axes.length; i++) p *= sideProb(axes[i], stateSide(axes[i], vector[i]))
   return p
 }
 
@@ -80,7 +81,7 @@ function featuresOf(
     if (vector[i] === 1) {
       flips++
       fVol += axes[i].volatility
-      fOdds += axes[i].overOdds
+      fOdds += sideOdds(axes[i], stateSide(axes[i], 1)) // breakout-side odds
       fLeagues.add(axes[i].leagueId)
     }
   }

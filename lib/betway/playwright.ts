@@ -8,7 +8,7 @@ const BETWAY_HIGHLIGHTS_URL = 'https://www.betway.com.ng/sport/soccer/highlights
 const BETWAY_FEED_URL = 'https://feeds-roa2.betwayafrica.com/br/_apis/sport/v1/BetBook/Highlights/'
 const COUNTRY_CODE = 'NG'
 const CULTURE_CODE = 'en-US'
-const HIGH_LINES = new Set([4.5, 5.5, 6.5])
+const HIGH_LINES = new Set([1.5, 2.5, 3.5, 4.5, 5.5, 6.5]) // all PEDLAS total-goals lines (dominant side picked per line)
 const CACHE_TTL_MS = 60_000
 
 interface BetwayEvent {

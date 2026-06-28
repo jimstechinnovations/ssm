@@ -15,8 +15,9 @@ export type RankMode = 'nim' | 'deterministic' | 'auto'
 
 export interface RankOptions {
   mode?: RankMode
-  maxForLlm?: number   // candidates sent to NIM (default 60)
-  poolCap?: number     // max ranked candidates returned (default 2000)
+  maxForLlm?: number     // candidates sent to NIM (default 60)
+  poolCap?: number       // max ranked candidates returned (default 2000)
+  advisoryNote?: string  // per-fixture history-model leans (advisory) added to the NIM prompt
 }
 
 export interface RankResult {
@@ -39,6 +40,17 @@ export function deterministicRank(vectors: PedlasVector[], poolCap = 2000): Rank
   return sorted.map((v, i) => ({ ...v, rankScore: scores[i] }))
 }
 
+/**
+ * Coverage ranking: most-PROBABLE vectors first (the "frequent small win" floor). This is the
+ * deterministic order the coverage objective places — it catches near-misses by covering the
+ * anchor's neighbourhood, not by spreading slips out. Pure probability math (no NIM).
+ */
+export function coverageRank(vectors: PedlasVector[], poolCap = 2000): RankedVector[] {
+  const sorted = [...vectors].sort((a, b) => b.trueProb - a.trueProb).slice(0, poolCap)
+  const scores = normalize(sorted.map(v => Math.log(v.trueProb)))
+  return sorted.map((v, i) => ({ ...v, rankScore: scores[i] }))
+}
+
 const SYSTEM_PROMPT = [
   'You are PEDLAS\'s slip-ranking analyst for a total-goals Under/Over coverage builder.',
   'You are NOT a football predictor. Do NOT predict match results. Do NOT invent statistics.',
@@ -51,13 +63,14 @@ const SYSTEM_PROMPT = [
   '"hiddenRisk":"<short>","reasoning":"<short>"}]} with one entry per candidate id.',
 ].join(' ')
 
-function buildUserPrompt(cands: PedlasVector[]): string {
+function buildUserPrompt(cands: PedlasVector[], advisoryNote = ''): string {
   const f0 = cands[0]?.features
   const ctx = f0
     ? `Pool context: legCount=${f0.legCount}, avgMargin=${(f0.avgMargin * 100).toFixed(1)}%, ` +
       `avgVolatility=${f0.avgVolatility.toFixed(2)}, avgLine=${f0.avgLineHeight.toFixed(1)}, ` +
       `distinctLeagues=${f0.distinctLeagues}, kickoffSpreadHours=${f0.kickoffSpreadHours.toFixed(1)}.`
     : ''
+  const adv = advisoryNote ? `\n${advisoryNote}` : ''
   const rows = cands.map((v, id) => {
     const f = v.features
     return {
@@ -71,21 +84,21 @@ function buildUserPrompt(cands: PedlasVector[]): string {
       flippedLeagues: f.flippedLeagues,
     }
   })
-  return `${ctx}\nScore every candidate (rank big diversified payout vs hidden risk).\n` +
+  return `${ctx}${adv}\nScore every candidate (rank big diversified payout vs hidden risk).\n` +
     `Candidates JSON:\n${JSON.stringify(rows)}`
 }
 
 interface NimScore { id: number; score: number; hiddenRisk?: string; reasoning?: string }
 
 /** NIM-central ranking over the top-`maxForLlm` payout candidates. Falls back on any error. */
-export async function nimRank(vectors: PedlasVector[], maxForLlm = 60, poolCap = 2000): Promise<RankResult> {
+export async function nimRank(vectors: PedlasVector[], maxForLlm = 60, poolCap = 2000, advisoryNote = ''): Promise<RankResult> {
   const base = deterministicRank(vectors, poolCap)          // payout-forward shortlist
   const shortlist = base.slice(0, Math.min(maxForLlm, base.length))
   try {
     const content = await nimChat(
       [
         { role: 'system', content: SYSTEM_PROMPT },
-        { role: 'user', content: buildUserPrompt(shortlist) },
+        { role: 'user', content: buildUserPrompt(shortlist, advisoryNote) },
       ],
       { temperature: 0, json: true, maxTokens: 4096 },
     )
@@ -117,6 +130,6 @@ export async function rankVectors(vectors: PedlasVector[], opts: RankOptions = {
   const poolCap = opts.poolCap ?? 2000
   const mode = opts.mode ?? 'auto'
   const useNim = mode === 'nim' || (mode === 'auto' && nimConfigured())
-  if (useNim) return nimRank(vectors, opts.maxForLlm ?? 60, poolCap)
+  if (useNim) return nimRank(vectors, opts.maxForLlm ?? 60, poolCap, opts.advisoryNote ?? '')
   return { ranked: deterministicRank(vectors, poolCap), source: 'deterministic' }
 }
