@@ -102,7 +102,7 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
   }
 
   const kept = diverseFill(ranked, K)             // prefers ≥2-apart variants, backfills to K (full budget)
-  const candidateSlipCount = ranked.length        // N = distinct candidate slips after PEDLAS filtering
+  const candidateSlipCount = kept.length          // CR = 2^L / placed slips (outcome space your book covers)
 
   const maxPayout = cfg.maxPayout ?? DEFAULT_MAX_PAYOUT
   const slips = kept.map((rv, i) => assembleSlip(rv, pool, i + 1, stake, maxPayout))
