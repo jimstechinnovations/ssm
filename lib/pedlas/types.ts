@@ -35,8 +35,18 @@ export interface BinaryAxis {
   /** ADVISORY ONLY (from team match-history). Never used in odds/EV math — backtested no edge. */
   advisory?: AxisAdvisory
 
+  /** Why this axis was selected/anchored — composite quality + human reasons (for the UI summary). */
+  decision?: AxisDecision
+
   margin:     number    // two-way overround = 1/underOdds + 1/overOdds − 1
   volatility: number    // [0,1] — axis closeness (1 = coin-flip, 0 = lopsided); a ranking feature
+}
+
+/** The selection rationale for an axis — a confident, clean, form-corroborated pick (not an edge claim). */
+export interface AxisDecision {
+  pick:       string    // the anchored outcome, e.g. "Under 4.5"
+  confidence: number    // 0–100 composite quality (book confidence − vig − volatility ± form)
+  reasons:    string[]  // human bullets shown in the UI decision summary
 }
 
 /** History-model view of an axis. Advisory: shown + fed to NIM, but does NOT change odds/EV. */
@@ -68,6 +78,12 @@ export interface PedlasParams {
   maxIdenticalRun: number
   /** D — Diversity: maximum legs from any one competition within a single slip. */
   maxPerLeague: number
+  /**
+   * Coverage scatter: fraction of the MOST-CONFIDENT legs to PIN at the anchor (never varied), so
+   * variation/separation is spent only on the UNCERTAIN legs → real scattered, distinct slip
+   * variants. 0 = pin none (old uniform coverage). Coverage defaults to 0.5; ignored by moonshot.
+   */
+  pinTopFrac: number
 }
 
 export const DEFAULT_PARAMS: PedlasParams = {
@@ -75,6 +91,7 @@ export const DEFAULT_PARAMS: PedlasParams = {
   minSlipSeparation: 3,
   maxIdenticalRun:   4,
   maxPerLeague:      3,
+  pinTopFrac:        0,
 }
 
 /** Per-vector features — the ONLY inputs the NIM ranker is allowed to see. */

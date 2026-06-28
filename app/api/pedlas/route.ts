@@ -14,8 +14,8 @@ import { selectAxes, PEDLAS_LINES } from '@/lib/pedlas/market-select'
 import { buildPedlasBook } from '@/lib/pedlas/build'
 import { savePedlasBook } from '@/lib/pedlas/store'
 import { enrichAxes, advisoryCoverage } from '@/lib/pedlas/enrich'
+import { selectByQuality } from '@/lib/pedlas/quality'
 import { DEFAULT_PARAMS } from '@/lib/pedlas/types'
-import type { BinaryAxis } from '@/lib/pedlas/types'
 import { fetchBetwayPedlasFixtures } from '@/lib/betway/playwright'
 
 export const runtime = 'nodejs'
@@ -68,21 +68,6 @@ async function apiFootballFixtures(
   }
 
   return { allFixtures, enriched, scanned }
-}
-
-function selectDiverseAxes(axes: BinaryAxis[], targetLegs: number, maxPerLeague: number): BinaryAxis[] {
-  const counts = new Map<number, number>()
-  const selected: BinaryAxis[] = []
-
-  for (const axis of axes) {
-    if (selected.length >= targetLegs) break
-    const count = counts.get(axis.leagueId) ?? 0
-    if (count >= maxPerLeague) continue
-    counts.set(axis.leagueId, count + 1)
-    selected.push(axis)
-  }
-
-  return selected
 }
 
 export async function POST(request: Request): Promise<Response> {
@@ -145,11 +130,10 @@ export async function POST(request: Request): Promise<Response> {
     }
   }
 
-  const axesAll = selectAxes(enriched).sort((a, b) => a.kickoff.localeCompare(b.kickoff))
+  const axesAll = selectAxes(enriched)
   const maxPerLeague = parsed.data.params?.maxPerLeague ?? DEFAULT_PARAMS.maxPerLeague
-  const axes = selectDiverseAxes(axesAll, targetLegs, maxPerLeague)
 
-  if (axes.length < 3) {
+  if (axesAll.length < 3) {
     return Response.json({
       error: 'Not enough qualifying total-goals markets',
       detail: `Found ${axesAll.length} fixture(s) with an Under >= 1.20 total-goals line (need >= 3). ` +
@@ -160,13 +144,18 @@ export async function POST(request: Request): Promise<Response> {
     }, { status: 422 })
   }
 
-  // Enrich with team-history advisory leans (apifootball H2H/last-N). Advisory only — does NOT
-  // change odds/EV. No-op when APIFOOTBALL_KEY is unset or a fixture's teams can't be matched.
-  const axesWithForm = await enrichAxes(axes)
+  // Shortlist the most book-confident fixtures (bounds enrichment cost), enrich them with team-history
+  // leans (store-first, so usually no live calls), then pick the BEST legs by composite quality
+  // (confidence − vig − volatility ± form). Each chosen axis carries its decision rationale.
+  const shortlist = [...axesAll]
+    .sort((a, b) => Math.max(b.underProb, b.overProb) - Math.max(a.underProb, a.overProb))
+    .slice(0, targetLegs * 2 + 6)
+  const enrichedShort = await enrichAxes(shortlist)
+  const axes = selectByQuality(enrichedShort, targetLegs, maxPerLeague)
 
   try {
     const book = await buildPedlasBook({
-      axes: axesWithForm,
+      axes,
       budget,
       objective: parsed.data.objective ?? 'moonshot',
       minStake,
@@ -179,7 +168,7 @@ export async function POST(request: Request): Promise<Response> {
       fixturesFound: allFixtures.length,
       qualifyingAxes: axesAll.length,
       usedAxes: axes.length,
-      advisory: advisoryCoverage(axesWithForm),
+      advisory: advisoryCoverage(axes),
       ...sourceMeta,
     }
 

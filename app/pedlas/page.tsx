@@ -68,7 +68,6 @@ export default function PedlasPage() {
   const [budget, setBudget] = useState(1000)
   const [legCount, setLegCount] = useState(7)
   const [minAnchorDistance, setMinAnchor] = useState(1)
-  const [minSlipSeparation, setMinSep] = useState(4)
   const [maxPerLeague, setMaxPerLeague] = useState(3)
   const [minKickoffGapMinutes, setMinKickoffGapMinutes] = useState(60)
 
@@ -120,7 +119,7 @@ export default function PedlasPage() {
           bookmaker: 'betway_nigeria',
           date_from: dateFrom, date_to: dateTo,
           budget, legCount, minKickoffGapMinutes, objective, save,
-          params: { minAnchorDistance, minSlipSeparation, maxPerLeague },
+          params: { minAnchorDistance, maxPerLeague },
         }),
       })
       const json = await res.json()
@@ -199,6 +198,9 @@ export default function PedlasPage() {
   const advByFixture = new Map<number, AxisAdvisory>(
     (editedBook?.pool ?? []).filter(a => a.advisory).map(a => [a.fixtureId, a.advisory!]),
   )
+  const decisions = (editedBook?.pool ?? [])
+    .filter(a => a.decision)
+    .sort((a, b) => (b.decision!.confidence) - (a.decision!.confidence))
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
@@ -248,7 +250,6 @@ export default function PedlasPage() {
         <Field label="Budget (₦)"><input type="number" min={100} step={100} value={budget} onChange={e => setBudget(+e.target.value)} className={inputCls} /></Field>
         <Field label="Legs (L)"><input type="number" min={3} max={18} value={legCount} onChange={e => setLegCount(+e.target.value)} className={inputCls} /></Field>
         <Field label="Min Over-flips (A)"><input type="number" min={0} max={legCount} value={minAnchorDistance} onChange={e => setMinAnchor(+e.target.value)} className={inputCls} /></Field>
-        <Field label="Slip separation (S)"><input type="number" min={1} max={legCount} value={minSlipSeparation} onChange={e => setMinSep(+e.target.value)} className={inputCls} /></Field>
         <Field label="Max legs / league (D)"><input type="number" min={1} value={maxPerLeague} onChange={e => setMaxPerLeague(+e.target.value)} className={inputCls} /></Field>
         <Field label="Kickoff gap (min)"><input type="number" min={0} step={15} value={minKickoffGapMinutes} onChange={e => setMinKickoffGapMinutes(+e.target.value)} className={inputCls} /></Field>
         <div className="flex items-end">
@@ -344,6 +345,31 @@ export default function PedlasPage() {
               <span className="ml-2 text-zinc-500">· model leans on {data.meta.advisory.withForm}/{data.meta.advisory.total} fixtures <em>(advisory only — no edge)</em></span>
             )}
           </div>
+
+          {/* Decision summary — why each game was picked (advisory, not an edge claim) */}
+          {decisions.length > 0 && (
+            <details open className="mb-6 rounded-lg border border-zinc-200 bg-white dark:border-zinc-700 dark:bg-zinc-900">
+              <summary className="cursor-pointer px-4 py-3 text-sm font-semibold text-zinc-900 dark:text-zinc-100">
+                Decision summary — most-likely side per game ({decisions.length}) <span className="font-normal text-zinc-500">· drove selection; slips scatter around it (see each slip&apos;s Pick) · advisory, not an edge</span>
+              </summary>
+              <div className="divide-y divide-zinc-100 dark:divide-zinc-800">
+                {decisions.map(a => (
+                  <div key={a.fixtureId} className="px-4 py-2 text-xs">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium text-zinc-800 dark:text-zinc-200">{a.game}</span>
+                      <span className="flex items-center gap-2">
+                        <span className="font-semibold text-zinc-900 dark:text-zinc-100">{a.decision!.pick}</span>
+                        <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">conf {a.decision!.confidence}</span>
+                      </span>
+                    </div>
+                    <ul className="mt-1 ml-4 list-disc text-zinc-500 dark:text-zinc-400">
+                      {a.decision!.reasons.map((r, i) => <li key={i}>{r}</li>)}
+                    </ul>
+                  </div>
+                ))}
+              </div>
+            </details>
+          )}
 
           {/* Slips */}
           <div className="space-y-2">

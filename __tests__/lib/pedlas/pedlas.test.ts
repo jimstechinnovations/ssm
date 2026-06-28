@@ -180,19 +180,18 @@ describe('PEDLAS separation (S)', () => {
 
 // ── end-to-end book ──────────────────────────────────────────────────────────────
 describe('buildPedlasBook (deterministic)', () => {
-  it('produces a budget-bounded, separated, anchor-distant, honest book', async () => {
+  it('produces a budget-FILLED, scattered, anchor-distant, honest book', async () => {
     const axes = pool(11)
     const book = await buildPedlasBook({
       axes, budget: 1000, minStake: 100, rank: 'deterministic',
-      params: { minAnchorDistance: 3, minSlipSeparation: 4, maxIdenticalRun: 6, maxPerLeague: 4 },
+      params: { minAnchorDistance: 3, maxIdenticalRun: 6, maxPerLeague: 4 },
     })
 
     expect(book.mode).toBe('pedlas')
     expect(book.legCount).toBe(11)
     expect(book.K).toBe(10)
     expect(book.meta.ranked).toBe('deterministic')
-    expect(book.slips.length).toBeGreaterThan(0)
-    expect(book.slips.length).toBeLessThanOrEqual(book.K)
+    expect(book.slips.length).toBe(book.K)   // budget fully filled (no rigid-S under-fill)
     expect(book.compressionRatio).toBeGreaterThan(1)
 
     // honesty: never advertise +EV from structure/boost
@@ -209,10 +208,9 @@ describe('buildPedlasBook (deterministic)', () => {
       expect(s.uncappedPayout).toBeCloseTo(boostedPayout(100, s.combinedOdds, 11), 4)
       expect(s.payout).toBeCloseTo(Math.min(s.uncappedPayout, 50_000_000), 4)
     }
-    // S respected across the whole book
-    for (let i = 0; i < book.slips.length; i++)
-      for (let j = i + 1; j < book.slips.length; j++)
-        expect(hammingDistance(book.slips[i].vector, book.slips[j].vector)).toBeGreaterThanOrEqual(4)
+    // scattered: every placed slip is a distinct variant
+    const seen = new Set(book.slips.map(s => s.vector.join('')))
+    expect(seen.size).toBe(book.slips.length)
 
     // slips are mutually exclusive outcomes → pAnyHit = Σ trueProb ≤ 1
     const sum = book.slips.reduce((a, s) => a + s.trueProb, 0)
@@ -266,22 +264,23 @@ describe('buildPedlasBook (deterministic)', () => {
     expect(book.slips.length).toBeGreaterThan(0)
   })
 
-  it('property: every placed slip honours A and S for random pools', async () => {
+  it('property: placed slips honour A, are distinct, and fill the budget for random pools', async () => {
     await fc.assert(
       fc.asyncProperty(
         fc.integer({ min: 6, max: 12 }),
-        fc.integer({ min: 2, max: 3 }),
-        async (n, sep) => {
+        async (n) => {
           const book = await buildPedlasBook({
             axes: pool(n), budget: 800, minStake: 100, rank: 'deterministic',
-            params: { minAnchorDistance: 2, minSlipSeparation: sep, maxIdenticalRun: 99, maxPerLeague: 5 },
+            params: { minAnchorDistance: 2, maxIdenticalRun: 99, maxPerLeague: 5 },
           })
           for (const s of book.slips) {
-            expect(s.vector.reduce((a: number, b) => a + b, 0)).toBeGreaterThanOrEqual(2)
+            expect(s.vector.reduce((a: number, b) => a + b, 0)).toBeGreaterThanOrEqual(2) // A
           }
-          for (let i = 0; i < book.slips.length; i++)
-            for (let j = i + 1; j < book.slips.length; j++)
-              expect(hammingDistance(book.slips[i].vector, book.slips[j].vector)).toBeGreaterThanOrEqual(sep)
+          // distinct variants
+          const seen = new Set(book.slips.map(s => s.vector.join('')))
+          expect(seen.size).toBe(book.slips.length)
+          // budget filled when candidates allow (n≥7 ⇒ ≥ K=8 candidates with A≥2)
+          if (n >= 8) expect(book.slips.length).toBe(book.K)
         },
       ),
       { numRuns: 25 },

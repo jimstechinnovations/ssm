@@ -13,7 +13,7 @@ import type { PedlasBook, PedlasConfig, PedlasObjective, PedlasParams, RankedVec
 import { capPoolByLeague, applyAnchorDistance, applyElimination } from './constraints'
 import { enumerateVectors, MAX_ENUMERATE_LEGS } from './vectors'
 import { rankVectors, coverageRank } from './rank'
-import { applySeparation } from './separation'
+import { diverseFill } from './separation'
 import { assembleSlip, buildVerdict, budgetSlots, pAnyHit, DEFAULT_MIN_STAKE, DEFAULT_MAX_PAYOUT } from './budget'
 
 function resolveParams(L: number, p?: Partial<PedlasParams>): PedlasParams {
@@ -23,6 +23,7 @@ function resolveParams(L: number, p?: Partial<PedlasParams>): PedlasParams {
   merged.minSlipSeparation = Math.max(1, Math.min(merged.minSlipSeparation, L))
   merged.maxPerLeague = Math.max(1, merged.maxPerLeague)
   merged.maxIdenticalRun = Math.max(1, merged.maxIdenticalRun)
+  merged.pinTopFrac = Math.max(0, Math.min(0.8, merged.pinTopFrac ?? 0))
   return merged
 }
 
@@ -42,6 +43,9 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
   if (objective === 'coverage') {
     if (cfgParams.minAnchorDistance === undefined) cfgParams.minAnchorDistance = 1
     if (cfgParams.maxIdenticalRun === undefined) cfgParams.maxIdenticalRun = 99 // ≥ any L ⇒ E disabled
+    // diverseFill maximises diversity then fills K (full budget) — no rigid S. pinTopFrac is an
+    // opt-in knob (measured: pinning ~halved P(any hit)), default off → hit-maximising coverage.
+    if (cfgParams.pinTopFrac === undefined) cfgParams.pinTopFrac = 0
   }
 
   // D — diversity: cap the pool per competition, then order by kickoff (for E + features).
@@ -67,32 +71,38 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
 
   const K = budgetSlots(cfg.budget, stake)
 
-  // Two objectives over the same candidate set:
-  //   moonshot — NIM-ranked by payout, then S spreads slips apart (rare big win).
-  //   coverage — probability-ranked, neighbours KEPT (no S) to catch near-misses (frequent small win).
+  // Optional confidence-pinning (BOTH objectives): pin the most-confident legs at the anchor so
+  // variation/scatter lands on the uncertain legs. pinTopFrac=0 ⇒ no pinning. Leave ≥2 legs free;
+  // fall back to no pinning if it over-thins the candidate set.
+  const confOrder = [...pool.keys()].sort((i, j) => (pool[j].decision?.confidence ?? 50) - (pool[i].decision?.confidence ?? 50))
+  const pinCount = Math.max(0, Math.min(L - 2, Math.round(L * (params.pinTopFrac ?? 0))))
+  const pinned = new Set(confOrder.slice(0, pinCount))
+  const scopedPin = pinned.size ? candidates.filter(v => [...pinned].every(i => v.vector[i] === 0)) : candidates
+  const pool2 = scopedPin.length >= Math.max(K, 6) ? scopedPin : candidates
+
+  // Rank, then DIVERSE-FILL to K (genuine scatter that always uses the full budget — no rigid S
+  // that under-fills). Objectives differ only in ranking:
+  //   coverage — probability-ranked (hit-maximising; the most-likely distinct variants).
+  //   moonshot — NIM/payout-ranked (rare big win; the highest-payout variants).
   let ranked: RankedVector[]
   let source: 'nim' | 'deterministic'
-  let candidateSlipCount: number   // N for the compression ratio
-  let kept: RankedVector[]
 
   if (objective === 'coverage') {
-    ranked = coverageRank(candidates)
+    ranked = coverageRank(pool2)
     source = 'deterministic'
-    kept = ranked.slice(0, K)            // most-probable K, neighbours intact
-    candidateSlipCount = candidates.length
   } else {
     const leans = pool.filter(a => a.advisory)
     const advisoryNote = leans.length
       ? 'History-model leans (ADVISORY ONLY — not odds, no edge): ' +
         leans.map(a => `${a.game} ${a.advisory!.lean}(edge ${a.advisory!.edge.toFixed(2)})`).join('; ')
       : ''
-    const r = await rankVectors(candidates, { mode: cfg.rank ?? 'auto', advisoryNote })
+    const r = await rankVectors(pool2, { mode: cfg.rank ?? 'auto', advisoryNote })
     ranked = r.ranked
     source = r.source
-    const separated = applySeparation(ranked, params.minSlipSeparation)
-    candidateSlipCount = separated.length
-    kept = separated.slice(0, K)
   }
+
+  const kept = diverseFill(ranked, K)             // prefers ≥2-apart variants, backfills to K (full budget)
+  const candidateSlipCount = ranked.length        // N = distinct candidate slips after PEDLAS filtering
 
   const maxPayout = cfg.maxPayout ?? DEFAULT_MAX_PAYOUT
   const slips = kept.map((rv, i) => assembleSlip(rv, pool, i + 1, stake, maxPayout))

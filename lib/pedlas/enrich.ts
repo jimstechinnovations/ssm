@@ -10,16 +10,27 @@ import 'server-only'
 import type { BinaryAxis } from './types'
 import { sideProb } from './types'
 import { pHatOver } from './predict'
-import { getFixtureForm } from '../football-history/apifootball'
+import { getFixtureForm, formFromMatchResults } from '../football-history/apifootball'
+import type { FixtureForm } from '../football-history/apifootball'
+import { getTeamRecent } from './history-store'
 
 const clamp = (x: number, lo = 0.2, hi = 4.5) => Math.max(lo, Math.min(hi, x))
+
+/** Form for a fixture: prefer the local history store (no live calls), fall back to live H2H. */
+async function fixtureForm(home: string, away: string, asOf: string): Promise<FixtureForm | null> {
+  const [hr, ar] = await Promise.all([getTeamRecent(home, asOf), getTeamRecent(away, asOf)])
+  if (hr.length >= 3 && ar.length >= 3) {
+    return { home: formFromMatchResults(hr, home), away: formFromMatchResults(ar, away) }
+  }
+  return getFixtureForm(home, away) // store empty/missing → live apifootball H2H
+}
 
 /** Enrich axes with a history-based advisory lean. Axes without form data pass through unchanged. */
 export async function enrichAxes(axes: BinaryAxis[]): Promise<BinaryAxis[]> {
   return Promise.all(axes.map(async (a): Promise<BinaryAxis> => {
     const [home, away] = a.game.split(' vs ')
     if (!home || !away) return a
-    const form = await getFixtureForm(home.trim(), away.trim())
+    const form = await fixtureForm(home.trim(), away.trim(), a.kickoff)
     if (!form || form.home.n < 3 || form.away.n < 3) return a
 
     const lambdaHome = clamp((form.home.attack + form.away.defense) / 2)

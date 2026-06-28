@@ -8,6 +8,8 @@
 
 import 'server-only'
 
+import type { MatchResult } from '../pedlas/predict'
+
 const DEFAULT_BASE = 'https://apiv3.apifootball.com'
 const CACHE_TTL_MS = 6 * 60 * 60 * 1000 // form changes slowly — cache 6h
 
@@ -32,6 +34,41 @@ function sim(a: string, b: string): number {
   let c = 0
   for (const x of A) if (B.has(x)) c++
   return c
+}
+
+/** Recency-weighted attack/defence from clean MatchResult rows (the history store shape). */
+export function formFromMatchResults(results: MatchResult[], team: string): TeamForm {
+  const sorted = [...results].sort((x, y) => (y.date ?? '').localeCompare(x.date ?? ''))
+  let wScored = 0, wConceded = 0, wsum = 0, n = 0, k = 0
+  for (const r of sorted.slice(0, 10)) {
+    if (Number.isNaN(r.hg) || Number.isNaN(r.ag)) continue
+    const isHome = sim(r.home, team) >= sim(r.away, team)
+    wScored += Math.pow(0.85, k) * (isHome ? r.hg : r.ag)
+    wConceded += Math.pow(0.85, k) * (isHome ? r.ag : r.hg)
+    wsum += Math.pow(0.85, k); k++; n++
+  }
+  return wsum > 0 ? { attack: wScored / wsum, defense: wConceded / wsum, n } : { attack: 1.3, defense: 1.3, n: 0 }
+}
+
+export interface LeagueEvent extends MatchResult { matchId: string; leagueId: number }
+
+/** Fetch finished matches for a league/date-range (for the history-store ETL). One get_events call. */
+export async function getLeagueEvents(leagueId: number, from: string, to: string): Promise<LeagueEvent[]> {
+  const key = process.env.APIFOOTBALL_KEY?.trim()
+  if (!key) return []
+  const base = process.env.APIFOOTBALL_URL?.trim() || DEFAULT_BASE
+  const url = `${base}/?action=get_events&from=${from}&to=${to}&league_id=${leagueId}&APIkey=${key}`
+  try {
+    const j = await (await fetch(url, { cache: 'no-store' })).json().catch(() => null) as Record<string, string>[] | null
+    if (!Array.isArray(j)) return []
+    return j
+      .filter(e => e.match_status === 'Finished' && e.match_hometeam_score !== '' && e.match_id)
+      .map(e => ({
+        matchId: e.match_id, leagueId, date: e.match_date,
+        home: e.match_hometeam_name, away: e.match_awayteam_name,
+        hg: Number(e.match_hometeam_score), ag: Number(e.match_awayteam_score),
+      }))
+  } catch { return [] }
 }
 
 /** Recency-weighted attack/defence for `team` from its recent results (newest weighted most). */
