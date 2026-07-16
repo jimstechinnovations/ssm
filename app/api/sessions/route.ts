@@ -50,7 +50,7 @@ export async function POST(request: Request): Promise<Response> {
   const cfgs = await Promise.all(req.books.map(getBookConfig))
   const minStake = Math.max(req.min_stake ?? 0, ...cfgs.map(c => c.minStake))
   const perBookBudget = Math.floor(req.budget / req.books.length)
-  const windowMin = req.selection_window_min ?? 45   // default 45 min so no game goes live mid-run
+  const windowMin = req.selection_window_min ?? 120   // default 2h so a long placement run finishes before any game starts
 
   const session = await createSession({
     bookIds: req.books, dateFrom: req.date_from, dateTo: req.date_to,

@@ -8,6 +8,7 @@
 
 import React, { useEffect, useState, useCallback } from 'react'
 
+interface BoostRow { legs: number; fraction: number }
 interface BookConfig {
   bookId: string
   label: string
@@ -15,7 +16,7 @@ interface BookConfig {
   minStake: number
   maxPayout: number
   enabled: boolean
-  boost: unknown | null
+  boost: BoostRow[] | null
   delayMinSec: number
   delayMaxSec: number
   kickoffCutoffMin: number
@@ -24,6 +25,8 @@ interface BookConfig {
   feedVerified: boolean
   credentialsConfigured: boolean
 }
+
+interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
 
 const inputCls =
   'w-full rounded-md border border-zinc-300 bg-white px-2 py-1.5 text-sm text-zinc-900 dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-100'
@@ -70,6 +73,8 @@ export default function ConfigPage() {
           : 'not set — every run is dry-run regardless of settings'}. Placing bets with a bot can
         breach bookmaker terms and lead to limits or voided bets — that risk is yours.
       </div>
+
+      <BrowserPanel />
 
       {loading && <p className="text-sm text-zinc-500">Loading…</p>}
       {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
@@ -154,6 +159,85 @@ function BookCard({ config, onSaved, onDeleted }: { config: BookConfig; onSaved:
         </button>
         <button onClick={remove} className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-700 hover:bg-red-50 dark:border-red-700/60 dark:text-red-300 dark:hover:bg-red-950/40">Delete</button>
         {err && <span className="text-sm text-red-600 dark:text-red-400">{err}</span>}
+      </div>
+      {c.registered && <BoostSection config={c} onCaptured={onSaved} />}
+    </div>
+  )
+}
+
+/** Real boost: measured from the book's own betslip (not guessed) and stored to book_configs. */
+function BoostSection({ config, onCaptured }: { config: BookConfig; onCaptured: () => void }) {
+  const [busy, setBusy] = useState(false)
+  const [msg, setMsg] = useState<string | null>(null)
+  const table = Array.isArray(config.boost) ? config.boost : []
+
+  async function capture() {
+    if (config.bookId !== 'sportybet') { setMsg('Capture is wired for SportyBet only so far.'); return }
+    setBusy(true); setMsg('Reading the real betslip across leg counts… (needs the browser up)')
+    try {
+      const r = await fetch(`/api/books/${config.bookId}/capture-boost`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
+      const j = await r.json()
+      if (!r.ok) { setMsg(j.error || 'Capture failed'); return }
+      setMsg(`Captured ${j.captured.length} points → saved.`); onCaptured()
+    } catch { setMsg('Network error.') }
+    finally { setBusy(false) }
+  }
+
+  return (
+    <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+      <div className="flex flex-wrap items-center gap-3">
+        <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Real boost</span>
+        {table.length > 0
+          ? <span className="text-xs text-green-600 dark:text-green-400">{table.length} points captured — payouts use the real table</span>
+          : <span className="text-xs text-amber-600 dark:text-amber-400">not captured — payouts assume ZERO boost (honest, but understated)</span>}
+        <button onClick={capture} disabled={busy}
+          className="ml-auto rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+          {busy ? 'Capturing…' : 'Capture real boost'}
+        </button>
+      </div>
+      {table.length > 0 && (
+        <div className="mt-2 flex flex-wrap gap-1.5">
+          {table.map(r => (
+            <span key={r.legs} className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300">
+              {r.legs} legs +{(r.fraction * 100).toFixed(0)}%
+            </span>
+          ))}
+        </div>
+      )}
+      {msg && <p className="mt-2 text-xs text-zinc-500 dark:text-zinc-400">{msg}</p>}
+    </div>
+  )
+}
+
+/** Launch + inspect the local debug Chrome (SIM/REAL, balance) from the UI. */
+function BrowserPanel() {
+  const [st, setSt] = useState<BrowserState | null>(null)
+  const [busy, setBusy] = useState(false)
+
+  const refresh = React.useCallback(async () => {
+    try { setSt(await (await fetch('/api/browser')).json()) } catch { setSt({ up: false }) }
+  }, [])
+  useEffect(() => { void refresh() }, [refresh])
+
+  async function launch() {
+    setBusy(true)
+    try { await fetch('/api/browser', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'launch' }) }); await refresh() }
+    finally { setBusy(false) }
+  }
+
+  const naira = (n?: number | null) => n == null ? '—' : '₦' + Math.round(n).toLocaleString()
+  return (
+    <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-700 dark:bg-zinc-900">
+      <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Placement browser</span>
+      <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${st?.up ? 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300' : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800'}`}>
+        {st?.up ? 'up on :9222' : 'down'}
+      </span>
+      {st?.up && <span className="text-xs text-zinc-600 dark:text-zinc-400">{st.loggedIn ? 'logged in' : 'not logged in'} · {st.mode ?? '—'} · {naira(st.balance)}</span>}
+      <div className="ml-auto flex gap-2">
+        <button onClick={refresh} className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Refresh</button>
+        <button onClick={launch} disabled={busy || st?.up} className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
+          {busy ? 'Launching…' : st?.up ? 'Running' : 'Launch browser'}
+        </button>
       </div>
     </div>
   )

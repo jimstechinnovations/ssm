@@ -28,7 +28,7 @@ export default function BetManagerPage() {
   const [dateTo, setDateTo] = useState(todayPlus(1))
   const [budget, setBudget] = useState(5000)
   const [target, setTarget] = useState(500000)
-  const [windowMin, setWindowMin] = useState(45)
+  const [windowMin, setWindowMin] = useState(120)
   const [legPref, setLegPref] = useState<number | ''>('')
   const [building, setBuilding] = useState(false)
   const [result, setResult] = useState<SessionResult | null>(null)
