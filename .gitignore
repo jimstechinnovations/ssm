@@ -63,3 +63,4 @@ todaybook.json
 
 # backtest output artifact
 backtest-cutters.json
+session-*.json
