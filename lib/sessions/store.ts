@@ -4,7 +4,7 @@
 // migration isn't applied) so the rest of the app keeps working.
 
 import 'server-only'
-import { randomBytes } from 'node:crypto'
+import { randomBytes, createHash } from 'node:crypto'
 import { createServerClient } from '../supabase/server'
 import type { PedlasSlip } from '../pedlas/types'
 import { slipIdempotencyKey } from '../placement/queue'
@@ -129,6 +129,12 @@ export async function listSessions(limit = 30): Promise<SessionRow[]> {
   } catch { return [] }
 }
 
+/** Per-session idempotency key: the slip's key namespaced by session, so a CLONED session's identical
+ *  slips can be placed independently (horizontal scaling) without colliding on the unique index. */
+function sessionSlipKey(sessionId: string, bookId: string, slip: PedlasSlip): string {
+  return createHash('sha256').update(`${sessionId}|${slipIdempotencyKey(bookId, slip)}`).digest('hex').slice(0, 24)
+}
+
 /** Persist a session's slips as pending placement rows (booking code added later by the placer). */
 export async function saveSessionSlips(sessionId: string, bookId: string, slips: PedlasSlip[]): Promise<number> {
   if (slips.length === 0) return 0
@@ -139,7 +145,7 @@ export async function saveSessionSlips(sessionId: string, bookId: string, slips:
       run_id:          sessionId,               // sessions ARE the run for grouping
       book_id:         bookId,
       slip_id:         slip.slipId,
-      idempotency_key: slipIdempotencyKey(bookId, slip),
+      idempotency_key: sessionSlipKey(sessionId, bookId, slip),
       dry_run:         true,                     // flips to false when a live placement confirms
       stake:           slip.stake,
       combined_odds:   slip.combinedOdds,
@@ -201,6 +207,40 @@ export interface SessionSummary {
   staked: number
   returned: number
   net: number
+}
+
+/**
+ * Clone a session (same games/slips/params) into a NEW session id, so the identical book can be
+ * placed independently — e.g. in parallel on another account — for horizontal scaling. Slips get
+ * fresh per-session idempotency keys, so both sessions place without colliding.
+ */
+export async function cloneSession(sourceIdOrCode: string): Promise<SessionRow | null> {
+  const src = await getSession(sourceIdOrCode)
+  if (!src) return null
+  const slips = await listSessionSlips(src.id)
+
+  const clone = await createSession({
+    bookIds: src.bookIds, dateFrom: src.dateFrom, dateTo: src.dateTo,
+    budget: src.budget, targetWin: src.targetWin, minStake: src.minStake,
+    legCount: src.legCount ?? undefined, slipCount: src.slipCount ?? undefined,
+    poolSize: src.poolSize ?? undefined, coverageDepth: src.coverageDepth ?? undefined,
+    meta: { ...(src.meta ?? {}), clonedFrom: src.code },
+  })
+  if (!clone) return null
+
+  const byBook = new Map<string, PedlasSlip[]>()
+  for (const s of slips) {
+    const ps = {
+      slipId: s.slipId, legs: s.legs, stake: s.stake, combinedOdds: s.combinedOdds,
+      legCount: s.legCount, payout: s.potentialPayout ?? 0, trueProb: 0, vector: [],
+      boostPct: 0, uncappedPayout: s.potentialPayout ?? 0, capped: false, evMultiple: 0, rankScore: 0,
+    } as unknown as PedlasSlip
+    const arr = byBook.get(s.bookId) ?? []; arr.push(ps); byBook.set(s.bookId, arr)
+  }
+  let total = 0
+  for (const [bookId, ps] of byBook) total += await saveSessionSlips(clone.id, bookId, ps)
+  await updateSession(clone.id, { status: total > 0 ? 'placing' : 'failed', slipCount: total })
+  return getSession(clone.id)
 }
 
 export async function sessionSummary(sessionId: string): Promise<SessionSummary> {

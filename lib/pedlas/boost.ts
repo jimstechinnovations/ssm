@@ -31,6 +31,26 @@ export function boostFor(n: number): number {
 /** A book with no (or unverified) multibet bonus: never overstate payouts. */
 export const noBoost: BoostFn = () => 0
 
+/**
+ * Build a BoostFn from a stored [{legs, fraction}] table (book_configs.boost_json). Interpolates by
+ * flooring to the highest table entry ≤ n (like BOOST_TABLE lookup). Only use a table VERIFIED
+ * against a live betslip — an unverified/empty table falls back to zero (never overstate).
+ */
+export function boostFromTable(table: unknown): BoostFn {
+  if (!Array.isArray(table) || table.length === 0) return noBoost
+  const rows = table
+    .map((r) => (r && typeof r === 'object' ? r as { legs?: unknown; fraction?: unknown } : {}))
+    .map((r) => ({ legs: Number(r.legs), fraction: Number(r.fraction) }))
+    .filter((r) => Number.isFinite(r.legs) && Number.isFinite(r.fraction) && r.legs >= 0 && r.fraction >= 0)
+    .sort((a, b) => a.legs - b.legs)
+  if (rows.length === 0) return noBoost
+  return (n: number) => {
+    let f = 0
+    for (const r of rows) { if (r.legs <= n) f = r.fraction; else break }
+    return f
+  }
+}
+
 /** Win Boost as a fraction for a slip of `legCount` qualifying legs. */
 export function boostFraction(legCount: number, boost: BoostFn = boostFor): number {
   return boost(legCount)

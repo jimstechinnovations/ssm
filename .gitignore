@@ -64,3 +64,4 @@ todaybook.json
 # backtest output artifact
 backtest-cutters.json
 session-*.json
+500-slips.json

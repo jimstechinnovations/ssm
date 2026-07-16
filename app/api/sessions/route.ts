@@ -13,6 +13,7 @@ import { z } from 'zod'
 import { getBook, BOOK_IDS } from '@/lib/books/registry'
 import { getBookConfig } from '@/lib/books/config-store'
 import { buildCoverageForAdapter } from '@/lib/pedlas/build-book'
+import { boostFromTable } from '@/lib/pedlas/boost'
 import { createSession, updateSession, saveSessionSlips, listSessions, sessionSummary } from '@/lib/sessions/store'
 
 export const runtime = 'nodejs'
@@ -64,10 +65,13 @@ export async function POST(request: Request): Promise<Response> {
   let repPool: number | undefined
   let repPAny: number | undefined
 
+  const cfgById = new Map(req.books.map((id, i) => [id, cfgs[i]]))
   for (const id of req.books) {
+    const cfg = cfgById.get(id)
+    const boost = cfg?.boost ? boostFromTable(cfg.boost) : undefined   // verified table only; else adapter default
     const built = await buildCoverageForAdapter(getBook(id), {
       dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake,
-      targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin,
+      targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost,
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
     const saved = await saveSessionSlips(session.id, id, built.slips)

@@ -111,6 +111,8 @@ export interface CoverageAdapterOptions {
   maxPayout?: number
   scanLimit?: number
   minKickoffGapMinutes: number    // the configurable selection window (30–60 min)
+  /** Verified boost table override (book_configs.boost_json). Falls back to the adapter's boost. */
+  boost?: import('./boost').BoostFn
 }
 
 export interface CoverageResult {
@@ -152,7 +154,7 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
 
   const book = buildCoverageBook(enriched, {
     budget: opts.budget, stake, maxPayout: Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
-    boost: adapter.boostFor, legPref: opts.legPref, targetWin: opts.targetWin,
+    boost: opts.boost ?? adapter.boostFor, legPref: opts.legPref, targetWin: opts.targetWin,
   })
   const meta = {
     scanned: fixtures.length,
