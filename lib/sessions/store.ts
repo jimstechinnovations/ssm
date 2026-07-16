@@ -162,6 +162,27 @@ export async function saveSessionSlips(sessionId: string, bookId: string, slips:
   } catch { return 0 }
 }
 
+/** Update one session slip's placement status (called by the placer as each slip resolves). */
+export async function updateSessionSlipStatus(sessionId: string, slipId: number, patch: {
+  status: 'pending' | 'placing' | 'placed' | 'failed' | 'skipped'
+  bookingCode?: string | null
+  betId?: string | null
+  failureReason?: string | null
+  live?: boolean
+}): Promise<boolean> {
+  try {
+    const supabase = createServerClient()
+    const row: Record<string, unknown> = { status: patch.status, updated_at: new Date().toISOString() }
+    if (patch.bookingCode !== undefined) row.booking_code = patch.bookingCode
+    if (patch.betId !== undefined) row.bet_id = patch.betId
+    if (patch.failureReason !== undefined) row.failure_reason = patch.failureReason
+    if (patch.status === 'placed') { row.dry_run = !patch.live ? true : false; row.confirmed_by = 'balance+history'; row.placed_at = new Date().toISOString() }
+    const { error } = await ((supabase.from('pedla_placements') as any)
+      .update(row).eq('session_id', sessionId).eq('slip_id', slipId)) as { error: unknown }
+    return !error
+  } catch { return false }
+}
+
 export interface SessionSlip {
   id: string
   slipId: number

@@ -23,6 +23,11 @@ const flag = (n, d) => { const i = args.indexOf(n); return i >= 0 ? Number(args[
 const DRY = args.includes('--dry')
 const MIN = flag('--min', 1), MAX = flag('--max', 3)
 const STAKE_OVERRIDE = args.includes('--stake') ? flag('--stake', NaN) : null
+const REPORT = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))  // POST per-slip status back to the session
+async function report(slipId, status, extra = {}) {
+  if (!REPORT || slipId == null) return
+  try { await fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slipId, status, live: !DRY, ...extra }) }) } catch { /* best-effort */ }
+}
 if (!bookPath || !existsSync(bookPath)) { console.error('usage: node scripts/place-all-cdp.mjs <book.json> [--stake N --min S --max S --dry]'); process.exit(1) }
 
 const raw = JSON.parse(readFileSync(bookPath, 'utf8'))
@@ -108,9 +113,11 @@ const clearSlip = async () => {
   if (!(await codeBoxVisible())) throw new Error('could not reset betslip to the Booking Code box')
 }
 
+let lastCode = null
 async function placeOne(slip, idx) {
   const stake = STAKE_OVERRIDE ?? slip.stake
   const code = await bookingCode(slip.legs)
+  lastCode = code
   const legSig = slip.legs.map(l => `${l.fixtureId}:${l.outcome}`).sort().join('|')
   const idem = `sportybet|${stake}|${legSig}`
   if (placedLog[idem]?.placed) { console.log(`  slip ${idx}: SKIP (already placed ${placedLog[idem].code})`); return 'skip' }
@@ -209,13 +216,17 @@ console.log(`\nCDP BATCH: ${slips.length} slip(s) · pacing ${MIN}-${MAX}s${DRY 
 const results = { placed: 0, skip: 0, dry: 0, suspended: 0, failed: 0 }
 const t0 = Date.now()
 for (let i = 0; i < slips.length; i++) {
+  const sid = slips[i].slipId
   try {
     const r = await placeOne(slips[i], i + 1)
-    if (r === 'placed') results.placed++
+    if (r === 'placed') { results.placed++; if (!DRY) await report(sid, 'placed', { bookingCode: lastCode }) }
     else if (r === 'skip') results.skip++
-    else if (r === 'suspended') results.suspended++
+    else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
     else results.dry++
-  } catch (e) { results.failed++; console.log(`  slip ${i + 1}: FAILED — ${e.message}`) }
+  } catch (e) {
+    results.failed++; console.log(`  slip ${i + 1}: FAILED — ${e.message}`)
+    if (!DRY) await report(sid, 'failed', { failureReason: e.message.slice(0, 200) })
+  }
   if (i < slips.length - 1) await sleep(rand(MIN, MAX) * 1000)
 }
 const secs = ((Date.now() - t0) / 1000).toFixed(1)

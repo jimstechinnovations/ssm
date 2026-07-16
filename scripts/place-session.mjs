@@ -41,6 +41,7 @@ console.log(`session ${session.code}: ${slips.length} slips · ${session.legCoun
   `pending ${summary.pending} · staked-so-far ₦${summary.staked}`)
 console.log(`wrote ${bookFile}. Placing ${LIVE ? '🔴 LIVE (real money)' : '🟢 DRY-RUN'} via place-all-cdp…`)
 
-const placerArgs = ['scripts/place-all-cdp.mjs', bookFile, ...(LIVE ? [] : ['--dry']), ...passthrough]
+const reportUrl = `${BASE}/api/sessions/${encodeURIComponent(session.code)}/slip-status`
+const placerArgs = ['scripts/place-all-cdp.mjs', bookFile, '--report', reportUrl, ...(LIVE ? [] : ['--dry']), ...passthrough]
 const p = spawn('node', placerArgs, { stdio: 'inherit', shell: process.platform === 'win32' })
 p.on('close', c => process.exit(c ?? 0))
