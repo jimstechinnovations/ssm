@@ -12,7 +12,7 @@
 import { z } from 'zod'
 import { getBook, BOOK_IDS } from '@/lib/books/registry'
 import { getBookConfig } from '@/lib/books/config-store'
-import { buildBookForAdapter } from '@/lib/pedlas/build-book'
+import { buildCoverageForAdapter } from '@/lib/pedlas/build-book'
 import { createSession, updateSession, saveSessionSlips, listSessions, sessionSummary } from '@/lib/sessions/store'
 
 export const runtime = 'nodejs'
@@ -24,19 +24,16 @@ const CreateSchema = z.object({
   budget:     z.number().positive().min(10),
   target_win: z.number().positive().min(100),
   min_stake:  z.number().positive().optional(),
-  objective:  z.enum(['moonshot', 'coverage']).optional(),
+  /** Legs per slip (the ~30–33 regime). If unset, derived from target_win. */
+  leg_pref:   z.number().int().min(3).max(60).optional(),
+  /** Selection window: only pick games kicking off ≥ this many minutes out, so none go live during
+   *  the placement run. 30–60 min recommended. */
+  selection_window_min: z.number().int().min(15).max(240).optional(),
 }).refine(d => {
   const from = new Date(d.date_from), to = new Date(d.date_to)
   const maxTo = new Date(from); maxTo.setDate(maxTo.getDate() + 2)
   return to >= from && to <= maxTo
 }, { message: 'date_to must be between date_from and date_from + 2 days' })
-
-/** Rough legs-to-target: minStake·ρ^L ≥ target ⇒ L ≈ ln(target/stake)/ln(ρ). Clamped for Phase 2. */
-function legsForTarget(target: number, stake: number, rho = 1.3): number {
-  const R = target / stake
-  if (R <= 1) return 3
-  return Math.min(18, Math.max(3, Math.ceil(Math.log(R) / Math.log(rho))))
-}
 
 export async function POST(request: Request): Promise<Response> {
   let body: unknown
@@ -52,6 +49,7 @@ export async function POST(request: Request): Promise<Response> {
   const cfgs = await Promise.all(req.books.map(getBookConfig))
   const minStake = Math.max(req.min_stake ?? 0, ...cfgs.map(c => c.minStake))
   const perBookBudget = Math.floor(req.budget / req.books.length)
+  const windowMin = req.selection_window_min ?? 45   // default 45 min so no game goes live mid-run
 
   const session = await createSession({
     bookIds: req.books, dateFrom: req.date_from, dateTo: req.date_to,
@@ -59,31 +57,37 @@ export async function POST(request: Request): Promise<Response> {
   })
   if (!session) return Response.json({ error: 'Could not create session (is migration 006 applied?)' }, { status: 500 })
 
-  const targetLegs = legsForTarget(req.target_win, minStake)
-  const bookResults: Array<{ bookId: string; slips?: number; error?: string; detail?: string }> = []
+  const bookResults: Array<{ bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; note?: string; error?: string; detail?: string }> = []
+  const bookMetas: Record<string, unknown> = {}
   let totalSlips = 0
+  let repL: number | undefined
+  let repPool: number | undefined
+  let repPAny: number | undefined
 
   for (const id of req.books) {
-    const built = await buildBookForAdapter(getBook(id), {
-      dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget,
-      targetLegs, minStake, objective: req.objective ?? 'moonshot',
+    const built = await buildCoverageForAdapter(getBook(id), {
+      dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake,
+      targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin,
     })
-    if (!built.book) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
-    const saved = await saveSessionSlips(session.id, id, built.book.slips)
+    if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
+    const saved = await saveSessionSlips(session.id, id, built.slips)
     totalSlips += saved
-    bookResults.push({ bookId: id, slips: saved })
+    repL ??= built.book.L; repPool ??= built.book.poolSize; repPAny ??= built.book.pAnyWin
+    bookMetas[id] = built.meta
+    bookResults.push({ bookId: id, slips: saved, legs: built.book.L, pAnyWin: built.book.pAnyWin, medianPayout: built.book.medianPayout, note: built.book.note })
   }
 
   const ok = totalSlips > 0
   await updateSession(session.id, {
     status: ok ? 'placing' : 'failed',
-    legCount: targetLegs,
+    legCount: repL,
     slipCount: totalSlips,
-    meta: { perBookBudget, books: bookResults },
+    poolSize: repPool,
+    meta: { perBookBudget, windowMin, pAnyWin: repPAny, books: bookResults, bookMetas },
   })
 
   return Response.json({
-    session: { ...session, status: ok ? 'placing' : 'failed', legCount: targetLegs, slipCount: totalSlips },
+    session: { ...session, status: ok ? 'placing' : 'failed', legCount: repL, slipCount: totalSlips, poolSize: repPool },
     books: bookResults,
     summary: await sessionSummary(session.id),
   }, { status: ok ? 200 : 422 })

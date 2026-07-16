@@ -321,3 +321,68 @@ export function planCoverage(pool: BinaryAxis[], opts: PlanOptions): CoveragePla
 
   return { best: pick, family: families.get(pick.L)!, candidates, poolSize: N, K, beta, meanCutters }
 }
+
+// ── build a ready-to-place coverage book at a chosen leg-count ────────────────────
+
+export interface CoverageBookOptions {
+  budget: number
+  stake: number
+  maxPayout: number
+  boost?: BoostFn
+  legPref?: number          // desired legs per slip (e.g. 33). If unset, derive from targetWin.
+  targetWin?: number
+  beta?: number
+  trials?: number
+  seed?: number
+}
+
+export interface CoverageBook {
+  slips: PedlasSlip[]
+  L: number
+  K: number
+  poolSize: number
+  beta: number
+  pAnyWin: number           // honest P(≥1 slip wins) under the correlated model
+  expWinners: number
+  meanCutters: number
+  medianPayout: number
+  medianOdds: number
+  net: number
+  note: string
+}
+
+/**
+ * Build the actual 500-slip (K = budget/stake) coverage book at the requested leg-count, using the
+ * WHOLE qualifying pool so slips scatter widely (each drops N−L risky games differently). Reports the
+ * honest P(≥1 win) so the operator sees the real chance before placing — no guarantee is implied.
+ */
+export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions): CoverageBook {
+  const N = pool.length
+  const K = Math.max(1, Math.floor(opts.budget / opts.stake))
+  const boost = opts.boost ?? boostFor
+  const beta = opts.beta ?? calibrateBeta(pool)
+
+  // pick L: explicit preference, else derived from the target and the pool's median Under odds
+  let L = opts.legPref ?? 0
+  if (!L && opts.targetWin && opts.targetWin > opts.stake) {
+    const medOdds = Math.max(1.05, median(pool.map(a => a.underOdds)))
+    L = Math.ceil(Math.log(opts.targetWin / opts.stake) / Math.log(medOdds))
+  }
+  // need N > L so there is room to scatter (drop different games per slip)
+  const wantedL = L || 12
+  L = Math.max(3, Math.min(wantedL, N - 1))
+
+  const family = buildDiverseUnderSlips(pool, { L, K, stake: opts.stake, maxPayout: opts.maxPayout, boost, seed: opts.seed ?? 7 })
+  const sim = simulateFamily(family, pool, { beta, trials: opts.trials ?? 1500 })
+
+  const note = wantedL > L
+    ? `pool has only ${N} games — legs capped at ${L} (wanted ${wantedL}). More games ⇒ wider scatter ⇒ higher P(≥1 win).`
+    : ''
+  return {
+    slips: family.slips, L, K, poolSize: N, beta,
+    pAnyWin: sim.pAnyWin, expWinners: sim.expWinners, meanCutters: sim.meanCutters,
+    medianPayout: median(family.slips.map(s => s.payout)),
+    medianOdds: median(family.slips.map(s => s.combinedOdds)),
+    net: sim.net, note,
+  }
+}
