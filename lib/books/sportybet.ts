@@ -54,7 +54,7 @@ const ACCEPTED_LINES = new Set([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5])
 
 // ── Feed shapes (only the fields we read) ────────────────────────────────────────
 interface SbOutcome { desc?: string; odds?: string; isActive?: number }
-interface SbMarket { id?: string; specifier?: string; outcomes?: SbOutcome[] }
+interface SbMarket { id?: string; specifier?: string; status?: number; outcomes?: SbOutcome[] }
 interface SbEvent {
   eventId?: string           // "sr:match:53452533"
   estimateStartTime?: number // epoch ms
@@ -80,6 +80,7 @@ export function sportybetEventToFixture(ev: SbEvent, tournament: SbTournament): 
   const odds: OddsValue[] = []
   for (const m of ev.markets ?? []) {
     if (m.id !== '18') continue
+    if (m.status !== undefined && m.status !== 0) continue // suspended/deactivated market — never select
     const lm = /^total=(\d+(?:\.\d+)?)$/.exec(m.specifier ?? '')
     if (!lm) continue
     const line = Number(lm[1])

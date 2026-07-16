@@ -362,11 +362,15 @@ export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions)
   const boost = opts.boost ?? boostFor
   const beta = opts.beta ?? calibrateBeta(pool)
 
-  // pick L: explicit preference, else derived from the target and the pool's median Under odds
+  // pick L: explicit preference, else stack legs (median odds + REAL boost) until payout ≥ target —
+  // exactly the book's own math: stake·odds^L·(1+boost(L)) ≥ targetWin.
   let L = opts.legPref ?? 0
   if (!L && opts.targetWin && opts.targetWin > opts.stake) {
     const medOdds = Math.max(1.05, median(pool.map(a => a.underOdds)))
-    L = Math.ceil(Math.log(opts.targetWin / opts.stake) / Math.log(medOdds))
+    for (let l = 3; l <= 60; l++) {
+      if (opts.stake * Math.pow(medOdds, l) * (1 + boost(l)) >= opts.targetWin) { L = l; break }
+    }
+    if (!L) L = 60
   }
   // need N > L so there is room to scatter (drop different games per slip)
   const wantedL = L || 12

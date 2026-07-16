@@ -96,9 +96,18 @@ const dismissSuccess = async () => {
   }
 }
 
+// the betslip can load on the SIM view (no Booking Code box) — flip to the REAL view when needed
+const ensureRealView = async () => {
+  const sim = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight > 50).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return /virtually simulated/i.test(p?.innerText || '') })
+  if (!sim) return
+  await page.evaluate(() => { const el = document.querySelector('[data-op=switch-box-left]'); if (el) ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))) })
+  await page.waitForTimeout(1800)
+}
+
 const clearSlip = async () => {
   for (let i = 0; i < 7; i++) {
     if (await codeBoxVisible()) return
+    await ensureRealView()
     if (await successUp()) { await dismissSuccess(); await page.waitForTimeout(500); continue }
     if (await bodyHas(/about to pay/)) { await clickLeaf('^cancel$'); await page.waitForTimeout(800); continue }
     const removeConfirm = await page.evaluate(() => { const w = [...document.querySelectorAll('.es-dialog-wrap,[class*=dialog-wrap]')].find(e => e.offsetWidth || e.offsetHeight); return w ? /remove betslip|remove all items/i.test(w.innerText) : false })
@@ -134,6 +143,20 @@ async function placeOne(slip, idx) {
   await page.locator('[class*=betslip] >> text=/^Load$/i').first().click()
   await page.locator('[class*=betslip] >> text=/Over\\/Under/i').first().waitFor({ timeout: 12000 }).catch(() => {})
   await page.waitForTimeout(1200)
+
+  // System tab caps at 15 selections → "Note" dialog blocks everything. Dismiss it + force Multiple.
+  await page.evaluate(() => {
+    const vis = e => e && (e.offsetWidth || e.offsetHeight)
+    const note = [...document.querySelectorAll('[class*=dialog],[class*=modal]')].find(d => vis(d) && /cannot be over\s*\d+\s*selections under System/i.test(d.innerText))
+    if (note) { const ok = [...note.querySelectorAll('button,span,div')].find(b => b.children.length === 0 && /^OK$/i.test((b.textContent || '').trim())); if (ok) ok.click() }
+  })
+  await page.waitForTimeout(500)
+  await page.evaluate(() => {
+    const vis = e => e && (e.offsetWidth || e.offsetHeight)
+    const mult = [...document.querySelectorAll('[class*=betslip] span,[class*=betslip] div')].find(e => e.children.length === 0 && /^Multiple$/i.test((e.textContent || '').trim()) && vis(e))
+    if (mult) ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => mult.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })))
+  })
+  await page.waitForTimeout(800)
 
   const readStake = () => page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? (p.innerText.match(/Total Stake\s+([\d,.]+)/i)?.[1] || '') : '' })
   let stakeOk = false

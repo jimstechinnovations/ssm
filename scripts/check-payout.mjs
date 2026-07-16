@@ -5,12 +5,15 @@ const cands=[]
 for (let pg=1; pg<=8 && cands.length<N+5; pg++) {
   const r=await fetch('https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=18&pageSize=100&pageNum='+pg,{headers:{'User-Agent':'Mozilla/5.0'}})
   const j=await r.json(); if(!j.data||!j.data.tournaments)break
-  const minKick=Date.now()+45*60*1000, maxKick=Date.now()+3*24*3600*1000
+  // 3h+ out so nothing suspends/goes live mid-capture; skip inactive (suspended/unavailable) outcomes
+  const minKick=Date.now()+3*3600*1000, maxKick=Date.now()+3*24*3600*1000
   for (const t of j.data.tournaments) for (const ev of (t.events||[])) {
     if (ev.estimateStartTime<minKick||ev.estimateStartTime>maxKick) continue
     const m=(ev.markets||[]).find(x=>x.specifier==='total=4.5'); if(!m)continue
+    if (m.status!==undefined && m.status!==0) continue
     const u=m.outcomes.find(o=>/under/i.test(o.desc)), o=m.outcomes.find(x=>/over/i.test(x.desc))
-    if(!u||!o) continue; const uo=+u.odds
+    if(!u||!o) continue; if(u.isActive===0||o.isActive===0) continue
+    const uo=+u.odds
     if (uo<1.20 || uo>=(+o.odds)) continue
     cands.push({id:+ev.eventId.split(':').pop(), odds:uo})
   }
@@ -29,7 +32,12 @@ const browser=await chromium.connectOverCDP('http://127.0.0.1:9222')
 const page=browser.contexts()[0].pages().find(p=>/sportybet/.test(p.url()))
 const dl=(rs)=>page.evaluate(s=>{const rx=new RegExp(s,'i');const e=[...document.querySelectorAll('span,div,a,button')].find(x=>x.children.length===0&&rx.test((x.textContent||'').trim())&&(x.offsetWidth||x.offsetHeight));if(e){e.click();return true}return false},rs)
 const okBtn=()=>page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap] [class*=dialog-btn]',{hasText:/^OK$/i}).first()
+// the betslip can load on the SIM view (no Booking Code box) — ensure the REAL view first
+const ensureRealView=async()=>{const sim=await page.evaluate(()=>{const p=[...document.querySelectorAll('[class*=betslip]')].filter(e=>e.offsetHeight>50).sort((a,b)=>b.innerText.length-a.innerText.length)[0];return /virtually simulated/i.test(p?.innerText||'')});if(!sim)return
+  await page.evaluate(()=>{const el=document.querySelector('[data-op=switch-box-left]');if(el)['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>el.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window})))});await page.waitForTimeout(1800)}
+await ensureRealView()
 for(let i=0;i<10;i++){ if(await page.locator('input[placeholder="Booking Code"]:visible').count())break
+  await ensureRealView()
   if(await page.evaluate(()=>/about to pay/i.test(document.body.innerText))){ await dl('^cancel$'); await page.waitForTimeout(700); continue }
   if(await okBtn().count()){ await okBtn().click({force:true}).catch(()=>{}); await page.waitForTimeout(800); continue }  // "Remove Betslip? OK"
   const ra=await page.locator('[data-cms-key=remove_all]:visible').count(); if(ra){ await page.locator('[data-cms-key=remove_all]:visible').first().click({force:true}).catch(()=>{}); await page.waitForTimeout(800); continue }
@@ -37,11 +45,34 @@ for(let i=0;i<10;i++){ if(await page.locator('input[placeholder="Booking Code"]:
   await page.waitForTimeout(600) }
 const ci=page.locator('input[placeholder="Booking Code"]').first(); await ci.click(); await ci.type(code,{delay:40}); await page.waitForTimeout(800)
 await page.locator('[class*=betslip] >> text=/^Load$/i').first().click(); await page.waitForTimeout(6000)
+// System tab allows max 15 selections → a "Note" dialog pops and blocks reads. Dismiss + force Multiple.
+await page.evaluate(()=>{
+  const vis=e=>e&&(e.offsetWidth||e.offsetHeight)
+  const note=[...document.querySelectorAll('[class*=dialog],[class*=modal]')].find(d=>vis(d)&&/cannot be over\s*\d+\s*selections under System/i.test(d.innerText))
+  if(note){const ok=[...note.querySelectorAll('button,span,div')].find(b=>b.children.length===0&&/^OK$/i.test((b.textContent||'').trim()));if(ok)ok.click()}
+})
+await page.waitForTimeout(600)
+await page.evaluate(()=>{
+  const vis=e=>e&&(e.offsetWidth||e.offsetHeight)
+  const mult=[...document.querySelectorAll('[class*=betslip] span,[class*=betslip] div')].find(e=>e.children.length===0&&/^Multiple$/i.test((e.textContent||'').trim())&&vis(e))
+  if(mult)['pointerdown','mousedown','pointerup','mouseup','click'].forEach(t=>mult.dispatchEvent(new MouseEvent(t,{bubbles:true,cancelable:true,view:window})))
+})
+await page.waitForTimeout(1200)
 const sb=page.locator('input[placeholder^="min."]').first(); await sb.click({clickCount:3}).catch(()=>{}); await sb.press('Delete').catch(()=>{}); await sb.type('10',{delay:60}); await page.waitForTimeout(2000)
 const t=await page.evaluate(()=>{const p=[...document.querySelectorAll('[class*=betslip]')].filter(e=>e.offsetHeight).sort((a,b)=>b.innerText.length-a.innerText.length)[0];return p?p.innerText:''})
-const legCount=(t.match(/Over\/Under/g)||[]).length
+// only CHECKED legs count toward odds/bonus — suspended rows load unchecked (grey box)
+const legState=await page.evaluate(()=>{
+  const p=[...document.querySelectorAll('[class*=betslip]')].filter(e=>e.offsetHeight).sort((a,b)=>b.innerText.length-a.innerText.length)[0]
+  if(!p)return{rows:0,checked:0,suspended:0}
+  const rows=(p.innerText.match(/Over\/Under/g)||[]).length
+  const suspended=(p.innerText.match(/Suspended/gi)||[]).length
+  const boxes=[...p.querySelectorAll('[class*=checkbox],[class*=m-icon-check],input[type=checkbox]')]
+  const checked=boxes.filter(b=>b.checked||/checked|selected|active/.test(b.className)).length
+  return{rows,checked:checked||rows-suspended,suspended}
+})
+const legCount=legState.checked
 console.log('--- SportyBet betslip (loaded) ---')
-console.log('legs shown:', legCount)
+console.log('legs shown:', legCount, legState.suspended?`(rows ${legState.rows}, suspended ${legState.suspended})`:'')
 console.log('Odds:', t.match(/\bOdds\s+([\d,.]+)/i)?.[1])
 console.log('Total Stake:', t.match(/Total Stake\s+([\d,.]+)/i)?.[1])
 console.log('Max bonus:', t.match(/Max bonus\s+([\d,.]+)/i)?.[1])

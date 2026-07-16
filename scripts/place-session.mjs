@@ -8,6 +8,10 @@
  *   2. Write them to session-<code>.json in the shape scripts/place-all-cdp.mjs expects.
  *   3. Invoke place-all-cdp.mjs on that file (DRY-RUN unless --live is passed).
  *
+ * PRE-FLIGHT: before placing anything it re-checks EVERY pool game against the live feed — with
+ * ~all-leg slips a single suspended/started game poisons every slip, so we abort with the list
+ * (rebuild is cheap) rather than burn an hour skipping 500 slips. --force skips the abort.
+ *
  * The app (npm run dev) must be running, and for --live the debug Chrome must be up on :9222 and
  * logged into SportyBet in REAL mode. DRY-RUN is the default — nothing is staked without --live.
  */
@@ -17,17 +21,50 @@ import { writeFileSync } from 'node:fs'
 const args = process.argv.slice(2)
 const code = args.find(a => !a.startsWith('--'))
 const LIVE = args.includes('--live')
+const FORCE = args.includes('--force')
 const baseI = args.indexOf('--base')
 const BASE = baseI >= 0 ? args[baseI + 1] : 'http://localhost:3000'
-if (!code) { console.error('usage: node scripts/place-session.mjs <S-CODE|uuid> [--live] [--base URL]'); process.exit(1) }
+if (!code) { console.error('usage: node scripts/place-session.mjs <S-CODE|uuid> [--live] [--force] [--base URL]'); process.exit(1) }
 
 const passthrough = args.filter((a, i) =>
-  a !== code && a !== '--live' && a !== '--base' && !(baseI >= 0 && i === baseI + 1))
+  a !== code && a !== '--live' && a !== '--force' && a !== '--base' && !(baseI >= 0 && i === baseI + 1))
 
 const r = await fetch(`${BASE}/api/sessions/${encodeURIComponent(code)}`).catch(() => null)
 if (!r || !r.ok) { console.error(`could not fetch session ${code} from ${BASE} (is npm run dev running?)`); process.exit(1) }
 const { session, slips, summary } = await r.json()
 if (!slips?.length) { console.error(`session ${code} has no slips`); process.exit(1) }
+
+// ── pre-flight: every pool game must still be upcoming + its Under-4.5 market active ──
+const poolGames = new Map() // fixtureId → game label
+for (const s of slips) for (const l of (s.legs ?? [])) if (!poolGames.has(l.fixtureId)) poolGames.set(l.fixtureId, { game: l.game, line: l.line, kickoff: l.kickoff })
+console.log(`pre-flight: checking ${poolGames.size} pool game(s) against the live feed…`)
+const liveOk = new Map()
+for (let pg = 1; pg <= 10; pg++) {
+  const fr = await fetch(`https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=18&pageSize=100&pageNum=${pg}`, { headers: { 'User-Agent': 'Mozilla/5.0' } }).catch(() => null)
+  const j = fr ? await fr.json().catch(() => null) : null
+  if (!j?.data?.tournaments) break
+  for (const t of j.data.tournaments) for (const ev of (t.events || [])) {
+    const id = Number((ev.eventId || '').split(':').pop())
+    if (!poolGames.has(id)) continue
+    const line = poolGames.get(id).line
+    const m = (ev.markets || []).find(x => x.specifier === `total=${line}`)
+    const active = m && (m.status === undefined || m.status === 0) && (m.outcomes || []).every(o => o.isActive !== 0)
+    const upcoming = ev.estimateStartTime > Date.now() + 10 * 60 * 1000
+    liveOk.set(id, Boolean(active && upcoming))
+  }
+  const total = j.data.totalNum ?? 0
+  if (pg * 100 >= total) break
+}
+const bad = [...poolGames.entries()].filter(([id]) => liveOk.get(id) !== true)
+if (bad.length > 0) {
+  console.error(`\n⛔ pre-flight FAILED — ${bad.length} game(s) suspended/started/missing from the live feed:`)
+  for (const [id, g] of bad) console.error(`   ${g.game} (fixture ${id}, kickoff ${g.kickoff})`)
+  console.error(`\nWith ${session.legCount}-leg slips these poison ~every slip. Rebuild the session (cheap) and place fresh.`)
+  if (!FORCE) process.exit(2)
+  console.error('--force given: continuing anyway (affected slips will be skipped one by one).')
+} else {
+  console.log('pre-flight OK: all pool games live + markets active')
+}
 
 const bookFile = `session-${session.code}.json`
 writeFileSync(bookFile, JSON.stringify({
