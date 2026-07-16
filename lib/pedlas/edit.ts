@@ -6,7 +6,8 @@
 // Edits do not change EV honesty: every recomputed slip is still a real −vig multibet.
 
 import type { BinaryAxis, PedlasBook, PedlasLeg, PedlasSlip } from './types'
-import { boostedPayout, boostPercent } from './boost'
+import { boostedPayout, boostPercent, boostFor, type BoostFn } from './boost'
+import { boostForBook } from '../books/boosts'
 import { DEFAULT_MAX_PAYOUT } from './budget'
 
 /** Build a leg from an axis + chosen side (used when flipping). */
@@ -31,6 +32,7 @@ export function recomputeSlip(
   pool: BinaryAxis[],
   stake: number,
   maxPayout: number = DEFAULT_MAX_PAYOUT,
+  boost: BoostFn = boostFor,
 ): PedlasSlip {
   const axById = new Map(pool.map(a => [a.fixtureId, a]))
   const legCount = slip.legs.length
@@ -40,14 +42,14 @@ export function recomputeSlip(
     const ax = axById.get(l.fixtureId)
     if (ax) trueProb *= l.side === 'Over' ? ax.overProb : ax.underProb
   }
-  const uncappedPayout = boostedPayout(stake, combinedOdds, legCount)
+  const uncappedPayout = boostedPayout(stake, combinedOdds, legCount, boost)
   const payout = Math.min(uncappedPayout, maxPayout)
   return {
     ...slip,
     legCount,
     combinedOdds,
     trueProb,
-    boostPct:       boostPercent(legCount),
+    boostPct:       boostPercent(legCount, boost),
     stake,
     payout,
     uncappedPayout,
@@ -64,7 +66,8 @@ export function recomputeSlip(
 export function recomputeBook(book: PedlasBook, maxPayout: number = DEFAULT_MAX_PAYOUT): PedlasBook {
   const stake = book.stakePerSlip
   const pool = book.pool ?? []
-  const slips = book.slips.map((s, i) => ({ ...recomputeSlip(s, pool, stake, maxPayout), slipId: i + 1 }))
+  const boost = boostForBook(book.bookId) // legacy saved books (no bookId) = Betway Nigeria
+  const slips = book.slips.map((s, i) => ({ ...recomputeSlip(s, pool, stake, maxPayout, boost), slipId: i + 1 }))
   const totalStake = slips.reduce((a, s) => a + s.stake, 0)
   const minPayout = slips.length ? Math.min(...slips.map(s => s.payout)) : 0
   const pAnyHit = slips.reduce((a, s) => a + s.trueProb, 0)

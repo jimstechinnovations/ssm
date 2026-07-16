@@ -3,30 +3,82 @@
 /**
  * app/pedlas/page.tsx
  *
- * PEDLAS odds builder — total-goals Under/Over coverage for a small stake.
- * Self-contained client page: form → POST /api/pedlas → render the PedlasBook.
+ * PEDLA odds builder — Under 4.5 coverage for a small stake, across one or more
+ * bookmakers (each selected book gets its own slips built from its own odds/rules).
+ * Self-contained client page: form → POST /api/pedlas → render per-book PedlasBooks.
  *
  * HONESTY (non-negotiable UI): this is a structured −vig lottery. The page shows
  * P(any hit), per-slip all-or-nothing reality, and never advertises +EV from
- * structure or the Win Boost. See pedlas_v1.md §5.
+ * structure or the Win Boost. See pedla_v1.md §0.
  */
 
 import React, { useState, useEffect, useRef } from 'react'
 import type { PedlasBook, PedlasSlip, AxisAdvisory } from '@/lib/pedlas/types'
 import { flipLeg, removeLeg, removeSlip, duplicateSlip } from '@/lib/pedlas/edit'
 
+interface BuildMeta {
+  scanned: number
+  fixturesFound: number
+  qualifyingAxes: number
+  usedAxes: number
+  minKickoffGapMinutes?: number
+  boostVerified?: boolean
+  advisory?: { withForm: number; total: number }
+}
+
 interface PedlasResponse {
   book: PedlasBook
-  meta: {
-    scanned: number
-    fixturesFound: number
-    qualifyingAxes: number
-    usedAxes: number
-    minKickoffGapMinutes?: number
-    advisory?: { withForm: number; total: number }
-  }
+  meta: BuildMeta
   bookId?: string | null
   saved?: boolean
+}
+
+interface BookResult {
+  bookId: string
+  label: string
+  book?: PedlasBook
+  meta?: BuildMeta
+  savedId?: string | null
+  saved?: boolean
+  error?: string
+  detail?: string
+}
+
+interface BookInfo {
+  id: string
+  label: string
+  minStake: number
+  boostVerified: boolean
+  feedVerified: boolean
+  credentialsConfigured: boolean
+}
+
+interface PlacementReceiptView {
+  confirmed: boolean
+  confirmedBy: string
+  bookingCode?: string
+  betId?: string
+  balanceBefore?: number
+  balanceAfter?: number
+  siteOdds?: number
+}
+
+interface PlacementJobView {
+  slipId: number
+  stake: number
+  status: string
+  note?: string
+  plannedDelaySec: number
+  receipt?: PlacementReceiptView
+}
+
+interface PlacementRunView {
+  runId: string
+  bookId: string
+  dryRun: boolean
+  status: string
+  jobs: PlacementJobView[]
+  log: string[]
 }
 
 interface BookSummary {
@@ -64,16 +116,20 @@ type Objective = 'moonshot' | 'coverage'
 export default function PedlasPage() {
   const [objective, setObjective] = useState<Objective>('coverage')
   const [dateFrom, setDateFrom] = useState(todayPlus(0))
-  const [dateTo, setDateTo] = useState(todayPlus(2))
+  const [dateTo, setDateTo] = useState(todayPlus(1))   // near-term only (1–2 day max window)
   const [budget, setBudget] = useState(1000)
   const [legCount, setLegCount] = useState(7)
   const [minAnchorDistance, setMinAnchor] = useState(1)
   const [maxPerLeague, setMaxPerLeague] = useState(3)
   const [minKickoffGapMinutes, setMinKickoffGapMinutes] = useState(60)
+  const [selectedBooks, setSelectedBooks] = useState<string[]>(['betway_nigeria'])
+  const [availableBooks, setAvailableBooks] = useState<BookInfo[]>([])
 
   const [status, setStatus] = useState<'idle' | 'loading' | 'done' | 'error'>('idle')
   const [error, setError] = useState<string | null>(null)
   const [data, setData] = useState<PedlasResponse | null>(null)
+  const [results, setResults] = useState<BookResult[]>([])
+  const [activeBookId, setActiveBookId] = useState<string | null>(null)
   const [saved, setSaved] = useState<boolean | null>(null)
   const [currentId, setCurrentId] = useState<string | null>(null)
   const [history, setHistory] = useState<BookSummary[]>([])
@@ -103,8 +159,21 @@ export default function PedlasPage() {
       const r = await fetch(`/api/pedlas/books/${id}`)
       const j = await r.json()
       if (!r.ok) { setError(j.error || 'Failed to load saved book'); setStatus('error'); return }
+      setResults([])
+      setActiveBookId(j.book?.bookId ?? null)
       setData({ book: j.book, meta: j.meta }); setCurrentId(id); setSaved(true); setStatus('done')
     } catch { setError('Network error loading book.'); setStatus('error') }
+  }
+
+  /** Point the page at one book's result (tab click / after build). */
+  function activateResult(r: BookResult) {
+    setActiveBookId(r.bookId)
+    if (r.book && r.meta) {
+      setData({ book: r.book, meta: r.meta, bookId: r.savedId, saved: r.saved })
+      setSaved(r.saved ?? null); setCurrentId(r.savedId ?? null)
+    } else {
+      setData(null); setSaved(null); setCurrentId(null)
+    }
   }
 
   // save=false on auto-refresh ticks so the history isn't flooded with near-identical books.
@@ -116,28 +185,37 @@ export default function PedlasPage() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
-          bookmaker: 'betway_nigeria',
+          books: selectedBooks,
           date_from: dateFrom, date_to: dateTo,
           budget, legCount, minKickoffGapMinutes, objective, save,
           params: { minAnchorDistance, maxPerLeague },
         }),
       })
       const json = await res.json()
-      if (!res.ok) {
+      const rs: BookResult[] = json.results ?? []
+      setResults(rs)
+      const firstOk = rs.find(r => r.book)
+      if (!res.ok || !firstOk) {
         setError(json.detail || json.error || `Request failed (HTTP ${res.status})`)
         setStatus('error'); setAutoRefresh(false); return  // stop auto-refresh on error (backoff)
       }
-      setData(json); setStatus('done'); setLastRefresh(new Date())
-      setSaved(json.saved ?? null); setCurrentId(json.bookId ?? null)
+      const keep = rs.find(r => r.bookId === activeBookId && r.book) ?? firstOk
+      activateResult(keep)
+      setStatus('done'); setLastRefresh(new Date())
       if (save) loadHistory()
     } catch {
       setError('Network error — please retry.'); setStatus('error'); setAutoRefresh(false)
     }
   }
 
-  // Restore the latest saved book on mount (survives refresh) + load history.
+  // Restore the latest saved book on mount (survives refresh) + load history + book registry.
   useEffect(() => {
     (async () => {
+      try {
+        const r = await fetch('/api/books')
+        const j = await r.json()
+        setAvailableBooks(j.books ?? [])
+      } catch { /* registry is best-effort */ }
       try {
         const r = await fetch('/api/pedlas/books?limit=30')
         const j = await r.json()
@@ -204,20 +282,50 @@ export default function PedlasPage() {
 
   return (
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6 lg:px-8">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">PEDLAS Odds Builder</h1>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Total-goals Under/Over coverage (Under ≥ 1.20, Win-Boost eligible). A small stake spread
-          across diversified high-payout slips.
-        </p>
+      <header className="mb-6 flex items-start justify-between gap-4">
+        <div>
+          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">PEDLA Odds Builder</h1>
+          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+            Under 4.5 coverage (Under dominant at ≥ 1.20 — the wide-net, boost-eligible pocket).
+            A small stake spread across the most probable high-payout slips, per bookmaker.
+          </p>
+        </div>
+        <div className="flex shrink-0 gap-2">
+          <a href="/placements" className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+            📒 Placements &amp; results
+          </a>
+          <a href="/config" className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+            ⚙ Bot config
+          </a>
+        </div>
       </header>
 
       {/* Honest disclosure — always visible */}
       <div className="mb-6 rounded-lg border border-amber-300 bg-amber-50 px-4 py-3 text-sm text-amber-900 dark:border-amber-700/60 dark:bg-amber-950/40 dark:text-amber-200">
-        <strong>Reality check:</strong> this is a <strong>structured −vig lottery</strong>. PEDLAS
+        <strong>Reality check:</strong> this is a <strong>structured −vig lottery</strong>. PEDLA
         diversifies your stake across plausible high-payout slips — it does <strong>not</strong> beat
         the bookmaker margin or create edge, and the Win Boost is a subsidy, not edge. Each slip is
         all-or-nothing, and the chance any slip hits is small.
+      </div>
+
+      {/* Bookmaker multi-select */}
+      <div className="mb-4 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 text-sm dark:border-zinc-700 dark:bg-zinc-900">
+        <span className="text-xs font-medium text-zinc-600 dark:text-zinc-400">Bookmakers:</span>
+        {(availableBooks.length ? availableBooks : [{ id: 'betway_nigeria', label: 'Betway Nigeria', minStake: 100, boostVerified: true, feedVerified: true, credentialsConfigured: false }]).map(b => (
+          <label key={b.id} className={`flex items-center gap-1.5 ${b.feedVerified ? 'text-zinc-700 dark:text-zinc-300' : 'text-zinc-400'}`}>
+            <input
+              type="checkbox"
+              checked={selectedBooks.includes(b.id)}
+              onChange={e => setSelectedBooks(prev => e.target.checked ? [...prev, b.id] : prev.filter(x => x !== b.id))}
+            />
+            {b.label}
+            {!b.feedVerified && <span className="rounded bg-zinc-100 px-1 text-[10px] text-zinc-500 dark:bg-zinc-800" title="Feed not yet verified — builds will fail with a clear error">no feed yet</span>}
+            {!b.boostVerified && b.feedVerified && <span className="rounded bg-zinc-100 px-1 text-[10px] text-zinc-500 dark:bg-zinc-800" title="Bonus table unverified — payouts computed with ZERO boost (never overstated)">0 boost</span>}
+          </label>
+        ))}
+        {selectedBooks.length > 1 && (
+          <span className="text-xs text-zinc-500">budget splits equally: {naira(Math.floor(budget / selectedBooks.length))} each</span>
+        )}
       </div>
 
       {/* Objective toggle */}
@@ -289,6 +397,36 @@ export default function PedlasPage() {
 
       {status === 'loading' && (
         <p className="text-sm text-zinc-500">Fetching odds, ranking slips{book ? '' : ' (NIM)'}…</p>
+      )}
+
+      {/* Per-book result tabs (multi-book builds) */}
+      {results.length > 0 && (
+        <div className="mb-4 flex flex-wrap items-center gap-2">
+          {results.map(r => (
+            <button
+              key={r.bookId}
+              onClick={() => activateResult(r)}
+              className={`rounded-lg border px-3 py-1.5 text-sm font-medium transition-colors ${
+                activeBookId === r.bookId
+                  ? 'border-zinc-900 bg-zinc-900 text-white dark:border-zinc-100 dark:bg-zinc-100 dark:text-zinc-900'
+                  : r.book
+                    ? 'border-zinc-300 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800'
+                    : 'border-red-300 text-red-600 dark:border-red-700/60 dark:text-red-400'
+              }`}
+              title={r.error ? `${r.error}${r.detail ? ` — ${r.detail}` : ''}` : undefined}
+            >
+              {r.label} {r.book ? `· ${r.book.slips.length} slips` : '· failed'}
+            </button>
+          ))}
+        </div>
+      )}
+      {results.find(r => r.bookId === activeBookId && r.error) && (
+        <div className="mb-6 rounded-lg border border-red-300 bg-red-50 px-4 py-3 text-sm text-red-800 dark:border-red-700/60 dark:bg-red-950/40 dark:text-red-200">
+          <strong>{results.find(r => r.bookId === activeBookId)!.error}</strong>
+          {results.find(r => r.bookId === activeBookId)!.detail && (
+            <span className="ml-1">— {results.find(r => r.bookId === activeBookId)!.detail}</span>
+          )}
+        </div>
       )}
 
       {book && data && (
@@ -386,6 +524,9 @@ export default function PedlasPage() {
               />
             ))}
           </div>
+
+          {/* Placement bot */}
+          <PlacementPanel book={book} savedBookId={currentId} dirty={dirty} />
         </section>
       )}
 
@@ -433,6 +574,219 @@ function Stat({ label, value }: { label: string; value: string }) {
     <div className="rounded-lg border border-zinc-200 bg-white px-3 py-2 dark:border-zinc-700 dark:bg-zinc-900">
       <div className="text-xs text-zinc-500">{label}</div>
       <div className="text-lg font-bold text-zinc-900 dark:text-zinc-100">{value}</div>
+    </div>
+  )
+}
+
+const jobBadge: Record<string, string> = {
+  queued:    'bg-zinc-100 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300',
+  waiting:   'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300',
+  placing:   'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300',
+  placed:    'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300',
+  simulated: 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300',
+  skipped:   'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300',
+  failed:    'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300',
+}
+
+/**
+ * Queue the book's slips to the placement bot and watch the run.
+ * Dry-run is the default button; LIVE requires an explicit typed confirmation AND the server's
+ * PLACEMENT_LIVE gate + per-book enable. A job is only "placed" once the BOOKMAKER confirmed it
+ * (balance moved / bet in history) — the receipt is shown so you can check that yourself.
+ */
+function PlacementPanel({ book, savedBookId, dirty }: { book: PedlasBook; savedBookId: string | null; dirty: boolean }) {
+  const [run, setRun] = useState<PlacementRunView | null>(null)
+  const [busy, setBusy] = useState(false)
+  const [err, setErr] = useState<string | null>(null)
+  const [liveAllowed, setLiveAllowed] = useState(false)
+  const bookId = book.bookId ?? 'betway_nigeria'
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/config')
+        const j = await r.json()
+        setLiveAllowed(Boolean(j.placementLive) && Boolean(j.config?.books?.[bookId]?.enabled))
+      } catch { /* stays locked */ }
+    })()
+  }, [bookId])
+
+  // Poll the active run until it finishes.
+  useEffect(() => {
+    if (!run || run.status !== 'running') return
+    const t = setInterval(async () => {
+      try {
+        const r = await fetch(`/api/placement?runId=${run.runId}`)
+        const j = await r.json()
+        if (r.ok && j.run) setRun(j.run)
+      } catch { /* poll is best-effort */ }
+    }, 1_500)
+    return () => clearInterval(t)
+  }, [run])
+
+  // SportyBet booking codes — the reliable placement bridge. The bot can't place real SportyBet
+  // bets (their automated sessions are SIM-locked), so we hand each slip a code the user opens in
+  // their own real-mode browser and taps Place Bet.
+  const [codes, setCodes] = useState<Record<number, { code: string; url: string }>>({})
+  const [codesBusy, setCodesBusy] = useState(false)
+  const isSportybet = bookId === 'sportybet'
+
+  async function getCodes() {
+    setCodesBusy(true); setErr(null)
+    try {
+      const entries = await Promise.all(book.slips.map(async (s) => {
+        const r = await fetch('/api/booking-code', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ book: 'sportybet', legs: s.legs.map(l => ({ fixtureId: l.fixtureId, line: l.line, side: l.side })) }),
+        })
+        const j = await r.json()
+        return [s.slipId, r.ok ? { code: j.code, url: j.url } : null] as const
+      }))
+      const map: Record<number, { code: string; url: string }> = {}
+      for (const [id, v] of entries) if (v) map[id] = v
+      setCodes(map)
+      if (Object.keys(map).length === 0) setErr('Could not generate booking codes (SportyBet API).')
+    } catch { setErr('Network error getting booking codes.') }
+    finally { setCodesBusy(false) }
+  }
+
+  async function start(dryRun: boolean) {
+    if (!dryRun) {
+      const total = book.slips.reduce((s, x) => s + x.stake, 0)
+      const answer = window.prompt(
+        `REAL MONEY: place ${book.slips.length} slip(s) at ${bookId}, ${naira(total)} total.\n` +
+        `Slips are placed one at a time with human-like delays. Type PLACE to confirm.`)
+      if (answer !== 'PLACE') return
+    }
+    setBusy(true); setErr(null)
+    try {
+      const r = await fetch('/api/placement', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'start', bookId, slips: book.slips, dryRun,
+          pedlasBookId: dirty ? null : savedBookId,   // link the ledger to the saved book
+        }),
+      })
+      const j = await r.json()
+      if (!r.ok) { setErr(j.error || 'Failed to start run'); return }
+      setRun({ runId: j.runId, bookId, dryRun, status: 'running', jobs: [], log: [] })
+    } catch { setErr('Network error starting the bot.') }
+    finally { setBusy(false) }
+  }
+
+  async function stop() {
+    if (!run) return
+    try { await fetch('/api/placement', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'stop', runId: run.runId }) }) } catch { /* best-effort */ }
+  }
+
+  const placedJobs = run?.jobs.filter(j => j.receipt?.bookingCode) ?? []
+
+  return (
+    <div className="mt-6 rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+      <div className="flex flex-wrap items-center gap-3">
+        <h3 className="text-sm font-semibold text-zinc-900 dark:text-zinc-100">Placement</h3>
+        {isSportybet && (
+          <button onClick={getCodes} disabled={codesBusy}
+            className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
+            {codesBusy ? 'Getting codes…' : `🎟 Get booking codes (${book.slips.length})`}
+          </button>
+        )}
+        <button onClick={() => start(true)} disabled={busy || run?.status === 'running'}
+          className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+          ▶ Dry-run pacing ({book.slips.length})
+        </button>
+        {run?.status === 'running' && (
+          <button onClick={stop} className="rounded-lg border border-red-300 px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-50 dark:border-red-700/60 dark:hover:bg-red-950/40">
+            ■ Stop
+          </button>
+        )}
+      </div>
+      <p className="mt-2 text-xs text-zinc-500">
+        {isSportybet ? (
+          <>SportyBet automated sessions are locked to SIM (play money), so the bot can&apos;t place real
+          bets. Instead, get a <strong>booking code</strong> per slip and open it in your own browser
+          (real mode) to place with one tap — then track it under <a href="/placements" className="underline">Placements</a>.</>
+        ) : (
+          <>Dry-run simulates paced, one-at-a-time placement using the /config pacing rules.</>
+        )}
+      </p>
+      {err && <p className="mt-2 text-xs text-red-600 dark:text-red-400">{err}</p>}
+
+      {/* Booking codes — open each in your real-mode browser and tap Place Bet */}
+      {Object.keys(codes).length > 0 && (
+        <table className="mt-3 w-full text-left text-xs">
+          <thead className="text-zinc-500">
+            <tr><th className="py-1 pr-4">Slip</th><th className="pr-4">Legs</th><th className="pr-4">Stake → win</th><th className="pr-4">Code</th><th>Place</th></tr>
+          </thead>
+          <tbody>
+            {book.slips.filter(s => codes[s.slipId]).map(s => (
+              <tr key={s.slipId} className="border-t border-zinc-100 dark:border-zinc-800">
+                <td className="py-1 pr-4 font-medium text-zinc-800 dark:text-zinc-200">#{s.slipId}</td>
+                <td className="pr-4 text-zinc-500">{s.legCount} · {s.combinedOdds.toFixed(2)}</td>
+                <td className="pr-4 text-zinc-600 dark:text-zinc-400">{naira(s.stake)} → {naira(s.payout)}</td>
+                <td className="pr-4">
+                  <button onClick={() => navigator.clipboard?.writeText(codes[s.slipId].code)}
+                    title="Copy booking code" className="rounded bg-zinc-100 px-1.5 py-0.5 font-mono text-zinc-800 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-200 dark:hover:bg-zinc-700">
+                    {codes[s.slipId].code} ⧉
+                  </button>
+                </td>
+                <td>
+                  <a href={codes[s.slipId].url} target="_blank" rel="noreferrer"
+                    className="rounded border border-green-300 px-2 py-0.5 font-medium text-green-700 hover:bg-green-50 dark:border-green-700/60 dark:text-green-400 dark:hover:bg-green-950/40">
+                    open in SportyBet →
+                  </a>
+                </td>
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      )}
+      {run && (
+        <div className="mt-3">
+          <p className="mb-2 text-xs text-zinc-500">
+            run {run.runId.slice(0, 8)} · {run.dryRun ? 'DRY-RUN' : 'LIVE'} · <strong>{run.status}</strong>
+            {' · '}<a href="/placements" className="underline">open the ledger →</a>
+          </p>
+          {run.jobs.length > 0 && (
+            <div className="flex flex-wrap gap-1.5">
+              {run.jobs.map(j => (
+                <span key={j.slipId} title={j.note ?? `delay ${j.plannedDelaySec}s`}
+                  className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${jobBadge[j.status] ?? jobBadge.queued}`}>
+                  #{j.slipId} {j.status}
+                </span>
+              ))}
+            </div>
+          )}
+          {/* Receipts — the bookmaker's own evidence, plus the code to reopen the slip by hand */}
+          {placedJobs.length > 0 && (
+            <table className="mt-3 w-full text-left text-xs">
+              <thead className="text-zinc-500">
+                <tr><th className="py-1 pr-4">Slip</th><th className="pr-4">Confirmed by</th><th className="pr-4">Booking code</th><th className="pr-4">Bet id</th><th>Balance</th></tr>
+              </thead>
+              <tbody>
+                {placedJobs.map(j => (
+                  <tr key={j.slipId} className="border-t border-zinc-100 dark:border-zinc-800">
+                    <td className="py-1 pr-4 font-medium text-zinc-800 dark:text-zinc-200">#{j.slipId}</td>
+                    <td className={`pr-4 ${j.receipt!.confirmed ? 'text-green-600 dark:text-green-400' : 'text-red-600 dark:text-red-400'}`}>
+                      {j.receipt!.confirmed ? j.receipt!.confirmedBy : 'NOT confirmed'}
+                    </td>
+                    <td className="pr-4 font-mono text-zinc-700 dark:text-zinc-300">{j.receipt!.bookingCode ?? '—'}</td>
+                    <td className="pr-4 text-zinc-700 dark:text-zinc-300">{j.receipt!.betId ?? '—'}</td>
+                    <td className="text-zinc-600 dark:text-zinc-400">
+                      {j.receipt!.balanceBefore != null ? `${naira(j.receipt!.balanceBefore)} → ${naira(j.receipt!.balanceAfter ?? 0)}` : '—'}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          )}
+          {run.log.length > 0 && (
+            <pre className="mt-2 max-h-40 overflow-y-auto rounded bg-zinc-50 p-2 text-[11px] leading-relaxed text-zinc-600 dark:bg-zinc-800/60 dark:text-zinc-300">
+              {run.log.join('\n')}
+            </pre>
+          )}
+        </div>
+      )}
     </div>
   )
 }

@@ -2,7 +2,7 @@ import 'server-only'
 
 import { chromium } from 'playwright'
 import type { APIResponse, Response as PlaywrightResponse } from 'playwright'
-import type { Fixture, MarketType, OddsValue } from '../ssm/types'
+import type { Fixture, MarketType, OddsValue } from '../pedlas/types'
 
 const BETWAY_HIGHLIGHTS_URL = 'https://www.betway.com.ng/sport/soccer/highlights'
 const BETWAY_FEED_URL = 'https://feeds-roa2.betwayafrica.com/br/_apis/sport/v1/BetBook/Highlights/'

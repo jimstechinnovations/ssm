@@ -3,7 +3,7 @@
 // and the engine maps state 0 → dominant side correctly. Back-compat (default Under) covered elsewhere.
 
 import { describe, it, expect } from 'vitest'
-import type { Fixture } from '../../../lib/ssm/types'
+import type { Fixture } from '../../../lib/pedlas/types'
 import { selectAxes } from '../../../lib/pedlas/market-select'
 import { makeVector } from '../../../lib/pedlas/vectors'
 import { buildLegs } from '../../../lib/pedlas/budget'

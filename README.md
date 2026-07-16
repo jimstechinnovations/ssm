@@ -1,36 +1,37 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# PEDLA — Multi-Book Under-4.5 Structure Builder
 
-## Getting Started
+PEDLA is a *structural coverage* betting-slip builder for total-goals markets across multiple
+Nigerian bookmakers (Betway Nigeria, SportyBet; Stake registered but unverified). It anchors every
+axis on **Under 4.5 at odds ≥ 1.20**, enumerates outcome vectors, ranks by probability, and fills
+the budget with the top slips — with **honest EV** displayed on every book. A paced, dry-run-first
+placement bot can queue the slips (live placement is env-gated). See [pedla_v1.md](pedla_v1.md).
 
-First, run the development server:
+> **Honest stance (non-negotiable).** PEDLAS does not beat the bookmaker margin and does not create
+> edge. The Win Boost is a subsidy, not edge. History models were backtested on real data and have
+> **no edge** (`pedlas_v2.md §1a`) — they are advisory only. The only credible future edge source is
+> a sharp-book reference (see `archive/docs/spm_v2.md §3`).
+
+## Docs
+
+- [pedla_v1.md](pedla_v1.md) — CURRENT spec: PEDLA rules (S/E removed), multi-book, placement bot
+- [pedlas_engine.md](pedlas_engine.md) — how the original pipeline works, start to finish
+- [pedlas_v1.md](pedlas_v1.md) / [pedlas_v2.md](pedlas_v2.md) — spec, worked maths, backtest findings
+- `PEDLAS.txt`, `PEDLAS_Algorithm_Overview.pdf` — original algorithm notes
+- `archive/` — superseded SSM/SPM flows and docs (kept for reference, excluded from build/tests)
+
+## Layout
+
+- `app/pedlas/` — the UI (root `/` redirects here)
+- `app/api/pedlas/` — build + persisted-books + history-sync routes
+- `lib/pedlas/` — the engine (market select, enrich, quality, build, rank, budget, boost, …)
+- `lib/betway/` — Betway feed scraper (Playwright)
+- `lib/football-history/` — apifootball.com history client
+- `lib/llm/` — NVIDIA NIM ranking (advisory only)
+- `supabase/` — migrations (books + match history)
+
+## Getting started
 
 ```bash
-npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
+npm run dev        # http://localhost:3000 → /pedlas
+npx vitest run     # unit tests (live tests need API keys in .env)
 ```
-
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
-
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
-
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
-
-## Learn More
-
-To learn more about Next.js, take a look at the following resources:
-
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
-
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
-
-## Deploy on Vercel
-
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
-
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.

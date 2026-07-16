@@ -6,7 +6,7 @@
 
 import { describe, it } from 'vitest'
 import { readFileSync } from 'node:fs'
-import type { Fixture } from '../../../lib/ssm/types'
+import type { Fixture } from '../../../lib/pedlas/types'
 import type { MatchResult } from '../../../lib/pedlas/predict'
 import { estimateLambdas, pHatOver } from '../../../lib/pedlas/predict'
 import { selectAxes } from '../../../lib/pedlas/market-select'

@@ -1,31 +1,18 @@
 // lib/pedlas/constraints.ts
-// PEDLAS structural filters E, D, A. Pure, no I/O.
+// PEDLA structural filters D, A. Pure, no I/O.
 //
 //   A — Anchor distance:  per-vector min (and optional max) Over-flips. This is the
 //                         primary "hit big" lever — it pushes every slip away from the
 //                         low-payout all-Under anchor and into the high-odds region.
-//   E — Elimination:      per-vector max run of identical consecutive selections
-//                         (vector indices MUST be kickoff-ordered for this to mean
-//                         "after ordering"). Prunes structurally clustered strings.
-//                         NOTE: total-goals Under is genuinely dominant, so long Under
-//                         runs are plausible — keep E lenient unless you have a reason.
 //   D — Diversity:        max legs from one competition. Because every slip uses ALL L
 //                         games, D is enforced at the POOL level (capPoolByLeague): cap
 //                         the pool per league and every slip inherits the cap.
+//
+// E (max identical run) and S (slip separation) were removed — pedla_v1.md §2: independent
+// legs at p≈0.83 make long same-side runs the NORM, and both filters pruned exactly the
+// highest-probability vectors.
 
 import type { BinaryAxis, PedlasVector } from './types'
-
-/** Longest run of identical consecutive bits in a vector. */
-export function maxIdenticalRunOf(vector: (0 | 1)[]): number {
-  let best = 0, run = 0
-  let prev: 0 | 1 | -1 = -1
-  for (const b of vector) {
-    run = b === prev ? run + 1 : 1
-    prev = b
-    if (run > best) best = run
-  }
-  return best
-}
 
 /** A — keep vectors whose Over-flips ∈ [minFlips, maxFlips]. */
 export function applyAnchorDistance(
@@ -35,12 +22,6 @@ export function applyAnchorDistance(
 ): PedlasVector[] {
   const hi = maxFlips ?? Infinity
   return vectors.filter(v => v.overFlips >= minFlips && v.overFlips <= hi)
-}
-
-/** E — keep vectors with no identical run longer than maxRun. A maxRun ≥ L disables E. */
-export function applyElimination(vectors: PedlasVector[], maxRun: number, legCount: number): PedlasVector[] {
-  if (maxRun >= legCount) return vectors
-  return vectors.filter(v => maxIdenticalRunOf(v.vector) <= maxRun)
 }
 
 /**

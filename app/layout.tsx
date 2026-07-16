@@ -1,7 +1,6 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
-import { SessionProvider } from "@/components/session/SessionProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -14,8 +13,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "SSM Builder v2 — Score Structure Model",
-  description: "SSM Builder v2 — automated fixture screening and 42-slip betting matrix generator",
+  title: "PEDLAS — Total-Goals Odds Builder",
+  description: "PEDLAS — structural coverage odds builder for Betway total-goals markets (honest EV, no edge claims)",
 };
 
 export default function RootLayout({
@@ -30,7 +29,7 @@ export default function RootLayout({
       className={`${geistSans.variable} ${geistMono.variable} h-full antialiased`}
     >
       <body className="min-h-full flex flex-col">
-        <SessionProvider>{children}</SessionProvider>
+        {children}
       </body>
     </html>
   );

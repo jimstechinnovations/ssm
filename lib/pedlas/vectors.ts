@@ -7,7 +7,7 @@
 
 import type { BinaryAxis, PedlasVector, VectorFeatures } from './types'
 import { sideOdds, sideProb, stateSide } from './types'
-import { honestEvMultiple } from './boost'
+import { honestEvMultiple, boostFor, type BoostFn } from './boost'
 
 /** Hard cap on full enumeration: 2^18 = 262,144 vectors. Larger pools need sampling (future work). */
 export const MAX_ENUMERATE_LEGS = 18
@@ -104,10 +104,10 @@ function featuresOf(
 }
 
 /** Build the full PedlasVector for a single bit pattern. */
-export function makeVector(vector: (0 | 1)[], axes: BinaryAxis[], pool = poolStats(axes)): PedlasVector {
+export function makeVector(vector: (0 | 1)[], axes: BinaryAxis[], pool = poolStats(axes), boost: BoostFn = boostFor): PedlasVector {
   const combinedOdds = combinedOddsOf(vector, axes)
   const trueProb = trueProbOf(vector, axes)
-  const evMultiple = honestEvMultiple(trueProb, combinedOdds, axes.length)
+  const evMultiple = honestEvMultiple(trueProb, combinedOdds, axes.length, boost)
   return {
     vector,
     combinedOdds,
@@ -119,7 +119,7 @@ export function makeVector(vector: (0 | 1)[], axes: BinaryAxis[], pool = poolSta
 }
 
 /** Enumerate all 2^L vectors (L ≤ MAX_ENUMERATE_LEGS). */
-export function enumerateVectors(axes: BinaryAxis[]): PedlasVector[] {
+export function enumerateVectors(axes: BinaryAxis[], boost: BoostFn = boostFor): PedlasVector[] {
   const L = axes.length
   if (L === 0) return []
   if (L > MAX_ENUMERATE_LEGS) {
@@ -130,7 +130,7 @@ export function enumerateVectors(axes: BinaryAxis[]): PedlasVector[] {
   for (let mask = 0; mask < (1 << L); mask++) {
     const vector: (0 | 1)[] = new Array(L)
     for (let i = 0; i < L; i++) vector[i] = ((mask >> i) & 1) as 0 | 1
-    out.push(makeVector(vector, axes, pool))
+    out.push(makeVector(vector, axes, pool, boost))
   }
   return out
 }

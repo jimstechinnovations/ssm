@@ -1,4 +1,4 @@
-// lib/ssm/scoreline-model.ts
+// lib/pedlas/scoreline-model.ts
 // A coherent per-game scoreline distribution. This is what makes the fingerprint
 // meaningful: every market probability for a game is read off ONE distribution,
 // so within-game correlations (e.g. Over 2.5 and BTTS) are respected — unlike

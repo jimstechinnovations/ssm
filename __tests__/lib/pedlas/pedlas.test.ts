@@ -5,15 +5,12 @@ import { describe, it, expect } from 'vitest'
 import fc from 'fast-check'
 
 import type { BinaryAxis } from '../../../lib/pedlas/types'
-import type { Fixture } from '../../../lib/ssm/types'
-import { selectAxes } from '../../../lib/pedlas/market-select'
-import { boostedPayout, boostPercent, honestEvMultiple } from '../../../lib/pedlas/boost'
-import { boostFor } from '../../../lib/spm/leg-stacker'
+import type { Fixture } from '../../../lib/pedlas/types'
+import { selectAxes, PEDLA_LINES } from '../../../lib/pedlas/market-select'
+import { boostedPayout, boostPercent, honestEvMultiple, noBoost } from '../../../lib/pedlas/boost'
+import { boostFor } from '../../../lib/pedlas/boost'
 import { enumerateVectors, makeVector, combinedOddsOf, trueProbOf } from '../../../lib/pedlas/vectors'
-import {
-  maxIdenticalRunOf, applyAnchorDistance, applyElimination, capPoolByLeague,
-} from '../../../lib/pedlas/constraints'
-import { hammingDistance, applySeparation } from '../../../lib/pedlas/separation'
+import { applyAnchorDistance, capPoolByLeague } from '../../../lib/pedlas/constraints'
 import { buildPedlasBook } from '../../../lib/pedlas/build'
 
 // ── helpers ──────────────────────────────────────────────────────────────────────
@@ -60,6 +57,12 @@ describe('PEDLAS boost (Betway displayed-return boost, real Betway schedule)', (
     expect(boostedPayout(stake, O, L)).toBeCloseTo(expected, 6)
     // strictly less than the naive stake·O·(1+b) convention
   })
+
+  it('per-book boost: an unverified book (noBoost) never inflates payouts', () => {
+    expect(boostedPayout(100, 15.1, 11, noBoost)).toBeCloseTo(1510, 6)
+    expect(boostPercent(50, noBoost)).toBe(0)
+    // and it flows through a built book end-to-end (checked in buildPedlasBook tests below)
+  })
 })
 
 // ── market selection ─────────────────────────────────────────────────────────────
@@ -93,6 +96,22 @@ describe('PEDLAS market selection', () => {
     const axes = selectAxes([fx(3, [{ line: 4.5, under: 1.28, over: 3.55 }])])
     expect(axes[0].underProb + axes[0].overProb).toBeCloseTo(1, 10)
     expect(axes[0].margin).toBeGreaterThan(0)
+  })
+
+  it('PEDLA policy: Under 4.5 line only, dominant side must be Under', () => {
+    const fixtures = [
+      // qualifies: Under 4.5 dominant at 1.28
+      fx(10, [{ line: 4.5, under: 1.28, over: 3.55 }, { line: 2.5, under: 1.80, over: 1.95 }]),
+      // rejected: has no 4.5 line at all (only 2.5 would qualify under the old policy)
+      fx(11, [{ line: 2.5, under: 1.55, over: 2.40 }]),
+      // rejected: 4.5 exists but OVER is dominant (goal-fest pricing)
+      fx(12, [{ line: 4.5, under: 2.60, over: 1.48 }]),
+    ]
+    const axes = selectAxes(fixtures, { lines: PEDLA_LINES, requireDominantSide: 'Under' })
+    expect(axes).toHaveLength(1)
+    expect(axes[0].fixtureId).toBe(10)
+    expect(axes[0].line).toBe(4.5)
+    expect(axes[0].dominantSide).toBe('Under')
   })
 })
 
@@ -131,26 +150,13 @@ describe('PEDLAS vectors', () => {
   })
 })
 
-// ── constraints ──────────────────────────────────────────────────────────────────
-describe('PEDLAS constraints (E/D/A)', () => {
-  it('maxIdenticalRunOf counts the longest run', () => {
-    expect(maxIdenticalRunOf([0, 0, 0, 1, 1])).toBe(3)
-    expect(maxIdenticalRunOf([1, 0, 1, 0])).toBe(1)
-    expect(maxIdenticalRunOf([1, 1, 1, 1])).toBe(4)
-  })
-
+// ── constraints (PEDLA keeps only D and A — S and E removed, pedla_v1.md §2) ──────
+describe('PEDLA constraints (D/A)', () => {
   it('A — anchor distance keeps only vectors with enough Over-flips', () => {
     const vs = enumerateVectors(pool(6))
     const kept = applyAnchorDistance(vs, 2)
     expect(kept.every(v => v.overFlips >= 2)).toBe(true)
     expect(kept.some(v => v.overFlips === 2)).toBe(true)
-  })
-
-  it('E — elimination removes long identical runs (and is off when maxRun ≥ L)', () => {
-    const vs = enumerateVectors(pool(6))
-    const kept = applyElimination(vs, 3, 6)
-    expect(kept.every(v => maxIdenticalRunOf(v.vector) <= 3)).toBe(true)
-    expect(applyElimination(vs, 6, 6)).toHaveLength(vs.length) // disabled
   })
 
   it('D — capPoolByLeague limits axes per competition', () => {
@@ -159,22 +165,20 @@ describe('PEDLAS constraints (E/D/A)', () => {
     for (const a of capped) counts.set(a.leagueId, (counts.get(a.leagueId) ?? 0) + 1)
     expect([...counts.values()].every(c => c <= 2)).toBe(true)
   })
-})
 
-// ── separation ───────────────────────────────────────────────────────────────────
-describe('PEDLAS separation (S)', () => {
-  it('hammingDistance counts differing positions', () => {
-    expect(hammingDistance([0, 0, 0], [0, 1, 1])).toBe(2)
-    expect(hammingDistance([1, 1], [1, 1])).toBe(0)
-  })
-
-  it('every kept pair is at least minSeparation apart, capped at limit', () => {
-    const ranked = enumerateVectors(pool(8))
-    const kept = applySeparation(ranked, 3, 6)
-    expect(kept.length).toBeLessThanOrEqual(6)
-    for (let i = 0; i < kept.length; i++)
-      for (let j = i + 1; j < kept.length; j++)
-        expect(hammingDistance(kept[i].vector, kept[j].vector)).toBeGreaterThanOrEqual(3)
+  it('S is gone: coverage fill is top-K by probability — no likelier vector is skipped', async () => {
+    const axes = pool(9)
+    const book = await buildPedlasBook({
+      axes, budget: 800, minStake: 100, objective: 'coverage', rank: 'deterministic',
+    })
+    // The K placed slips must be exactly the K most-probable A≥1 vectors: every non-placed
+    // candidate has trueProb ≤ the worst placed slip.
+    const placed = new Set(book.slips.map(s => s.vector.join('')))
+    const worstPlaced = Math.min(...book.slips.map(s => s.trueProb))
+    const all = applyAnchorDistance(enumerateVectors(axes), 1)
+    for (const v of all) {
+      if (!placed.has(v.vector.join(''))) expect(v.trueProb).toBeLessThanOrEqual(worstPlaced + 1e-12)
+    }
   })
 })
 
@@ -184,7 +188,7 @@ describe('buildPedlasBook (deterministic)', () => {
     const axes = pool(11)
     const book = await buildPedlasBook({
       axes, budget: 1000, minStake: 100, rank: 'deterministic',
-      params: { minAnchorDistance: 3, maxIdenticalRun: 6, maxPerLeague: 4 },
+      params: { minAnchorDistance: 3, maxPerLeague: 4 },
     })
 
     expect(book.mode).toBe('pedlas')
@@ -221,7 +225,7 @@ describe('buildPedlasBook (deterministic)', () => {
   it('caps payout at maxPayout, forfeits upside, and reflects it in EV', async () => {
     const book = await buildPedlasBook({
       axes: pool(11), budget: 1000, minStake: 100, rank: 'deterministic', maxPayout: 1_000_000,
-      params: { minAnchorDistance: 5, minSlipSeparation: 2, maxIdenticalRun: 99, maxPerLeague: 5 },
+      params: { minAnchorDistance: 5, maxPerLeague: 5 },
     })
     const capped = book.slips.filter(s => s.capped)
     expect(capped.length).toBeGreaterThan(0)
@@ -244,7 +248,7 @@ describe('buildPedlasBook (deterministic)', () => {
 
     const book = await buildPedlasBook({
       axes, budget: 1000, minStake: 100, rank: 'deterministic',
-      params: { minAnchorDistance: 3, minSlipSeparation: 4, maxIdenticalRun: 6, maxPerLeague: 4 },
+      params: { minAnchorDistance: 3, maxPerLeague: 4 },
     })
 
     const naira = (x: number) => '₦' + Math.round(x).toLocaleString('en-US')
@@ -271,7 +275,7 @@ describe('buildPedlasBook (deterministic)', () => {
         async (n) => {
           const book = await buildPedlasBook({
             axes: pool(n), budget: 800, minStake: 100, rank: 'deterministic',
-            params: { minAnchorDistance: 2, maxIdenticalRun: 99, maxPerLeague: 5 },
+            params: { minAnchorDistance: 2, maxPerLeague: 5 },
           })
           for (const s of book.slips) {
             expect(s.vector.reduce((a: number, b) => a + b, 0)).toBeGreaterThanOrEqual(2) // A

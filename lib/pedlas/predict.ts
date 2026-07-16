@@ -6,9 +6,9 @@
 // attack/defence relative to the league. p̂ is an INDEPENDENT estimate; it is only trustworthy once
 // backtested as calibrated (see backtest below) — never assume it beats the book.
 
-import { poissonDist, pMarket } from '../ssm/scoreline-model'
-import { resolveMarket } from '../ssm/fingerprint'
-import type { FpMarket } from '../ssm/fingerprint'
+import { poissonDist, pMarket } from './scoreline-model'
+import { resolveMarket } from './fingerprint'
+import type { FpMarket } from './fingerprint'
 
 export interface MatchResult {
   date: string   // ISO or YYYY-MM-DD; used only for ordering / as-of filtering

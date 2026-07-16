@@ -8,11 +8,17 @@
 // IMPORTANT: this does NOT create edge (pedlas_v2.md — no model beats the book on any market). It
 // only swaps fragile Over-4.5 anchors for reliable ones; the book stays −vig.
 
-import type { Fixture, OddsValue } from '../ssm/types'
+import type { Fixture, OddsValue } from './types'
 import type { BinaryAxis, GoalLine } from './types'
 
-/** Total-goals lines PEDLAS considers, low → high. Low lines anchor on Over, high lines on Under. */
+/** Total-goals lines the generalised selector considers, low → high. */
 export const PEDLAS_LINES: GoalLine[] = [1.5, 2.5, 3.5, 4.5, 5.5, 6.5]
+/**
+ * The PEDLA market policy (pedla_v1.md §1): ONLY the Under 4.5 axis, anchored on Under.
+ * Under 4.5 ≈ 86% of normal-football scorelines, and a book pricing it ≥ 1.20 marks the
+ * high-odds-but-still-probable pocket PEDLA compounds. Use with requireDominantSide: 'Under'.
+ */
+export const PEDLA_LINES: GoalLine[] = [4.5]
 /** The dominant (anchor) leg must clear this to count toward Win Boost and add meaningful odds. */
 export const MIN_DOMINANT_ODDS = 1.20
 /** @deprecated kept for back-compat; use MIN_DOMINANT_ODDS. */
@@ -45,6 +51,8 @@ function devig(underOdds: number, overOdds: number) {
 export interface MarketSelectOptions {
   lines?: GoalLine[]          // default PEDLAS_LINES
   minDominantOdds?: number    // default 1.20
+  /** Only keep axes whose dominant side is this literal side (PEDLA: 'Under'). */
+  requireDominantSide?: 'Over' | 'Under'
 }
 
 /**
@@ -69,6 +77,7 @@ export function selectAxes(fixtures: Fixture[], opts: MarketSelectOptions = {}):
 
       const { underProb, overProb, margin } = devig(under, over)
       const dominantSide: 'Over' | 'Under' = underProb >= overProb ? 'Under' : 'Over'
+      if (opts.requireDominantSide && dominantSide !== opts.requireDominantSide) continue
       const dominantOdds = dominantSide === 'Under' ? under : over
       if (dominantOdds < minDominantOdds) continue // anchor leg must qualify for Win Boost
 

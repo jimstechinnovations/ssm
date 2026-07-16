@@ -1,28 +1,25 @@
 // lib/pedlas/build.ts
-// PEDLAS v1 orchestrator. One entry point: buildPedlasBook(cfg) → PedlasBook.
+// PEDLA orchestrator. One entry point: buildPedlasBook(cfg) → PedlasBook.
 //
-// Pipeline (see pedlas_v1.md §3):
+// Pipeline (see pedla_v1.md):
 //   axes → D (cap pool per league) → sort by kickoff → enumerate 2^L
-//        → A (min Over-flips) → E (max identical run)
-//        → rank (NIM central, deterministic fallback)
-//        → S (min pairwise Hamming, limited to K = floor(budget/stake))
-//        → assemble slips (accurate winnings-boosted payout) → honest verdict.
+//        → A (min Over-flips)
+//        → rank (coverage: probability; moonshot: NIM/payout)
+//        → top-K fill (K = floor(budget/stake); S and E removed — pedla_v1.md §2)
+//        → assemble slips (accurate winnings-boosted payout per book) → honest verdict.
 
 import { DEFAULT_PARAMS } from './types'
 import type { PedlasBook, PedlasConfig, PedlasObjective, PedlasParams, RankedVector } from './types'
-import { capPoolByLeague, applyAnchorDistance, applyElimination } from './constraints'
+import { capPoolByLeague, applyAnchorDistance } from './constraints'
 import { enumerateVectors, MAX_ENUMERATE_LEGS } from './vectors'
 import { rankVectors, coverageRank } from './rank'
-import { diverseFill } from './separation'
 import { assembleSlip, buildVerdict, budgetSlots, pAnyHit, DEFAULT_MIN_STAKE, DEFAULT_MAX_PAYOUT } from './budget'
 
 function resolveParams(L: number, p?: Partial<PedlasParams>): PedlasParams {
   const merged = { ...DEFAULT_PARAMS, ...p }
   // Clamp so constraints can't make the candidate set empty by construction.
   merged.minAnchorDistance = Math.max(0, Math.min(merged.minAnchorDistance, L))
-  merged.minSlipSeparation = Math.max(1, Math.min(merged.minSlipSeparation, L))
   merged.maxPerLeague = Math.max(1, merged.maxPerLeague)
-  merged.maxIdenticalRun = Math.max(1, merged.maxIdenticalRun)
   merged.pinTopFrac = Math.max(0, Math.min(0.8, merged.pinTopFrac ?? 0))
   return merged
 }
@@ -36,15 +33,11 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
   const objective: PedlasObjective = cfg.objective ?? 'moonshot'
 
   // Coverage targets the near-anchor neighbourhood: A=1 (exclude only the all-dominant anchor so
-  // every placed slip clears the total stake), and E OFF — a reliable slip is a long run of the
-  // dominant side (9 dominant + 1 breakout), which the default E=4 would wrongly prune. Moonshot
-  // keeps DEFAULT_PARAMS.
+  // every placed slip clears the total stake). Moonshot keeps DEFAULT_PARAMS.
   const cfgParams: Partial<PedlasParams> = { ...cfg.params }
   if (objective === 'coverage') {
     if (cfgParams.minAnchorDistance === undefined) cfgParams.minAnchorDistance = 1
-    if (cfgParams.maxIdenticalRun === undefined) cfgParams.maxIdenticalRun = 99 // ≥ any L ⇒ E disabled
-    // diverseFill maximises diversity then fills K (full budget) — no rigid S. pinTopFrac is an
-    // opt-in knob (measured: pinning ~halved P(any hit)), default off → hit-maximising coverage.
+    // pinTopFrac is an opt-in knob (measured: pinning ~halved P(any hit)), default off.
     if (cfgParams.pinTopFrac === undefined) cfgParams.pinTopFrac = 0
   }
 
@@ -63,10 +56,9 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
 
   const params = resolveParams(L, cfgParams)
 
-  // Enumerate the binary outcome space and apply A then E.
-  const all = enumerateVectors(pool)
-  const afterA = applyAnchorDistance(all, params.minAnchorDistance)
-  const candidates = applyElimination(afterA, params.maxIdenticalRun, L)
+  // Enumerate the binary outcome space and apply A.
+  const all = enumerateVectors(pool, cfg.boostFor)
+  const candidates = applyAnchorDistance(all, params.minAnchorDistance)
   const candidateCount = candidates.length
 
   const K = budgetSlots(cfg.budget, stake)
@@ -80,9 +72,9 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
   const scopedPin = pinned.size ? candidates.filter(v => [...pinned].every(i => v.vector[i] === 0)) : candidates
   const pool2 = scopedPin.length >= Math.max(K, 6) ? scopedPin : candidates
 
-  // Rank, then DIVERSE-FILL to K (genuine scatter that always uses the full budget — no rigid S
-  // that under-fills). Objectives differ only in ranking:
-  //   coverage — probability-ranked (hit-maximising; the most-likely distinct variants).
+  // Rank, then take the top K (no S — pedla_v1.md §2: forcing distance replaced likelier
+  // vectors with unlikelier ones). Objectives differ only in ranking:
+  //   coverage — probability-ranked (hit-maximising; the most-likely variants).
   //   moonshot — NIM/payout-ranked (rare big win; the highest-payout variants).
   let ranked: RankedVector[]
   let source: 'nim' | 'deterministic'
@@ -101,11 +93,11 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
     source = r.source
   }
 
-  const kept = diverseFill(ranked, K)             // prefers ≥2-apart variants, backfills to K (full budget)
+  const kept = ranked.slice(0, K)                 // top-K by rank — always fills the budget
   const candidateSlipCount = kept.length          // CR = 2^L / placed slips (outcome space your book covers)
 
   const maxPayout = cfg.maxPayout ?? DEFAULT_MAX_PAYOUT
-  const slips = kept.map((rv, i) => assembleSlip(rv, pool, i + 1, stake, maxPayout))
+  const slips = kept.map((rv, i) => assembleSlip(rv, pool, i + 1, stake, maxPayout, cfg.boostFor))
   const verdict = buildVerdict(pool, slips)
 
   const totalStake = slips.reduce((s, sl) => s + sl.stake, 0)
@@ -113,6 +105,7 @@ export async function buildPedlasBook(cfg: PedlasConfig): Promise<PedlasBook> {
 
   return {
     mode: 'pedlas',
+    bookId: cfg.bookId ?? 'betway_nigeria',
     objective,
     params,
     legCount: L,

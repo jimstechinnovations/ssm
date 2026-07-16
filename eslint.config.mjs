@@ -12,6 +12,8 @@ const eslintConfig = defineConfig([
     "out/**",
     "build/**",
     "next-env.d.ts",
+    // Superseded SSM/SPM flows kept for reference only.
+    "archive/**",
   ]),
 ]);
 

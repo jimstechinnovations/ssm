@@ -1,4 +1,4 @@
-// lib/ssm/fingerprint.ts
+// lib/pedlas/fingerprint.ts
 // Resolution fingerprint engine: a scoreline resolves a whole set of markets at once.
 // Pure, no I/O. The rules ARE the table — the 0-0..N-N grid is generated from them.
 

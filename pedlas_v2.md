@@ -54,7 +54,7 @@ book's de-vigged dominant probability (what the reliable-dominant-per-line Cover
 The deterministic synthetic test ([predict.test.ts](__tests__/lib/pedlas/predict.test.ts)) confirms the
 code is correct (it shows positive skill when signal genuinely exists) — the negative real-data result
 is about football, not a bug. The only honest edge source remaining is a **sharp-book reference**
-(Pinnacle/Betfair de-vig — a data feed, not a model; `spm_v2.md §3`), or accepting PEDLAS as a −vig
+(Pinnacle/Betfair de-vig — a data feed, not a model; `archive/docs/spm_v2.md §3`), or accepting PEDLAS as a −vig
 structure played for Coverage's floor.
 
 ## 2. Data — apifootball.com (probed, real fields)

@@ -41,3 +41,25 @@ yarn-error.log*
 next-env.d.ts
 graphify-out
 placed
+# placement bot config (local settings; credentials stay in .env)
+placement.config.json
+
+# headed placement browser profiles (session cookies live here)
+.browser-profiles/
+
+# dedicated CDP Chrome profile for the placement bot
+.chrome-bot/
+
+# batch placement idempotency log (local)
+.placed-log.json
+
+# local test book for batch placement
+.testbook.json
+
+# personal book files
+mybook.json
+fasttest.json
+todaybook.json
+
+# backtest output artifact
+backtest-cutters.json

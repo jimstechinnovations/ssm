@@ -7,7 +7,7 @@ import type {
   BinaryAxis, PedlasLeg, PedlasSlip, PedlasVerdict, RankedVector,
 } from './types'
 import { sideOdds, stateSide } from './types'
-import { boostPercent, boostedPayout, honestEvMultiple } from './boost'
+import { boostPercent, boostedPayout, honestEvMultiple, boostFor, type BoostFn } from './boost'
 
 /** Nigerian bookmaker minimum stake per slip. */
 export const DEFAULT_MIN_STAKE = 100
@@ -52,9 +52,10 @@ export function assembleSlip(
   slipId: number,
   stake: number,
   maxPayout: number = DEFAULT_MAX_PAYOUT,
+  boost: BoostFn = boostFor,
 ): PedlasSlip {
   const legCount = axes.length
-  const uncappedPayout = boostedPayout(stake, rv.combinedOdds, legCount)
+  const uncappedPayout = boostedPayout(stake, rv.combinedOdds, legCount, boost)
   const payout = Math.min(uncappedPayout, maxPayout)
   return {
     slipId,
@@ -63,7 +64,7 @@ export function assembleSlip(
     legCount,
     combinedOdds: rv.combinedOdds,
     trueProb:     rv.trueProb,
-    boostPct:     boostPercent(legCount),
+    boostPct:     boostPercent(legCount, boost),
     stake,
     payout,
     uncappedPayout,

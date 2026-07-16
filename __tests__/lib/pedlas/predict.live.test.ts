@@ -6,7 +6,7 @@ import { describe, it } from 'vitest'
 import { readFileSync } from 'node:fs'
 import type { MatchResult } from '../../../lib/pedlas/predict'
 import { backtestMarket } from '../../../lib/pedlas/predict'
-import type { FpMarket } from '../../../lib/ssm/fingerprint'
+import type { FpMarket } from '../../../lib/pedlas/fingerprint'
 
 function env(k: string): string {
   const line = readFileSync('.env', 'utf8').split(/\r?\n/).find(l => l.startsWith(k + '='))

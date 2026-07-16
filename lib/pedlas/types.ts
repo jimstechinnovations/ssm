@@ -68,28 +68,25 @@ export function stateSide(a: BinaryAxis, bit: 0 | 1): 'Over' | 'Under' {
   return bit === 0 ? dom : otherSide(dom)
 }
 
-/** The PEDLAS structural parameters (E, D, A, S). P and L are derived from the pool. */
+/**
+ * The PEDLA structural parameters (D, A). P and L are derived from the pool.
+ * S (slip separation) and E (identical-run elimination) were REMOVED (pedla_v1.md §2): both
+ * pruned the highest-probability region of the outcome space. Fill is now top-K by rank.
+ */
 export interface PedlasParams {
   /** A — Anchor distance: minimum Over-flips per slip (Hamming distance from the all-Under anchor). */
   minAnchorDistance: number
-  /** S — Slip separation: minimum pairwise Hamming distance between any two kept slips. */
-  minSlipSeparation: number
-  /** E — Elimination: maximum run of identical consecutive selections after kickoff ordering. */
-  maxIdenticalRun: number
   /** D — Diversity: maximum legs from any one competition within a single slip. */
   maxPerLeague: number
   /**
    * Coverage scatter: fraction of the MOST-CONFIDENT legs to PIN at the anchor (never varied), so
-   * variation/separation is spent only on the UNCERTAIN legs → real scattered, distinct slip
-   * variants. 0 = pin none (old uniform coverage). Coverage defaults to 0.5; ignored by moonshot.
+   * variation is spent only on the UNCERTAIN legs. 0 = pin none (measured better; default).
    */
   pinTopFrac: number
 }
 
 export const DEFAULT_PARAMS: PedlasParams = {
   minAnchorDistance: 2,
-  minSlipSeparation: 3,
-  maxIdenticalRun:   4,
   maxPerLeague:      3,
   pinTopFrac:        0,
 }
@@ -174,6 +171,8 @@ export type PedlasObjective = 'moonshot' | 'coverage'
 
 export interface PedlasBook {
   mode:             'pedlas'
+  /** Bookmaker this book targets (lib/books adapter id). Absent on legacy saved books = betway_nigeria. */
+  bookId?:          string
   objective:        PedlasObjective
   params:           PedlasParams
   legCount:         number     // L
@@ -199,7 +198,48 @@ export interface PedlasConfig {
   budget:      number
   objective?:  PedlasObjective                      // default 'moonshot' (preserves prior behaviour)
   minStake?:   number                              // default 100 (Nigerian bookmaker minimum)
-  maxPayout?:  number                              // Betway max-win cap (default ₦50,000,000)
+  maxPayout?:  number                              // book max-win cap (default ₦50,000,000)
   params?:     Partial<PedlasParams>
   rank?:       'nim' | 'deterministic' | 'auto'    // 'auto' = nim if NVIDIA_API_KEY present, else deterministic (moonshot only)
+  /** The book's Win Boost table (from its lib/books adapter). Default: Betway Nigeria's. */
+  boostFor?:   (legCount: number) => number
+  /** Which bookmaker this book is built for (lib/books adapter id). Default 'betway_nigeria'. */
+  bookId?:     string
+}
+
+// ---------------------------------------------------------------------------
+// Bookmaker feed types (formerly lib/ssm/types.ts) — the shape the Betway
+// scraper emits and market-select consumes.
+// ---------------------------------------------------------------------------
+
+export type MarketType =
+  | '1X2'
+  | 'BTTS'
+  | 'OVER_UNDER_0.5'
+  | 'OVER_UNDER_1.5'
+  | 'OVER_UNDER_2.5'
+  | 'OVER_UNDER_3.5'
+  | 'OVER_UNDER_4.5'
+  | 'OVER_UNDER_5.5'
+  | 'OVER_UNDER_6.5'
+  | 'ASIAN_HANDICAP'
+
+/** One bookmaker market outcome (e.g. Home Win @ 2.10) */
+export interface OddsValue {
+  bookmaker: string
+  market: MarketType
+  label: string       // "Home" | "Draw" | "Away" | "Yes" | "No" | "Over 2.5" …
+  value: number       // decimal odds
+}
+
+/** A fixture as scraped from the bookmaker feed */
+export interface Fixture {
+  id: number
+  homeTeam: string
+  awayTeam: string
+  league: string
+  leagueId: number
+  kickoff: string     // ISO 8601
+  venue?: string
+  odds: OddsValue[]
 }
