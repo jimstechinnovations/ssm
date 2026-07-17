@@ -20,6 +20,7 @@ export const Monitor = svg(<><rect x="3" y="4" width="18" height="12" rx="2" /><
 export const Layers = svg(<><path d="M12 2l9 5-9 5-9-5 9-5z" /><path d="M3 12l9 5 9-5M3 17l9 5 9-5" /></>)
 export const Bolt = svg(<path d="M13 2L3 14h7v8l10-12h-7V2z" fill="currentColor" stroke="none" />)
 export const Download = svg(<path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4M7 10l5 5 5-5M12 15V3" />)
+export const Menu = svg(<path d="M3 12h18M3 6h18M3 18h18" />)
 
 /** Spinning loader. */
 export function Spinner({ className = 'h-4 w-4' }: P) {
