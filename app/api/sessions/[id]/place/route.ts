@@ -25,6 +25,14 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   const summary = await sessionSummary(session.id)
   if (summary.pending === 0) return Response.json({ error: 'No pending slips to place' }, { status: 409 })
 
+  // Guard against a second concurrent run (double-click / two tabs): a fresh heartbeat + not-stopped
+  // means a placer is already working — two placers would collide on submits (per-process mutex).
+  const heartbeatMs = Date.now() - Date.parse(session.updatedAt)
+  const stopReq = Boolean((session.meta as Record<string, unknown> | null)?.stopRequested)
+  if (session.status === 'placing' && heartbeatMs < 25_000 && !stopReq) {
+    return Response.json({ error: 'A placement run is already active for this session — Stop it first, or wait for it to finish.' }, { status: 409 })
+  }
+
   if (live) {
     if (!isLivePlacementAllowed()) return Response.json({ error: 'Live placement locked — set PLACEMENT_LIVE=1' }, { status: 403 })
     const st = await browserStatus()
@@ -40,6 +48,6 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   const child = spawn('node', args, { stdio: 'ignore', detached: true, shell: process.platform === 'win32' })
   child.unref()
 
-  await updateSession(session.id, { status: 'placing' })
+  if (live) await updateSession(session.id, { status: 'placing' })   // only live drives the run-state UI; dry is a rehearsal
   return Response.json({ started: true, live, workers, session: session.code, pending: summary.pending })
 }
