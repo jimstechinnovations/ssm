@@ -27,6 +27,7 @@ export default function SessionPage() {
   const [browser, setBrowser] = useState<BrowserState | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const [busy, setBusy] = useState(false)
+  const [workers, setWorkers] = useState(3)
 
   const load = useCallback(async () => {
     try {
@@ -50,8 +51,8 @@ export default function SessionPage() {
     if (live && !confirm(`Place REAL money on all ${summary?.pending} pending slips? This stakes ${naira(session?.budget)} and is irreversible.`)) return
     setBusy(true); setMsg(null)
     try {
-      const j = await (await fetch(`/api/sessions/${code}/place`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live }) })).json()
-      setMsg(j.error ? `⚠ ${j.error}` : `Started ${live ? 'LIVE' : 'dry-run'} placement of ${j.pending} slips.`)
+      const j = await (await fetch(`/api/sessions/${code}/place`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ live, workers }) })).json()
+      setMsg(j.error ? `⚠ ${j.error}` : `Started ${live ? 'LIVE' : 'dry-run'} placement of ${j.pending} slips across ${j.workers} worker(s).`)
       await load()
     } finally { setBusy(false) }
   }
@@ -84,7 +85,13 @@ export default function SessionPage() {
           <span className="text-xs text-zinc-500 dark:text-zinc-400">
             browser {browser?.up ? 'up' : 'down'}{browser?.up ? ` · ${browser.loggedIn ? 'logged in' : 'not logged in'} · ${browser.mode ?? '—'} · ${naira(browser.balance)}` : ''}
           </span>
-          <div className="ml-auto flex gap-2">
+          <label className="ml-auto flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
+            workers
+            <select value={workers} onChange={e => setWorkers(Number(e.target.value))} className="rounded border border-zinc-300 bg-white px-1.5 py-1 text-xs dark:border-zinc-600 dark:bg-zinc-800">
+              {[1, 2, 3, 4, 6, 8].map(n => <option key={n} value={n}>{n}</option>)}
+            </select>
+          </label>
+          <div className="flex gap-2">
             <button onClick={() => place(false)} disabled={busy || (summary?.pending ?? 0) === 0}
               className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Dry-run</button>
             <button onClick={() => place(true)} disabled={busy || !liveReady || (summary?.pending ?? 0) === 0}

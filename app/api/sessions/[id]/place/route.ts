@@ -20,7 +20,8 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
 
   let live = false
-  try { const b = await request.json(); live = Boolean(b?.live) } catch { /* dry */ }
+  let workers = 1
+  try { const b = await request.json(); live = Boolean(b?.live); workers = Math.min(8, Math.max(1, Number(b?.workers) || 1)) } catch { /* dry */ }
   const summary = await sessionSummary(session.id)
   if (summary.pending === 0) return Response.json({ error: 'No pending slips to place' }, { status: 409 })
 
@@ -34,10 +35,10 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   }
 
   const origin = new URL(request.url).origin
-  const args = ['scripts/place-session.mjs', session.code, '--base', origin, ...(live ? ['--live'] : [])]
+  const args = ['scripts/place-session.mjs', session.code, '--base', origin, '--workers', String(workers), ...(live ? ['--live'] : [])]
   const child = spawn('node', args, { stdio: 'ignore', detached: true, shell: process.platform === 'win32' })
   child.unref()
 
   await updateSession(session.id, { status: 'placing' })
-  return Response.json({ started: true, live, session: session.code, pending: summary.pending })
+  return Response.json({ started: true, live, workers, session: session.code, pending: summary.pending })
 }
