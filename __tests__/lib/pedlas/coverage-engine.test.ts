@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { BinaryAxis } from '@/lib/pedlas/types'
-import { buildDiverseUnderSlips, simulateFamily, calibrateBeta, planCoverage, cutProb } from '@/lib/pedlas/coverage'
+import { buildDiverseUnderSlips, simulateFamily, calibrateBeta, planCoverage, cutProb, buildFlipScatter } from '@/lib/pedlas/coverage'
 import { noBoost } from '@/lib/pedlas/boost'
 
 /** Synthetic pool: Under odds ~1.2 with a spread of cut (Over) probabilities. */
@@ -89,6 +89,32 @@ describe('coverage engine: honest simulation', () => {
     const r0 = simulateFamily(empty, pool, { trials: 800, beta: 0 })
     const rb = simulateFamily(empty, pool, { trials: 800, beta })
     expect(rb.varCutters / rb.meanCutters).toBeGreaterThan(r0.varCutters / r0.meanCutters)
+  })
+})
+
+describe('coverage engine: progressive flip-scatter', () => {
+  it('covers the base (all Under) + EVERY single-game Over, so any single upset is survived', () => {
+    const pool = makePool(20)
+    const fam = buildFlipScatter(pool, { target: 100000, stake: 10, K: 500, maxPayout: 1e9, boost: noBoost })
+    const weight = (v: (0 | 1)[]) => v.reduce((a, b) => a + b, 0)
+    // base present
+    expect(fam.vectors.some(v => weight(v) === 0)).toBe(true)
+    // every single-game Over present (guarantee: no single upset kills all slips)
+    for (let i = 0; i < fam.N; i++) {
+      expect(fam.vectors.some(v => v[i] === 1 && weight(v) === 1)).toBe(true)
+    }
+    // slips are distinct
+    expect(new Set(fam.vectors.map(v => v.join(''))).size).toBe(fam.vectors.length)
+  })
+
+  it('orders single-Overs by kickoff, so a partial run still covers the earliest games', () => {
+    const pool = makePool(16)
+    const fam = buildFlipScatter(pool, { target: 50000, stake: 10, K: 40, maxPayout: 1e9, boost: noBoost })
+    // slip 2 = first game (earliest kickoff) Over; slip 3 = second game Over, …
+    const single = (k: number) => fam.vectors[k].findIndex(b => b === 1)
+    expect(fam.vectors[0].every(b => b === 0)).toBe(true) // slip 1 = base
+    expect(single(1)).toBe(0) // slip 2 flips game index 0 (earliest kickoff — base is kickoff-sorted)
+    expect(single(2)).toBe(1)
   })
 })
 

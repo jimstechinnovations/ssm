@@ -408,21 +408,34 @@ export interface FlipScatter {
 }
 
 /**
- * Build the K flip-variant slips. base = the N legs (kickoff-sorted). Flips are drawn from the
- * `flipTop` legs most likely to go Over, in increasing flip-count, "similar to previous going forward".
+ * Build the K flip-variant slips (PROGRESSIVE coverage). base = the N legs, kickoff-sorted. Order:
+ *   1. base — all Under (the single most-probable outcome)
+ *   2. EVERY single-game Over, in kickoff order — so ANY one upset is survived, and a partial run
+ *      (you stopped early) still covers the earliest games. This is the fix for "all slips died on
+ *      game 1": the base + all singles guarantee coverage of any single Over, no matter how unlikely.
+ *   3. the most-probable multi-Over combinations (2, 3, … flips) for the rest of the budget.
  */
 export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; stake: number; K: number; maxPayout: number; boost?: BoostFn; flipTop?: number }): FlipScatter {
   const boost = opts.boost ?? boostFor
   const { legs, reached } = chooseBaseLegs(axes, opts.stake, opts.target, boost)
-  const base = [...legs].sort((a, b) => a.kickoff.localeCompare(b.kickoff)) // scatter order = kickoff
+  const base = [...legs].sort((a, b) => a.kickoff.localeCompare(b.kickoff)) // kickoff order (index i = i-th to kick off)
   const N = base.length
 
-  // Choose the K most-probable outcome vectors: flip only the least-confident legs (penalty =
-  // P(Over)/P(Under)). This exhaustively covers the most-uncertain games and commits the rest to Under.
-  const logPen = base.map(a => { const o = overLikelihood(a); return Math.log(Math.max(1e-6, o)) - Math.log(Math.max(1e-6, 1 - o)) })
-  const flipSets = topKFlipSets(logPen, opts.K)
   const zero = () => new Array(N).fill(0) as (0 | 1)[]
-  const vectors: (0 | 1)[][] = flipSets.map(set => { const v = zero(); for (const i of set) v[i] = 1; return v })
+  const vectors: (0 | 1)[][] = []
+  const seen = new Set<string>()
+  const push = (v: (0 | 1)[]) => { const k = v.join(''); if (!seen.has(k) && vectors.length < opts.K) { seen.add(k); vectors.push(v) } }
+
+  push(zero())                                                   // 1) base (all Under)
+  for (let i = 0; i < N; i++) { const v = zero(); v[i] = 1; push(v) }   // 2) every single Over, kickoff order
+
+  // 3) most-probable multi-Over sets (≥2 flips) — flip the least-confident games first
+  const logPen = base.map(a => { const o = overLikelihood(a); return Math.log(Math.max(1e-6, o)) - Math.log(Math.max(1e-6, 1 - o)) })
+  for (const set of topKFlipSets(logPen, opts.K + N + 8)) {
+    if (vectors.length >= opts.K) break
+    if (set.length < 2) continue
+    const v = zero(); for (const i of set) v[i] = 1; push(v)
+  }
 
   const slips: PedlasSlip[] = vectors.slice(0, opts.K).map((v, k) => {
     const slipLegs = base.map((ax, i) => legFromAxis(ax, v[i] === 1 ? 'Over' : 'Under'))
