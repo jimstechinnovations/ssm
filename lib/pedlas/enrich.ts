@@ -12,7 +12,25 @@ import { sideProb } from './types'
 import { pHatOver } from './predict'
 import { getFixtureForm, formFromMatchResults } from '../football-history/apifootball'
 import type { FixtureForm } from '../football-history/apifootball'
-import { getTeamRecent } from './history-store'
+import { getTeamRecent, getH2H } from './history-store'
+
+/**
+ * HEAD-TO-HEAD enrichment: attach an advisory from the two teams' OWN past meetings (no team-form
+ * fallback). pHat = fraction of their meetings that finished Over 4.5 — a direct read of how these
+ * specific teams score against each other. Axes with < 2 meetings get no advisory (honest: unknown).
+ */
+export async function enrichH2H(axes: BinaryAxis[]): Promise<BinaryAxis[]> {
+  return Promise.all(axes.map(async (a): Promise<BinaryAxis> => {
+    const [home, away] = a.game.split(' vs ')
+    if (!home || !away) return a
+    const h2h = await getH2H(home.trim(), away.trim(), a.kickoff, 12)
+    if (h2h.length < 2) return a
+    const overs = h2h.filter(m => m.hg + m.ag >= 5).length
+    const overRate = overs / h2h.length
+    const lean: 'back' | 'fade' | 'neutral' = overRate >= 0.4 ? 'fade' : overRate <= 0.15 ? 'back' : 'neutral'
+    return { ...a, advisory: { pHat: overRate, edge: 1, lean, note: `H2H ${overs}/${h2h.length} over 4.5` } }
+  }))
+}
 
 const clamp = (x: number, lo = 0.2, hi = 4.5) => Math.max(lo, Math.min(hi, x))
 

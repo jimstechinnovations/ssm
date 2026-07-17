@@ -41,3 +41,16 @@ export async function getTeamRecent(team: string, beforeISO: string, limit = 12)
     return data.map(r => ({ date: r.match_date, home: r.home_name, away: r.away_name, hg: r.home_goals, ag: r.away_goals }))
   } catch { return [] }
 }
+
+/** HEAD-TO-HEAD: the two teams' OWN past meetings (either venue), most recent first. [] if none. */
+export async function getH2H(a: string, b: string, beforeISO: string, limit = 12): Promise<MatchResult[]> {
+  const recent = await getTeamRecent(a, beforeISO, 40)   // a's history includes any a-vs-b meetings
+  const seen = new Set<string>()
+  const out: MatchResult[] = []
+  for (const m of recent) {
+    if (!((m.home === a && m.away === b) || (m.home === b && m.away === a))) continue
+    const k = `${m.date}|${m.hg}-${m.ag}`
+    if (!seen.has(k)) { seen.add(k); out.push(m) }
+  }
+  return out.slice(0, limit)
+}

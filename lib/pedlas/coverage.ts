@@ -344,13 +344,14 @@ export function estimatePlacement(slipCount: number, secPerSlip = PLACE_SECONDS_
 // increasing flip-count. A slip wins iff its U/O vector exactly matches the real results — a moonshot
 // by nature (probability is low, honestly reported), but every winning slip pays the full target.
 
-/** How likely this leg is to finish Over 4.5 = book P(Over), nudged by the history advisory lean. */
+/** How likely this leg is to finish Over 4.5. Base = book P(Over); when the two teams have H2H
+ *  history, blend in their head-to-head Over-4.5 rate (advisory.pHat) so games these teams tend to
+ *  score in get flipped more. No H2H → book price only. */
 function overLikelihood(a: BinaryAxis): number {
-  let p = cutProb(a)
-  const lean = a.advisory?.lean
-  if (lean === 'fade') p = Math.min(0.95, p * 1.15)        // history leans Over → flip it more
-  else if (lean === 'back') p = Math.max(0.02, p * 0.90)   // history backs Under → flip it less
-  return p
+  const book = cutProb(a)
+  const h2h = a.advisory?.pHat
+  if (h2h != null) return Math.min(0.95, Math.max(0.02, 0.4 * book + 0.6 * h2h))
+  return book
 }
 
 /** Fewest legs (highest Under odds first) whose base parlay × boost clears the target. */

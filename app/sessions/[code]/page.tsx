@@ -17,7 +17,7 @@ interface Slip { id: string; slipId: number; status: string; stake: number; comb
 interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
 interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean } | null }
 interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
-interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null }
+interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null; source?: string }
 
 const naira = (n?: number | null) => n == null ? '—' : '₦' + Math.round(n).toLocaleString()
 const HEARTBEAT_STALE_MS = 25_000
@@ -113,7 +113,7 @@ export default function SessionPage() {
     setHistBusy(true); setMsg(null)
     try {
       const j = await (await fetch(`/api/sessions/${code}/fetch-history`, { method: 'POST' })).json()
-      setMsg(j.error ? { text: j.error, tone: 'warn' } : { text: `Sofascore: history found for ${j.found}/${j.teams} teams (${j.rows} matches stored).`, tone: 'ok' })
+      setMsg(j.error ? { text: j.error, tone: 'warn' } : { text: `Sofascore: processed ${j.processed}/${j.games} games · ${j.withH2H} have H2H (${j.rows} matches stored).${j.more ? ' Click again for the rest.' : ''}`, tone: 'ok' })
       await loadGames()
     } catch { setMsg({ text: 'Could not fetch history.', tone: 'warn' }) }
     finally { setHistBusy(false) }
@@ -174,7 +174,10 @@ export default function SessionPage() {
                     <div className="text-zinc-800 dark:text-zinc-200">{g.game}</div>
                     <div className="text-xs text-zinc-400">{g.league} · {new Date(g.kickoff).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
                   </div>
-                  <div className="text-zinc-500"><TotalsChart history={g.history} /></div>
+                  <div className="text-zinc-500">
+                    <TotalsChart history={g.history} />
+                    {g.source && g.source !== 'none' && <div className="mt-0.5 text-center text-[10px] uppercase tracking-wide text-zinc-400">{g.source === 'h2h' ? 'H2H' : 'form'}</div>}
+                  </div>
                   <span className="w-28 text-right text-xs text-zinc-600 dark:text-zinc-300">
                     {g.overRate != null && <span className={g.overRate > 0.25 ? 'text-red-500' : 'text-green-600 dark:text-green-400'}>{Math.round(g.overRate * 100)}% over · </span>}
                     U{g.line} @ {g.underOdds}

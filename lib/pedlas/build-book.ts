@@ -8,7 +8,7 @@ import type { BookAdapter } from '../books/types'
 import type { Fixture, PedlasBook, PedlasParams } from './types'
 import { DEFAULT_PARAMS } from './types'
 import { selectAxes, PEDLA_LINES, MIN_DOMINANT_ODDS } from './market-select'
-import { enrichAxes, advisoryCoverage } from './enrich'
+import { enrichAxes, enrichH2H, advisoryCoverage } from './enrich'
 import { selectByQuality } from './quality'
 import { buildPedlasBook } from './build'
 import { buildCoverageBook, type CoverageBook } from './coverage'
@@ -172,9 +172,9 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     return { error: 'Not enough qualifying Under 4.5 games', detail: `Found ${axesAll.length} (need ≥4) even after extending to ${usedDateTo}.` }
   }
 
-  // History + advisory (parallel inside enrichAxes). Advisory to the math; but the HISTORY GATE below
-  // can restrict selection to games we actually have data on.
-  const enriched = await enrichAxes(axesAll)
+  // HEAD-TO-HEAD advisory (parallel). The gate below can restrict selection to games where the two
+  // teams have actually met before (no team-form fallback — strictly H2H).
+  const enriched = await enrichH2H(axesAll)
   const withHistory = enriched.filter(a => a.advisory != null)
   const medOdds = [...enriched.map(a => a.underOdds)].sort((x, y) => x - y)[Math.floor(enriched.length / 2)]
   const needed = legsNeeded(medOdds)
