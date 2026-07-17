@@ -38,15 +38,9 @@ export default function Dashboard() {
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <header className="mb-6 flex flex-wrap items-center justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">PEDLA</h1>
-          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Total-goals coverage — scatter a budget across many slips so at least one may land. Honest EV, no edge claims.</p>
-        </div>
-        <div className="flex gap-2">
-          <a href="/config" className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Config</a>
-          <a href="/bet-manager" className="rounded-lg bg-zinc-900 px-4 py-1.5 text-sm font-semibold text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">+ New Bet Session</a>
-        </div>
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Dashboard</h1>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Total-goals coverage — scatter a budget across many slips so at least one may land. Honest EV, no edge claims.</p>
       </header>
 
       <div className="mb-6 grid grid-cols-3 gap-3">

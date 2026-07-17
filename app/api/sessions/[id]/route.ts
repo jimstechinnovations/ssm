@@ -4,7 +4,7 @@
  * later hook; for now this returns the persisted state so the UI can render + poll.
  */
 
-import { getSession, listSessionSlips, sessionSummary } from '@/lib/sessions/store'
+import { getSession, listSessionSlips, scoreboards } from '@/lib/sessions/store'
 
 export const runtime = 'nodejs'
 
@@ -12,6 +12,9 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
   const { id } = await ctx.params
   const session = await getSession(id)
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
-  const [slips, summary] = await Promise.all([listSessionSlips(session.id), sessionSummary(session.id)])
-  return Response.json({ session, slips, summary })
+  const [slips, sb] = await Promise.all([
+    listSessionSlips(session.id, { limit: 200 }),
+    scoreboards([{ id: session.id, slipCount: session.slipCount }]),
+  ])
+  return Response.json({ session, slips, summary: sb[session.id] })
 }

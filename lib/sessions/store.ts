@@ -178,7 +178,7 @@ export async function updateSessionSlipStatus(sessionId: string, slipId: number,
     if (patch.bookingCode !== undefined) row.booking_code = patch.bookingCode
     if (patch.betId !== undefined) row.bet_id = patch.betId
     if (patch.failureReason !== undefined) row.failure_reason = patch.failureReason
-    if (patch.status === 'placed') { row.dry_run = !patch.live ? true : false; row.confirmed_by = 'balance+history'; row.placed_at = new Date().toISOString() }
+    if (patch.status === 'placed') { row.dry_run = !patch.live ? true : false; row.confirmed_by = 'balance+history'; row.placed_at = new Date().toISOString(); row.failure_reason = null } // clear any prior failure on successful retry
     const { error } = await ((supabase.from('pedla_placements') as any)
       .update(row).eq('session_id', sessionId).eq('slip_id', slipId)) as { error: unknown }
     return !error
@@ -204,10 +204,16 @@ export interface SessionSlip {
   failureReason: string | null
 }
 
-export async function listSessionSlips(sessionId: string): Promise<SessionSlip[]> {
+/** List a session's slips. `withLegs` pulls the heavy 34-leg JSON (only clone needs it); `limit`
+ *  caps rows for the UI table. Excluding legs keeps the dashboard/detail fast on 500-slip sessions. */
+export async function listSessionSlips(sessionId: string, opts: { withLegs?: boolean; limit?: number } = {}): Promise<SessionSlip[]> {
   try {
     const supabase = createServerClient()
-    const { data, error } = await (supabase.from('pedla_placements').select('*').eq('session_id', sessionId).order('slip_id', { ascending: true })) as { data: any[] | null; error: unknown }
+    const cols = 'id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason'
+      + (opts.withLegs ? ',legs' : '')
+    let q = supabase.from('pedla_placements').select(cols).eq('session_id', sessionId).order('slip_id', { ascending: true })
+    if (opts.limit) q = q.limit(opts.limit)
+    const { data, error } = await (q as any) as { data: any[] | null; error: unknown }
     if (error || !data) return []
     return data.map((r: any) => ({
       id: r.id, slipId: r.slip_id, bookId: r.book_id, status: r.status, stake: Number(r.stake),
@@ -240,7 +246,7 @@ export interface SessionSummary {
 export async function cloneSession(sourceIdOrCode: string): Promise<SessionRow | null> {
   const src = await getSession(sourceIdOrCode)
   if (!src) return null
-  const slips = await listSessionSlips(src.id)
+  const slips = await listSessionSlips(src.id, { withLegs: true })
 
   const clone = await createSession({
     bookIds: src.bookIds, dateFrom: src.dateFrom, dateTo: src.dateTo,
@@ -264,6 +270,39 @@ export async function cloneSession(sourceIdOrCode: string): Promise<SessionRow |
   for (const [bookId, ps] of byBook) total += await saveSessionSlips(clone.id, bookId, ps)
   await updateSession(clone.id, { status: total > 0 ? 'placing' : 'failed', slipCount: total })
   return getSession(clone.id)
+}
+
+const emptySummary = (): SessionSummary => ({ slips: 0, pending: 0, placed: 0, failed: 0, won: 0, lost: 0, staked: 0, returned: 0, net: 0 })
+
+/** Scoreboards for many sessions in ONE tiny query: only NON-pending rows (most slips are pending),
+ *  deriving `pending` from each session's slip count. Fast even for many 500-slip sessions. */
+export async function scoreboards(sessions: { id: string; slipCount: number | null }[]): Promise<Record<string, SessionSummary>> {
+  const out: Record<string, SessionSummary> = {}
+  for (const s of sessions) out[s.id] = { ...emptySummary(), slips: s.slipCount ?? 0 }
+  if (sessions.length === 0) return out
+  try {
+    const supabase = createServerClient()
+    const { data } = await (supabase.from('pedla_placements')
+      .select('session_id,status,stake,returned,won')
+      .in('session_id', sessions.map(s => s.id))
+      .neq('status', 'pending')) as { data: any[] | null }
+    for (const r of data ?? []) {
+      const s = out[r.session_id]; if (!s) continue
+      const placed = r.status === 'placed' || r.status === 'won' || r.status === 'lost'
+      if (r.status === 'placing') s.pending++
+      if (placed) { s.placed++; s.staked += Number(r.stake) }
+      if (r.status === 'failed') s.failed++
+      if (r.won === true) s.won++
+      if (r.won === false) s.lost++
+      s.returned += Number(r.returned ?? 0)
+    }
+    for (const s of sessions) {
+      const sum = out[s.id]
+      sum.pending = Math.max(0, (s.slipCount ?? 0) - sum.placed - sum.failed) // rest are pending
+      sum.net = sum.returned - sum.staked
+    }
+  } catch { /* soft-fail → zeros */ }
+  return out
 }
 
 export async function sessionSummary(sessionId: string): Promise<SessionSummary> {

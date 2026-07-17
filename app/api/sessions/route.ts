@@ -15,7 +15,7 @@ import { getBookConfig } from '@/lib/books/config-store'
 import { buildCoverageForAdapter } from '@/lib/pedlas/build-book'
 import { boostFromTable } from '@/lib/pedlas/boost'
 import { estimatePlacement } from '@/lib/pedlas/coverage'
-import { createSession, updateSession, saveSessionSlips, listSessions, sessionSummary } from '@/lib/sessions/store'
+import { createSession, updateSession, saveSessionSlips, listSessions, sessionSummary, scoreboards } from '@/lib/sessions/store'
 
 export const runtime = 'nodejs'
 
@@ -108,6 +108,6 @@ export async function POST(request: Request): Promise<Response> {
 
 export async function GET(): Promise<Response> {
   const sessions = await listSessions()
-  const withSummary = await Promise.all(sessions.map(async s => ({ ...s, summary: await sessionSummary(s.id) })))
-  return Response.json({ sessions: withSummary })
+  const sb = await scoreboards(sessions.map(s => ({ id: s.id, slipCount: s.slipCount })))
+  return Response.json({ sessions: sessions.map(s => ({ ...s, summary: sb[s.id] })) })
 }

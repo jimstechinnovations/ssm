@@ -29,15 +29,19 @@ export default function SessionPage() {
   const [busy, setBusy] = useState(false)
   const [workers, setWorkers] = useState(3)
 
+  // session data renders immediately; browser status (slow — it talks to Chrome) loads separately
   const load = useCallback(async () => {
     try {
-      const [s, b] = await Promise.all([fetch(`/api/sessions/${code}`).then(r => r.json()), fetch('/api/browser').then(r => r.json())])
+      const s = await fetch(`/api/sessions/${code}`).then(r => r.json())
       if (s.session) { setSession(s.session); setSlips(s.slips ?? []); setSummary(s.summary) }
-      setBrowser(b)
     } catch { /* ignore */ }
   }, [code])
 
-  useEffect(() => { void load() }, [load])
+  const loadBrowser = useCallback(async () => {
+    try { setBrowser(await fetch('/api/browser').then(r => r.json())) } catch { setBrowser({ up: false }) }
+  }, [])
+
+  useEffect(() => { void load(); void loadBrowser() }, [load, loadBrowser])
   useEffect(() => {
     if (session?.status !== 'placing') return
     const t = setInterval(load, 4000); return () => clearInterval(t)
@@ -99,14 +103,26 @@ export default function SessionPage() {
               className="rounded-lg bg-red-600 px-3 py-1.5 text-sm font-semibold text-white hover:bg-red-700 disabled:opacity-40">Place LIVE (real money)</button>
           </div>
         </div>
-        {summary && (
-          <div className="mt-3 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600 dark:text-zinc-400">
-            <span>pending {summary.pending}</span><span className="text-green-600 dark:text-green-400">placed {summary.placed}</span>
-            <span className="text-red-600 dark:text-red-400">failed {summary.failed}</span>
-            <span>staked {naira(summary.staked)}</span><span>won {summary.won} · lost {summary.lost}</span>
-            {summary.returned > 0 && <span>returned {naira(summary.returned)} · net {naira(summary.net)}</span>}
-          </div>
-        )}
+        {summary && (() => {
+          const total = Math.max(1, summary.placed + summary.failed + summary.pending)
+          const pct = (n: number) => `${(100 * n / total).toFixed(1)}%`
+          return (
+            <div className="mt-3">
+              <div className="flex h-2 overflow-hidden rounded-full bg-zinc-200 dark:bg-zinc-800">
+                <div className="bg-green-500" style={{ width: pct(summary.placed) }} title={`placed ${summary.placed}`} />
+                <div className="bg-red-500" style={{ width: pct(summary.failed) }} title={`failed ${summary.failed}`} />
+              </div>
+              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600 dark:text-zinc-400">
+                <span className="text-green-600 dark:text-green-400">● placed {summary.placed}</span>
+                <span className="text-zinc-400">● pending {summary.pending}</span>
+                <span className="text-red-600 dark:text-red-400">● failed {summary.failed}</span>
+                <span>staked <strong>{naira(summary.staked)}</strong></span>
+                <span>won {summary.won} · lost {summary.lost}</span>
+                {summary.returned > 0 && <span>returned {naira(summary.returned)} · net {naira(summary.net)}</span>}
+              </div>
+            </div>
+          )
+        })()}
         {msg && <p className="mt-2 text-xs text-zinc-600 dark:text-zinc-300">{msg}</p>}
         {!liveReady && <p className="mt-2 text-xs text-amber-600 dark:text-amber-400">Live disabled until the browser is up, logged in, and in REAL mode — set it up on the Config page. Live also needs PLACEMENT_LIVE=1.</p>}
       </section>

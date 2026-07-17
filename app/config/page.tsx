@@ -53,16 +53,13 @@ export default function ConfigPage() {
 
   return (
     <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <header className="mb-6 flex items-start justify-between gap-4">
-        <div>
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Bookmaker Config</h1>
-          <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-            Per-book staking rules, caps and pacing — stored server-side. Dry-run always works; LIVE
-            placement additionally requires the book <em>enabled</em> here <em>and</em> the
-            <code className="mx-1 rounded bg-zinc-100 px-1 dark:bg-zinc-800">PLACEMENT_LIVE=1</code> env gate.
-          </p>
-        </div>
-        <a href="/pedlas" className="shrink-0 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">← Builder</a>
+      <header className="mb-6">
+        <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Bookmaker Config</h1>
+        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
+          Per-book staking rules, caps and pacing — stored server-side. Dry-run always works; LIVE
+          placement additionally requires the book <em>enabled</em> here <em>and</em> the
+          <code className="mx-1 rounded bg-zinc-100 px-1 dark:bg-zinc-800">PLACEMENT_LIVE=1</code> env gate.
+        </p>
       </header>
 
       <div className={`mb-6 rounded-lg border px-4 py-3 text-sm ${placementLive
