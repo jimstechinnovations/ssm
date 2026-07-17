@@ -150,7 +150,7 @@ function makeWorker(page, tag, parallel) {
     const code = await bookingCode(slip.legs)
     const legSig = slip.legs.map(l => `${l.fixtureId}:${l.outcome}`).sort().join('|')
     const idem = `sportybet|${stake}|${legSig}`
-    if (placedLog[idem]?.placed) { log(`slip ${idx}: SKIP (already placed ${placedLog[idem].code})`); return 'skip' }
+    if (placedLog[idem]?.placed) { log(`slip ${idx}: SKIP (already placed ${placedLog[idem].code})`); return { result: 'skip', code: placedLog[idem].code } }
 
     if (!(await ensureLoggedIn())) throw new Error('not logged in (keepalive failed)')
     const before = await readBalance()
@@ -197,14 +197,14 @@ function makeWorker(page, tag, parallel) {
     if (firstTeam && !betslipText.includes(firstTeam)) throw new Error(`stale betslip (missing "${firstTeam}") — NOT placing`)
 
     log(`slip ${idx}: code ${code} · ₦${stake} @ ${slip.combinedOdds?.toFixed?.(2) ?? '?'} · ${slip.legs.length} legs`)
-    if (DRY) { log('  [dry] skipping Place/Confirm'); return 'dry' }
+    if (DRY) { log('  [dry] skipping Place/Confirm'); return { result: 'dry', code } }
 
     const liveState = await page.evaluate(() => {
       const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]
       const t = p ? p.innerText : ''
       return { suspended: /suspended|unavailable|not available|market closed/i.test(t), acceptChanges: /accept chang/i.test(t) }
     })
-    if (liveState.suspended) { log('  ⏭ SUSPENDED leg — skipping'); return 'suspended' }
+    if (liveState.suspended) { log('  ⏭ SUSPENDED leg — skipping'); return { result: 'suspended', code } }
     if (liveState.acceptChanges) {
       await page.evaluate(() => { const b = [...document.querySelectorAll('span,div,button,a')].find(e => /accept chang/i.test((e.textContent || '').trim()) && (e.offsetWidth || e.offsetHeight)); if (b) b.click() })
       await sleep(1500)
@@ -250,7 +250,7 @@ function makeWorker(page, tag, parallel) {
     if (placed) {
       placedLog[idem] = { placed: true, code, how, at: new Date().toISOString(), stake }; savePlaced()
       log(`  ✓ PLACED (${how}) — code ${code}`)
-      return 'placed'
+      return { result: 'placed', code }
     }
     throw new Error('not confirmed (no success signal); check Bet History')
   }
@@ -294,9 +294,9 @@ async function runWorker(worker, queue) {
     const { slip, idx } = queue[k]
     const sid = slip.slipId
     try {
-      const r = await worker.placeOne(slip, idx)
-      if (r === 'placed') { results.placed++; if (!DRY) await report(sid, 'placed') }
-      else if (r === 'skip') results.skip++
+      const { result: r, code } = await worker.placeOne(slip, idx)
+      if (r === 'placed') { results.placed++; if (!DRY) await report(sid, 'placed', { bookingCode: code }) }
+      else if (r === 'skip') { results.skip++; if (!DRY && code) await report(sid, 'placed', { bookingCode: code }) } // already placed → ensure code persisted
       else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
       else results.dry++
     } catch (e) {

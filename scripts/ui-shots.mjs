@@ -11,7 +11,8 @@ const pages = [
   ['bet-manager', '/bet-manager'],
   ['config', '/config'],
   ['session', '/sessions/S-03CFC8'],
-  ['placements', '/placements'],
+  ['reports', '/placements'],
+  ['print', '/sessions/S-03CFC8/print'],
 ]
 const viewports = [['desktop', 1440, 900], ['mobile', 390, 844]]
 

@@ -10,7 +10,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'next/navigation'
-import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers } from '@/components/Icons'
+import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers, Download } from '@/components/Icons'
 
 interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null }
 interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
@@ -34,16 +34,19 @@ export default function SessionPage() {
   const [busy, setBusy] = useState<null | 'dry' | 'live' | 'stop' | 'clone'>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [workers, setWorkers] = useState(3)
+  const [page, setPage] = useState(0)
+  const [total, setTotal] = useState(0)
   const notFound = useRef(false)
+  const PAGE = 50
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(`/api/sessions/${code}`)
+      const r = await fetch(`/api/sessions/${code}?offset=${page * PAGE}&limit=${PAGE}`)
       if (r.status === 404) { notFound.current = true; setSession(null); return }
       const s = await r.json()
-      if (s.session) { setSession(s.session); setSlips(s.slips ?? []); setSummary(s.summary) }
+      if (s.session) { setSession(s.session); setSlips(s.slips ?? []); setSummary(s.summary); setTotal(s.page?.total ?? s.summary?.slips ?? 0) }
     } catch { /* keep last state */ }
-  }, [code])
+  }, [code, page])
   const loadBrowser = useCallback(async () => {
     try { setBrowser(await fetch('/api/browser').then(r => r.json())) } catch { setBrowser({ up: false }) }
   }, [])
@@ -208,9 +211,12 @@ export default function SessionPage() {
       </section>
 
       {/* Slips ledger */}
-      <div className="mb-2 flex items-center justify-between">
-        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Slips</h2>
-        <span className="text-xs text-zinc-400">{summary?.slips ?? slips.length} total · showing {Math.min(slips.length, 100)}</span>
+      <div className="mb-2 flex items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Slips <span className="font-normal text-zinc-400">· {total} total</span></h2>
+        <a href={`/sessions/${code}/print`} target="_blank" rel="noopener"
+          className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+          <Download className="h-3.5 w-3.5" /> Export PDF
+        </a>
       </div>
       <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-700">
         <table className="w-full min-w-[560px] text-left text-sm">
@@ -218,7 +224,7 @@ export default function SessionPage() {
             <tr><Th>#</Th><Th>legs</Th><Th>odds</Th><Th>payout</Th><Th>status</Th><Th>booking code</Th></tr>
           </thead>
           <tbody>
-            {slips.slice(0, 100).map(s => (
+            {slips.map(s => (
               <tr key={s.id} className="border-t border-zinc-100 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/40">
                 <td className="px-3 py-1.5 text-zinc-400">{s.slipId}</td>
                 <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">{s.legCount}</td>
@@ -240,6 +246,16 @@ export default function SessionPage() {
           </tbody>
         </table>
       </div>
+
+      {total > PAGE && (
+        <div className="mt-3 flex items-center justify-center gap-2 text-sm">
+          <button onClick={() => setPage(p => Math.max(0, p - 1))} disabled={page === 0}
+            className="inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800"><ArrowLeft className="h-4 w-4" /> Prev</button>
+          <span className="px-2 text-xs text-zinc-500">page {page + 1} of {Math.ceil(total / PAGE)} · slips {page * PAGE + 1}–{Math.min(total, (page + 1) * PAGE)}</span>
+          <button onClick={() => setPage(p => (p + 1) * PAGE < total ? p + 1 : p)} disabled={(page + 1) * PAGE >= total}
+            className="inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Next <ArrowLeft className="h-4 w-4 rotate-180" /></button>
+        </div>
+      )}
     </div>
   )
 }

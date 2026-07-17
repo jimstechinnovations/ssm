@@ -24,3 +24,10 @@ body {
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+/* Print / PDF export: hide app chrome, force light, tighten. */
+@media print {
+  .no-print { display: none !important; }
+  html, body { background: #fff !important; color: #000 !important; }
+  .print-avoid-break { break-inside: avoid; }
+}

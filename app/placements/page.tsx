@@ -10,6 +10,7 @@
  */
 
 import React, { useCallback, useEffect, useState } from 'react'
+import { Spinner, Refresh } from '@/components/Icons'
 
 interface Leg {
   fixtureId: number; game: string; league: string; kickoff: string
@@ -106,19 +107,16 @@ export default function PlacementsPage() {
     <div className="mx-auto max-w-6xl px-4 py-8 sm:px-6">
       <header className="mb-6 flex flex-wrap items-start justify-between gap-4">
         <div>
-          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Placements &amp; Results</h1>
+          <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Reports &amp; Results</h1>
           <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
             What the <strong>bookmaker</strong> confirmed — not what the bot hoped. Every real slip carries its
             booking code (reopen the identical slip at the book) and settles against actual scores.
           </p>
         </div>
-        <div className="flex gap-2">
-          <a href="/pedlas" className="rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">← Builder</a>
-          <button onClick={autoSettle} disabled={busy === 'settle'}
-            className="rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900">
-            {busy === 'settle' ? 'Settling…' : '↻ Auto-settle from results'}
-          </button>
-        </div>
+        <button onClick={autoSettle} disabled={busy === 'settle'}
+          className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-sm font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900">
+          {busy === 'settle' ? <Spinner className="h-4 w-4" /> : <Refresh className="h-4 w-4" />}{busy === 'settle' ? 'Settling…' : 'Auto-settle from results'}
+        </button>
       </header>
 
       {summary && (

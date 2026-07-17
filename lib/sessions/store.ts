@@ -223,13 +223,14 @@ export interface SessionSlip {
 
 /** List a session's slips. `withLegs` pulls the heavy 34-leg JSON (only clone needs it); `limit`
  *  caps rows for the UI table. Excluding legs keeps the dashboard/detail fast on 500-slip sessions. */
-export async function listSessionSlips(sessionId: string, opts: { withLegs?: boolean; limit?: number } = {}): Promise<SessionSlip[]> {
+export async function listSessionSlips(sessionId: string, opts: { withLegs?: boolean; limit?: number; offset?: number } = {}): Promise<SessionSlip[]> {
   try {
     const supabase = createServerClient()
     const cols = 'id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason'
       + (opts.withLegs ? ',legs' : '')
     let q = supabase.from('pedla_placements').select(cols).eq('session_id', sessionId).order('slip_id', { ascending: true })
-    if (opts.limit) q = q.limit(opts.limit)
+    if (opts.offset != null && opts.limit) q = q.range(opts.offset, opts.offset + opts.limit - 1)
+    else if (opts.limit) q = q.limit(opts.limit)
     const { data, error } = await (q as any) as { data: any[] | null; error: unknown }
     if (error || !data) return []
     return data.map((r: any) => ({

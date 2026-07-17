@@ -8,13 +8,16 @@ import { getSession, listSessionSlips, scoreboards } from '@/lib/sessions/store'
 
 export const runtime = 'nodejs'
 
-export async function GET(_request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
+export async function GET(request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
   const { id } = await ctx.params
   const session = await getSession(id)
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
+  const url = new URL(request.url)
+  const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 50))
+  const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
   const [slips, sb] = await Promise.all([
-    listSessionSlips(session.id, { limit: 200 }),
+    listSessionSlips(session.id, { limit, offset }),
     scoreboards([{ id: session.id, slipCount: session.slipCount }]),
   ])
-  return Response.json({ session, slips, summary: sb[session.id] })
+  return Response.json({ session, slips, summary: sb[session.id], page: { offset, limit, total: session.slipCount ?? sb[session.id]?.slips ?? slips.length } })
 }
