@@ -94,9 +94,19 @@ export default function SessionPage() {
     try { const j = await (await fetch(`/api/sessions/${code}/clone`, { method: 'POST' })).json(); if (j.session) setMsg({ text: `Cloned → ${j.session.code} (open it to place in parallel).`, tone: 'ok' }) }
     finally { setBusy(null) }
   }
-  async function openGames() {
-    setShowGames(v => !v)
-    if (games == null) { try { const j = await fetch(`/api/sessions/${code}/games`).then(r => r.json()); setGames(j.games ?? []) } catch { setGames([]) } }
+  const loadGames = useCallback(async () => {
+    try { const j = await fetch(`/api/sessions/${code}/games`).then(r => r.json()); setGames(j.games ?? []) } catch { setGames([]) }
+  }, [code])
+  async function openGames() { setShowGames(v => !v); if (games == null) await loadGames() }
+  const [histBusy, setHistBusy] = useState(false)
+  async function fetchHistory() {
+    setHistBusy(true); setMsg(null)
+    try {
+      const j = await (await fetch(`/api/sessions/${code}/fetch-history`, { method: 'POST' })).json()
+      setMsg(j.error ? { text: j.error, tone: 'warn' } : { text: `Sofascore: history found for ${j.found}/${j.teams} teams (${j.rows} matches stored).`, tone: 'ok' })
+      await loadGames()
+    } catch { setMsg({ text: 'Could not fetch history.', tone: 'warn' }) }
+    finally { setHistBusy(false) }
   }
   function copy(text: string) { navigator.clipboard?.writeText(text).then(() => { setCopied(text); setTimeout(() => setCopied(null), 1200) }) }
   async function analyze() {
@@ -137,7 +147,12 @@ export default function SessionPage() {
       {/* Games (collapsible) */}
       {showGames && (
         <section className="mb-5 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
-          <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200"><Layers className="h-4 w-4" /> Pool games {games ? `(${games.length})` : ''}</div>
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+            <Layers className="h-4 w-4" /> Pool games {games ? `(${games.length})` : ''}
+            <button onClick={fetchHistory} disabled={histBusy} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+              {histBusy ? <Spinner className="h-3.5 w-3.5" /> : <Download className="h-3.5 w-3.5" />} Fetch H2H history
+            </button>
+          </div>
           {games == null ? <div className="py-3"><Spinner /></div> : (
             <>
             <p className="mb-2 text-xs text-zinc-400">Each bar = a past match's total goals; <span className="text-green-600 dark:text-green-400">green</span> stayed Under 4.5, <span className="text-red-600 dark:text-red-400">red</span> went Over. {games.filter(g => g.history.length).length}/{games.length} games have history.</p>
