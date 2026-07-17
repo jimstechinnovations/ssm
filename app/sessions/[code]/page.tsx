@@ -10,7 +10,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'next/navigation'
-import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers, Download } from '@/components/Icons'
+import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers, Download, XMark } from '@/components/Icons'
 import { TotalsChart } from '@/components/TotalsChart'
 
 interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null }
@@ -18,6 +18,8 @@ interface Summary { slips: number; pending: number; placed: number; failed: numb
 interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean } | null }
 interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
 interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null; source?: string }
+interface SlipLeg { fixtureId: number; game: string; kickoff: string; line: number; side: string; odds: number }
+interface SlipDetail { slipId: number; status: string; stake: number; combinedOdds: number; payout: number | null; bookingCode: string | null; betId: string | null; legs: SlipLeg[] }
 
 const naira = (n?: number | null) => n == null ? '—' : '₦' + Math.round(n).toLocaleString()
 const HEARTBEAT_STALE_MS = 25_000
@@ -37,6 +39,7 @@ export default function SessionPage() {
   const [workers, setWorkers] = useState(3)
   const [ai, setAi] = useState<{ text: string; source: string } | null>(null)
   const [aiBusy, setAiBusy] = useState(false)
+  const [slipView, setSlipView] = useState<null | { slipId: number; loading: boolean; data?: SlipDetail }>(null)
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
   const notFound = useRef(false)
@@ -119,6 +122,11 @@ export default function SessionPage() {
     finally { setHistBusy(false) }
   }
   function copy(text: string) { navigator.clipboard?.writeText(text).then(() => { setCopied(text); setTimeout(() => setCopied(null), 1200) }) }
+  async function openSlip(slipId: number) {
+    setSlipView({ slipId, loading: true })
+    try { const data = await fetch(`/api/sessions/${code}/slip?slipId=${slipId}`).then(r => r.json()); setSlipView({ slipId, loading: false, data }) }
+    catch { setSlipView({ slipId, loading: false }) }
+  }
   async function analyze() {
     setAiBusy(true)
     try { const j = await (await fetch(`/api/sessions/${code}/analyze`, { method: 'POST' })).json(); setAi({ text: j.summary ?? j.error ?? '—', source: j.source ?? '' }) }
@@ -288,8 +296,8 @@ export default function SessionPage() {
           </thead>
           <tbody>
             {slips.map(s => (
-              <tr key={s.id} className="border-t border-zinc-100 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/40">
-                <td className="px-3 py-1.5 text-zinc-400">{s.slipId}</td>
+              <tr key={s.id} onClick={() => openSlip(s.slipId)} className="cursor-pointer border-t border-zinc-100 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/40">
+                <td className="px-3 py-1.5 font-medium text-blue-600 dark:text-blue-400">{s.slipId}</td>
                 <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">{s.legCount}</td>
                 <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">{s.combinedOdds?.toFixed?.(1) ?? '—'}</td>
                 <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">{naira(s.potentialPayout)}</td>
@@ -299,7 +307,7 @@ export default function SessionPage() {
                 </td>
                 <td className="px-3 py-1.5">
                   {s.bookingCode ? (
-                    <button onClick={() => copy(s.bookingCode!)} className="inline-flex items-center gap-1 font-mono text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200" title="copy booking code">
+                    <button onClick={(e) => { e.stopPropagation(); copy(s.bookingCode!) }} className="inline-flex items-center gap-1 font-mono text-xs text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200" title="copy booking code">
                       {s.bookingCode} {copied === s.bookingCode ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 opacity-50" />}
                     </button>
                   ) : <span className="text-zinc-300 dark:text-zinc-600">—</span>}
@@ -319,9 +327,50 @@ export default function SessionPage() {
             className="inline-flex items-center gap-1 rounded-lg border border-zinc-300 px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Next <ArrowLeft className="h-4 w-4 rotate-180" /></button>
         </div>
       )}
+
+      {slipView && <SlipModal view={slipView} onClose={() => setSlipView(null)} onCopy={copy} copied={copied} />}
     </div>
   )
 }
+
+function SlipModal({ view, onClose, onCopy, copied }: { view: { slipId: number; loading: boolean; data?: SlipDetail }; onClose: () => void; onCopy: (s: string) => void; copied: string | null }) {
+  const d = view.data
+  return (
+    <div className="fixed inset-0 z-40 flex items-end justify-center bg-black/40 p-0 sm:items-center sm:p-4" onClick={onClose}>
+      <div onClick={e => e.stopPropagation()} className="max-h-[85vh] w-full max-w-lg overflow-hidden rounded-t-2xl bg-white shadow-xl sm:rounded-2xl dark:bg-zinc-900">
+        <div className="flex items-center gap-2 border-b border-zinc-200 px-4 py-3 dark:border-zinc-800">
+          <h3 className="font-mono text-sm font-bold text-zinc-900 dark:text-zinc-100">Slip #{view.slipId}</h3>
+          {d && <span className={`inline-flex items-center gap-1.5 text-xs ${STATUS_CLS_TEXT[d.status] ?? 'text-zinc-500'}`}><Dot tone={statusTone[d.status] ?? 'zinc'} /><span className="capitalize">{d.status}</span></span>}
+          <button onClick={onClose} className="ml-auto rounded-lg p-1 text-zinc-400 hover:bg-zinc-100 hover:text-zinc-700 dark:hover:bg-zinc-800"><XMark className="h-5 w-5" /></button>
+        </div>
+        {view.loading || !d ? <div className="py-10"><Spinner className="mx-auto h-6 w-6" /></div> : (
+          <>
+            <div className="flex flex-wrap gap-x-4 gap-y-1 border-b border-zinc-100 px-4 py-2 text-xs text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
+              <span>{d.legs.length} legs</span><span>odds {d.combinedOdds?.toFixed?.(1)}</span>
+              <span>stake {naira(d.stake)}</span><span>payout <strong className="text-zinc-800 dark:text-zinc-200">{naira(d.payout)}</strong></span>
+              {d.bookingCode && <button onClick={() => onCopy(d.bookingCode!)} className="inline-flex items-center gap-1 font-mono text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200">{d.bookingCode} {copied === d.bookingCode ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 opacity-50" />}</button>}
+            </div>
+            <div className="max-h-[60vh] overflow-y-auto">
+              {d.legs.map((l, i) => (
+                <div key={l.fixtureId} className="flex items-center gap-3 border-b border-zinc-100 px-4 py-2 text-sm last:border-0 dark:border-zinc-800">
+                  <span className="w-5 text-right text-xs text-zinc-400">{i + 1}</span>
+                  <div className="min-w-0 flex-1">
+                    <div className="truncate text-zinc-800 dark:text-zinc-200">{l.game}</div>
+                    <div className="text-xs text-zinc-400">{new Date(l.kickoff).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
+                  </div>
+                  <span className={`rounded px-2 py-0.5 text-xs font-semibold ${l.side === 'Under' ? 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300'}`}>{l.side} {l.line}</span>
+                  <span className="w-12 text-right text-xs text-zinc-500">{l.odds}</span>
+                </div>
+              ))}
+            </div>
+          </>
+        )}
+      </div>
+    </div>
+  )
+}
+
+const STATUS_CLS_TEXT: Record<string, string> = { placed: 'text-green-600 dark:text-green-400', won: 'text-green-600 dark:text-green-400', failed: 'text-red-600 dark:text-red-400', lost: 'text-zinc-500', pending: 'text-zinc-500' }
 
 function Stat({ label, value, highlight, onClick, action }: { label: string; value: string; highlight?: boolean; onClick?: () => void; action?: boolean }) {
   const base = `rounded-xl border p-3 text-left ${highlight ? 'border-zinc-900 dark:border-zinc-100' : 'border-zinc-200 dark:border-zinc-700'}`

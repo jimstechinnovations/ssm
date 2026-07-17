@@ -107,7 +107,12 @@ export async function browserStatus(): Promise<BrowserStatus> {
         const mode = (!l && !s) ? 'unknown' : /show-highlight/.test(l?.className || '') ? 'REAL' : /show-highlight/.test(s?.className || '') ? 'SIM' : 'unknown'
         return { loggedIn, bal, mode }
       }).catch(() => ({ loggedIn: false, bal: null as string | null, mode: 'unknown' as const }))
-      return { up: true, loggedIn: info.loggedIn, balance: info.bal ? parseFloat(info.bal.replace(/,/g, '')) : null, mode: info.mode as BrowserStatus['mode'] }
+      const balance = info.bal ? parseFloat(info.bal.replace(/,/g, '')) : null
+      // The REAL/SIM toggle only shows in the betslip; on other views it's 'unknown'. When logged in
+      // with a balance, infer from size (SIM wallets are large play-money; >₦100k = SIM, else REAL).
+      let mode = info.mode as BrowserStatus['mode']
+      if (mode === 'unknown' && info.loggedIn && balance != null) mode = balance > 100_000 ? 'SIM' : 'REAL'
+      return { up: true, loggedIn: info.loggedIn, balance, mode }
     } finally { await browser.close() }
   } catch { return { up: true } }
 }

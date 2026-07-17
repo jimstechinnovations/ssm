@@ -243,6 +243,24 @@ export async function listSessionSlips(sessionId: string, opts: { withLegs?: boo
   } catch { return [] }
 }
 
+/** One slip WITH legs (for the click-to-view overlay) — a single-row query, not the whole book. */
+export async function getSessionSlip(sessionId: string, slipId: number): Promise<SessionSlip | null> {
+  try {
+    const supabase = createServerClient()
+    const { data, error } = await (supabase.from('pedla_placements')
+      .select('id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason,legs')
+      .eq('session_id', sessionId).eq('slip_id', slipId).limit(1).single()) as { data: any; error: unknown }
+    if (error || !data) return null
+    return {
+      id: data.id, slipId: data.slip_id, bookId: data.book_id, status: data.status, stake: Number(data.stake),
+      combinedOdds: data.combined_odds, potentialPayout: data.potential_payout == null ? null : Number(data.potential_payout),
+      legCount: data.leg_count, legs: data.legs ?? [], bookingCode: data.booking_code, betId: data.bet_id,
+      attempts: data.attempts ?? 0, settled: Boolean(data.settled), won: data.won,
+      returned: data.returned == null ? null : Number(data.returned), failureReason: data.failure_reason,
+    }
+  } catch { return null }
+}
+
 /** Roll a session's slips up into a scoreboard for the dashboard / detail view. */
 export interface SessionSummary {
   slips: number
