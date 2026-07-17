@@ -11,7 +11,7 @@ import React, { useEffect, useState } from 'react'
 import { Spinner } from '@/components/Icons'
 
 interface BookConfig { bookId: string; label: string; minStake: number; enabled: boolean; registered: boolean; feedVerified: boolean }
-interface BuiltBook { bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; note?: string; error?: string; detail?: string }
+interface BuiltBook { bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; withHistory?: number; note?: string; error?: string; detail?: string }
 interface SessionResult {
   session: { code: string; status: string; legCount: number | null; slipCount: number | null; poolSize: number | null; budget: number; targetWin: number }
   books: BuiltBook[]
@@ -31,6 +31,7 @@ export default function BetManagerPage() {
   const [target, setTarget] = useState(500000)
   const [windowMin, setWindowMin] = useState<number | ''>('')   // '' = auto (computed from slip count)
   const [legPref, setLegPref] = useState<number | ''>('')
+  const [requireHistory, setRequireHistory] = useState(false)
   const [building, setBuilding] = useState(false)
   const [result, setResult] = useState<SessionResult | null>(null)
   const [error, setError] = useState<string | null>(null)
@@ -64,6 +65,7 @@ export default function BetManagerPage() {
       }
       if (windowMin) body.selection_window_min = windowMin
       if (legPref) body.leg_pref = legPref
+      if (requireHistory) body.require_history = true
       const r = await fetch('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const j = await r.json()
       if (!r.ok) { setError(j.issues?.join('; ') || j.error || 'Build failed'); return }
@@ -112,6 +114,12 @@ export default function BetManagerPage() {
           est. place time <strong>~{hrs(estRunMin)}</strong> · {windowMin ? 'window' : 'auto window'} <strong>~{hrs(estWindowMin)}</strong> —
           only games kicking off after that are selected, so nothing goes live mid-placement.
         </p>
+
+        <label className="mt-3 flex items-center gap-2 text-sm text-zinc-700 dark:text-zinc-300">
+          <input type="checkbox" checked={requireHistory} onChange={e => setRequireHistory(e.target.checked)} />
+          Require match history — only build on games we have H2H/form data for
+          <span className="text-xs text-zinc-400">(falls back with a note until Sofascore history is added)</span>
+        </label>
 
         <div className="mt-4 flex items-center gap-3">
           <button onClick={build} disabled={building}
@@ -167,7 +175,7 @@ function ResultCard({ result, onCloned }: { result: SessionResult; onCloned: () 
           <div key={b.bookId} className="flex flex-wrap items-center gap-2 text-zinc-700 dark:text-zinc-300">
             <span className="font-medium">{b.bookId}</span>
             {b.error ? <span className="text-red-600 dark:text-red-400">{b.error}{b.detail ? ` — ${b.detail}` : ''}</span>
-              : <span>{b.slips} slips · {b.legs} legs · payout {b.medianPayout != null ? naira(b.medianPayout) : '—'} · P {b.pAnyWin != null ? (100 * b.pAnyWin).toFixed(1) + '%' : '—'}</span>}
+              : <span>{b.slips} slips · {b.legs} legs · payout {b.medianPayout != null ? naira(b.medianPayout) : '—'} · P {b.pAnyWin != null ? (100 * b.pAnyWin).toFixed(1) + '%' : '—'}{b.withHistory != null ? ` · ${b.withHistory} w/ history` : ''}</span>}
             {b.note && <span className="text-amber-600 dark:text-amber-400">· {b.note}</span>}
           </div>
         ))}

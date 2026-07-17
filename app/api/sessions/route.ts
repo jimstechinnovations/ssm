@@ -30,7 +30,9 @@ const CreateSchema = z.object({
   leg_pref:   z.number().int().min(3).max(60).optional(),
   /** Selection window: only pick games kicking off ≥ this many minutes out, so none go live during
    *  the placement run. 30–60 min recommended. */
-  selection_window_min: z.number().int().min(15).max(240).optional(),
+  selection_window_min: z.number().int().min(15).max(600).optional(),
+  /** Only build on games we have real history for (falls back with a note until Sofascore lands). */
+  require_history: z.boolean().optional(),
 }).refine(d => {
   const from = new Date(d.date_from), to = new Date(d.date_to)
   const maxTo = new Date(from); maxTo.setDate(maxTo.getDate() + 2)
@@ -63,7 +65,7 @@ export async function POST(request: Request): Promise<Response> {
   })
   if (!session) return Response.json({ error: 'Could not create session (is migration 006 applied?)' }, { status: 500 })
 
-  const bookResults: Array<{ bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; note?: string; error?: string; detail?: string }> = []
+  const bookResults: Array<{ bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; withHistory?: number; note?: string; error?: string; detail?: string }> = []
   const bookMetas: Record<string, unknown> = {}
   let totalSlips = 0
   let repL: number | undefined
@@ -78,6 +80,7 @@ export async function POST(request: Request): Promise<Response> {
     const built = await buildCoverageForAdapter(getBook(id), {
       dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake,
       targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost,
+      requireHistory: req.require_history,
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
     if (built.usedDateTo && built.usedDateTo > usedDateTo) usedDateTo = built.usedDateTo
@@ -85,7 +88,7 @@ export async function POST(request: Request): Promise<Response> {
     totalSlips += saved
     repL ??= built.book.L; repPool ??= built.book.poolSize; repPAny ??= built.book.pAnyWin
     bookMetas[id] = built.meta
-    bookResults.push({ bookId: id, slips: saved, legs: built.book.L, pAnyWin: built.book.pAnyWin, medianPayout: built.book.medianPayout, note: built.book.note })
+    bookResults.push({ bookId: id, slips: saved, legs: built.book.L, pAnyWin: built.book.pAnyWin, medianPayout: built.book.medianPayout, withHistory: (built.meta as { withHistory?: number })?.withHistory, note: String((built.meta as { note?: string })?.note ?? built.book.note ?? '') })
   }
 
   const ok = totalSlips > 0

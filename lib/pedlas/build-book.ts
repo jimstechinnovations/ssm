@@ -113,6 +113,8 @@ export interface CoverageAdapterOptions {
   minKickoffGapMinutes: number    // the configurable selection window (30–60 min)
   /** Verified boost table override (book_configs.boost_json). Falls back to the adapter's boost. */
   boost?: import('./boost').BoostFn
+  /** Only build on games we have history for (falls back to all + a note if too few exist yet). */
+  requireHistory?: boolean
 }
 
 export interface CoverageResult {
@@ -170,16 +172,33 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     return { error: 'Not enough qualifying Under 4.5 games', detail: `Found ${axesAll.length} (need ≥4) even after extending to ${usedDateTo}.` }
   }
 
-  // History + advisory (parallel inside enrichAxes) — required per the operator, advisory to the math.
+  // History + advisory (parallel inside enrichAxes). Advisory to the math; but the HISTORY GATE below
+  // can restrict selection to games we actually have data on.
   const enriched = await enrichAxes(axesAll)
+  const withHistory = enriched.filter(a => a.advisory != null)
+  const medOdds = [...enriched.map(a => a.underOdds)].sort((x, y) => x - y)[Math.floor(enriched.length / 2)]
+  const needed = legsNeeded(medOdds)
 
-  const book = buildCoverageBook(enriched, {
+  // GATE: prefer history-backed games; if requireHistory and enough exist, use ONLY those. If not
+  // enough yet (sparse corpus until Sofascore lands), fall back to all + say so (never silently blind).
+  let pool = enriched
+  let gateNote = ''
+  if (opts.requireHistory) {
+    if (withHistory.length >= needed) pool = withHistory
+    else gateNote = `Only ${withHistory.length}/${enriched.length} games have history (need ~${needed}). Placed on ALL games — add Sofascore history to gate properly.`
+  } else if (withHistory.length >= needed) {
+    // not required, but if we have enough with history, prefer them (cleaner selection)
+    pool = withHistory
+  }
+
+  const book = buildCoverageBook(pool, {
     budget: opts.budget, stake, maxPayout: Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
     boost: opts.boost ?? adapter.boostFor, legPref: opts.legPref, targetWin: opts.targetWin,
   })
   const meta = {
     scanned: fixtures.length,
     qualifyingAxes: axesAll.length,
+    withHistory: withHistory.length,
     poolSize: book.poolSize,
     legs: book.L,
     slips: book.K,
@@ -188,8 +207,8 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     medianOdds: book.medianOdds,
     meanCutters: book.meanCutters,
     beta: book.beta,
-    note: book.note,
-    advisory: advisoryCoverage(enriched),
+    note: [book.note, gateNote].filter(Boolean).join(' '),
+    advisory: advisoryCoverage(pool),
     ...sourceMeta,
   }
   return { book, slips: book.slips, meta, usedDateTo }

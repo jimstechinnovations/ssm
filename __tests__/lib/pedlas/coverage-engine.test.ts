@@ -96,7 +96,7 @@ describe('coverage engine: progressive flip-scatter', () => {
   it('covers the base (all Under) + EVERY single-game Over, so any single upset is survived', () => {
     const pool = makePool(20)
     const fam = buildFlipScatter(pool, { target: 100000, stake: 10, K: 500, maxPayout: 1e9, boost: noBoost })
-    const weight = (v: (0 | 1)[]) => v.reduce((a, b) => a + b, 0)
+    const weight = (v: (0 | 1)[]) => v.reduce((a: number, b) => a + b, 0)
     // base present
     expect(fam.vectors.some(v => weight(v) === 0)).toBe(true)
     // every single-game Over present (guarantee: no single upset kills all slips)
