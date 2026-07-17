@@ -6,7 +6,7 @@
 // Team identity is matched by Sofascore id (exact), never fuzzy name.
 
 import 'server-only'
-import { chromium, type Page } from 'playwright'
+import type { Page } from 'playwright'
 import { upsertMatches } from '../pedlas/history-store'
 import type { LeagueEvent } from '../football-history/apifootball'
 
@@ -63,6 +63,7 @@ export async function syncSofascoreGames(games: GamePair[], limit = 12): Promise
   catch { return { games: games.length, processed: 0, withH2H: 0, withForm: 0, rows: 0, more: games.length > 0, needBrowser: true } }
 
   const batchGames = games.slice(0, limit)
+  const { chromium } = await import('playwright')   // dynamic import — reliable inside Next routes
   const browser = await chromium.connectOverCDP(CDP)
   let page: Page | null = null
   try {
