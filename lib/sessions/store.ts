@@ -261,6 +261,35 @@ export async function getSessionSlip(sessionId: string, slipId: number): Promise
   } catch { return null }
 }
 
+/** Placed (real) slips WITH legs, for settlement. status in placed/won/lost. */
+export async function listPlacedSlipsWithLegs(sessionId: string): Promise<SessionSlip[]> {
+  try {
+    const supabase = createServerClient()
+    const { data, error } = await (supabase.from('pedla_placements')
+      .select('id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason,legs')
+      .eq('session_id', sessionId).in('status', ['placed', 'won', 'lost'])) as { data: any[] | null; error: unknown }
+    if (error || !data) return []
+    return data.map((r: any) => ({
+      id: r.id, slipId: r.slip_id, bookId: r.book_id, status: r.status, stake: Number(r.stake),
+      combinedOdds: r.combined_odds, potentialPayout: r.potential_payout == null ? null : Number(r.potential_payout),
+      legCount: r.leg_count, legs: r.legs ?? [], bookingCode: r.booking_code, betId: r.bet_id,
+      attempts: r.attempts ?? 0, settled: Boolean(r.settled), won: r.won,
+      returned: r.returned == null ? null : Number(r.returned), failureReason: r.failure_reason,
+    }))
+  } catch { return [] }
+}
+
+/** Record a slip's settlement (won/lost) — status, settled flag, returned amount. */
+export async function settleSessionSlip(sessionId: string, slipId: number, won: boolean, returned: number, note?: string): Promise<boolean> {
+  try {
+    const supabase = createServerClient()
+    const row: Record<string, unknown> = { status: won ? 'won' : 'lost', settled: true, settled_at: new Date().toISOString(), settled_by: 'auto', won, returned, updated_at: new Date().toISOString() }
+    if (note) row.notes = note
+    const { error } = await ((supabase.from('pedla_placements') as any).update(row).eq('session_id', sessionId).eq('slip_id', slipId)) as { error: unknown }
+    return !error
+  } catch { return false }
+}
+
 /** Roll a session's slips up into a scoreboard for the dashboard / detail view. */
 export interface SessionSummary {
   slips: number

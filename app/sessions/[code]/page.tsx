@@ -133,6 +133,16 @@ export default function SessionPage() {
     catch { setAi({ text: 'Could not run analysis.', source: '' }) }
     finally { setAiBusy(false) }
   }
+  const [settleBusy, setSettleBusy] = useState(false)
+  async function settle() {
+    setSettleBusy(true); setMsg(null)
+    try {
+      const j = await (await fetch(`/api/sessions/${code}/settle`, { method: 'POST' })).json()
+      setMsg(j.error ? { text: j.error, tone: 'warn' } : { text: `Settled ${j.settled} (won ${j.won}, lost ${j.lost}) · ${j.pending} still pending · ${j.gamesFinished}/${j.of} games finished.`, tone: 'ok' })
+      await load()
+    } catch { setMsg({ text: 'Could not check results.', tone: 'warn' }) }
+    finally { setSettleBusy(false) }
+  }
 
   if (notFound.current) return <div className="mx-auto max-w-4xl px-4 py-16 text-center text-sm text-zinc-500">Session <span className="font-mono">{code}</span> not found. <a href="/" className="text-blue-600 hover:underline dark:text-blue-400">Back to dashboard</a></div>
   if (!session) return <Loading label={`Loading ${code}…`} />
@@ -150,9 +160,16 @@ export default function SessionPage() {
         <span className="inline-flex items-center gap-1.5 rounded-full bg-zinc-100 px-2.5 py-1 text-xs font-medium text-zinc-700 dark:bg-zinc-800 dark:text-zinc-300">
           {(running || stopping) ? <Spinner className="h-3 w-3" /> : <Dot tone={runTone} />} {runLabel}
         </span>
-        <button onClick={clone} disabled={busy != null} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
-          {busy === 'clone' ? <Spinner className="h-4 w-4" /> : <Copy className="h-4 w-4" />} Duplicate
-        </button>
+        <div className="ml-auto flex gap-2">
+          {(summary?.placed ?? 0) > 0 && (
+            <button onClick={settle} disabled={settleBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+              {settleBusy ? <Spinner className="h-4 w-4" /> : <Check className="h-4 w-4" />} Check results
+            </button>
+          )}
+          <button onClick={clone} disabled={busy != null} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+            {busy === 'clone' ? <Spinner className="h-4 w-4" /> : <Copy className="h-4 w-4" />} Duplicate
+          </button>
+        </div>
       </header>
 
       <div className="mb-5 grid grid-cols-2 gap-3 sm:grid-cols-4">
