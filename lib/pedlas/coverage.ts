@@ -322,6 +322,18 @@ export function planCoverage(pool: BinaryAxis[], opts: PlanOptions): CoveragePla
   return { best: pick, family: families.get(pick.L)!, candidates, poolSize: N, K, beta, meanCutters }
 }
 
+// ── placement-time estimate → selection window ──────────────────────────────────
+// Measured ~20s per slip: the SUBMIT is serialized (SportyBet rejects concurrent submits on one
+// account), so extra workers don't cut it much. The selection window must exceed the whole run so no
+// game kicks off mid-placement — window = run × safety. Tune PLACE_SECONDS_PER_SLIP as speed changes.
+export const PLACE_SECONDS_PER_SLIP = 20
+
+export function estimatePlacement(slipCount: number, secPerSlip = PLACE_SECONDS_PER_SLIP, safety = 1.8): { runMinutes: number; windowMinutes: number; secPerSlip: number; safety: number } {
+  const runMinutes = Math.ceil((slipCount * secPerSlip) / 60)
+  const windowMinutes = Math.max(60, Math.ceil(runMinutes * safety))
+  return { runMinutes, windowMinutes, secPerSlip, safety }
+}
+
 // ── FLIP-SCATTER: the real PEDLA model (base all-Under, variants flip legs to Over) ──────
 //
 // N legs are chosen so the base Under parlay × boost ≥ target (each slip keeps all N legs → full

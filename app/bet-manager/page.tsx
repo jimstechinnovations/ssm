@@ -28,7 +28,7 @@ export default function BetManagerPage() {
   const [dateTo, setDateTo] = useState(todayPlus(1))
   const [budget, setBudget] = useState(5000)
   const [target, setTarget] = useState(500000)
-  const [windowMin, setWindowMin] = useState(120)
+  const [windowMin, setWindowMin] = useState<number | ''>('')   // '' = auto (computed from slip count)
   const [legPref, setLegPref] = useState<number | ''>('')
   const [building, setBuilding] = useState(false)
   const [result, setResult] = useState<SessionResult | null>(null)
@@ -48,6 +48,10 @@ export default function BetManagerPage() {
 
   const minStake = Math.max(1, ...books.filter(b => selected.includes(b.bookId)).map(b => b.minStake))
   const slipEstimate = Math.floor(budget / minStake)
+  // mirror the server estimate: run ≈ slips × 20s, auto window = run × 1.8
+  const estRunMin = Math.ceil((slipEstimate * 20) / 60)
+  const estWindowMin = windowMin || Math.max(60, Math.ceil(estRunMin * 1.8))
+  const hrs = (m: number) => m >= 90 ? `${(m / 60).toFixed(1)}h` : `${m}m`
 
   async function build() {
     if (selected.length === 0) { setError('Pick at least one book.'); return }
@@ -55,8 +59,9 @@ export default function BetManagerPage() {
     try {
       const body: Record<string, unknown> = {
         books: selected, date_from: dateFrom, date_to: dateTo,
-        budget, target_win: target, selection_window_min: windowMin,
+        budget, target_win: target,
       }
+      if (windowMin) body.selection_window_min = windowMin
       if (legPref) body.leg_pref = legPref
       const r = await fetch('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const j = await r.json()
@@ -101,7 +106,7 @@ export default function BetManagerPage() {
         <div className="grid grid-cols-2 gap-4 sm:grid-cols-3">
           <Field label="Date from"><input type="date" value={dateFrom} onChange={e => setDateFrom(e.target.value)} className={inputCls} /></Field>
           <Field label="Date to (≤ +2 days)"><input type="date" value={dateTo} onChange={e => setDateTo(e.target.value)} className={inputCls} /></Field>
-          <Field label="Selection window (min)"><input type="number" min={15} max={240} value={windowMin} onChange={e => setWindowMin(+e.target.value)} className={inputCls} /></Field>
+          <Field label="Selection window (min — blank = auto)"><input type="number" min={15} max={600} placeholder="auto" value={windowMin} onChange={e => setWindowMin(e.target.value ? +e.target.value : '')} className={inputCls} /></Field>
           <Field label="Budget (₦)"><input type="number" min={10} step={500} value={budget} onChange={e => setBudget(+e.target.value)} className={inputCls} /></Field>
           <Field label="Target win (₦)"><input type="number" min={100} step={10000} value={target} onChange={e => setTarget(+e.target.value)} className={inputCls} /></Field>
           <Field label="Legs (auto — override optional)"><input type="number" min={3} max={60} placeholder="auto" value={legPref} onChange={e => setLegPref(e.target.value ? +e.target.value : '')} className={inputCls} /></Field>
@@ -109,7 +114,8 @@ export default function BetManagerPage() {
 
         <p className="mt-3 text-xs text-zinc-500 dark:text-zinc-400">
           min stake <strong>{naira(minStake)}</strong> · budget ÷ min stake ≈ <strong>{slipEstimate.toLocaleString()} slips</strong> ·
-          games kicking off within {windowMin} min are skipped so nothing goes live mid-placement.
+          est. place time <strong>~{hrs(estRunMin)}</strong> · {windowMin ? 'window' : 'auto window'} <strong>~{hrs(estWindowMin)}</strong> —
+          only games kicking off after that are selected, so nothing goes live mid-placement.
         </p>
 
         <div className="mt-4 flex items-center gap-3">
