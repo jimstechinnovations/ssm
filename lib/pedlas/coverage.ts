@@ -322,6 +322,112 @@ export function planCoverage(pool: BinaryAxis[], opts: PlanOptions): CoveragePla
   return { best: pick, family: families.get(pick.L)!, candidates, poolSize: N, K, beta, meanCutters }
 }
 
+// ── FLIP-SCATTER: the real PEDLA model (base all-Under, variants flip legs to Over) ──────
+//
+// N legs are chosen so the base Under parlay × boost ≥ target (each slip keeps all N legs → full
+// boosted payout). Slip 1 is the base (all Under, kickoff-sorted). Slips 2..K flip legs Under→Over,
+// preferring the legs most likely to ACTUALLY go Over (book P(Over) nudged by team history), in
+// increasing flip-count. A slip wins iff its U/O vector exactly matches the real results — a moonshot
+// by nature (probability is low, honestly reported), but every winning slip pays the full target.
+
+/** How likely this leg is to finish Over 4.5 = book P(Over), nudged by the history advisory lean. */
+function overLikelihood(a: BinaryAxis): number {
+  let p = cutProb(a)
+  const lean = a.advisory?.lean
+  if (lean === 'fade') p = Math.min(0.95, p * 1.15)        // history leans Over → flip it more
+  else if (lean === 'back') p = Math.max(0.02, p * 0.90)   // history backs Under → flip it less
+  return p
+}
+
+/** Fewest legs (highest Under odds first) whose base parlay × boost clears the target. */
+function chooseBaseLegs(axes: BinaryAxis[], stake: number, target: number, boost: BoostFn): { legs: BinaryAxis[]; reached: boolean } {
+  const byOdds = [...axes].sort((a, b) => b.underOdds - a.underOdds)
+  const legs: BinaryAxis[] = []
+  let prod = 1
+  for (const a of byOdds) {
+    legs.push(a); prod *= a.underOdds
+    if (stake * prod * (1 + boost(legs.length)) >= target) return { legs, reached: true }
+  }
+  return { legs, reached: false } // used every available game and still short of target
+}
+
+/** Lexicographic k-combinations of arr (indices in arr order). */
+function* combinations<T>(arr: T[], k: number): Generator<T[]> {
+  const n = arr.length
+  if (k > n || k < 0) return
+  const idx = Array.from({ length: k }, (_, i) => i)
+  for (;;) {
+    yield idx.map(i => arr[i])
+    let i = k - 1
+    while (i >= 0 && idx[i] === n - k + i) i--
+    if (i < 0) return
+    idx[i]++
+    for (let j = i + 1; j < k; j++) idx[j] = idx[j - 1] + 1
+  }
+}
+
+export interface FlipScatter {
+  slips: PedlasSlip[]
+  vectors: (0 | 1)[][]
+  base: BinaryAxis[]         // the N base legs, kickoff-sorted
+  N: number
+  reachedTarget: boolean
+}
+
+/**
+ * Build the K flip-variant slips. base = the N legs (kickoff-sorted). Flips are drawn from the
+ * `flipTop` legs most likely to go Over, in increasing flip-count, "similar to previous going forward".
+ */
+export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; stake: number; K: number; maxPayout: number; boost?: BoostFn; flipTop?: number }): FlipScatter {
+  const boost = opts.boost ?? boostFor
+  const { legs, reached } = chooseBaseLegs(axes, opts.stake, opts.target, boost)
+  const base = [...legs].sort((a, b) => a.kickoff.localeCompare(b.kickoff)) // scatter order = kickoff
+  const N = base.length
+
+  // legs ranked by over-likelihood (which to flip first); restrict flips to the top-m
+  const overRank = base.map((_, i) => i).sort((a, b) => overLikelihood(base[b]) - overLikelihood(base[a]))
+  const m = Math.min(N, opts.flipTop ?? 18)
+  const flipPool = overRank.slice(0, m)
+
+  const zero = () => new Array(N).fill(0) as (0 | 1)[]
+  const vectors: (0 | 1)[][] = [zero()] // slip 1 = base, all Under
+  for (let w = 1; w <= m && vectors.length < opts.K; w++) {
+    for (const combo of combinations(flipPool, w)) {
+      if (vectors.length >= opts.K) break
+      const v = zero(); for (const idx of combo) v[idx] = 1
+      vectors.push(v)
+    }
+  }
+
+  const slips: PedlasSlip[] = vectors.slice(0, opts.K).map((v, k) => {
+    const slipLegs = base.map((ax, i) => legFromAxis(ax, v[i] === 1 ? 'Over' : 'Under'))
+    const skeleton: PedlasSlip = {
+      slipId: k + 1, vector: v, legs: slipLegs, legCount: N, combinedOdds: 0, trueProb: 0,
+      boostPct: 0, stake: opts.stake, payout: 0, uncappedPayout: 0, capped: false, evMultiple: 0, rankScore: 0,
+    }
+    return recomputeSlip(skeleton, base, opts.stake, opts.maxPayout, boost)
+  })
+  return { slips, vectors: vectors.slice(0, opts.K), base, N, reachedTarget: reached }
+}
+
+/** P(≥1 flip-slip wins) = P(the real U/O outcome exactly matches one of our vectors), correlated. */
+export function simulateFlipScatter(scatter: FlipScatter, opts: { trials?: number; beta?: number; seed?: number } = {}): number {
+  const trials = opts.trials ?? 3000
+  const beta = opts.beta ?? 0
+  const rng = mulberry32(opts.seed ?? 0xBEEF)
+  const N = scatter.N
+  const a = recentredIntercepts(scatter.base.map(cutProb), beta)
+  const keys = new Set(scatter.vectors.map(v => v.join('')))
+  const outcome = new Array<number>(N)
+  let hit = 0
+  for (let t = 0; t < trials; t++) {
+    const z = gaussian(rng)
+    for (let i = 0; i < N; i++) outcome[i] = rng() < sigmoid(a[i] + beta * z) ? 1 : 0
+    if (keys.has(outcome.join(''))) hit++
+  }
+  return hit / trials
+}
+
 // ── build a ready-to-place coverage book at a chosen leg-count ────────────────────
 
 export interface CoverageBookOptions {
@@ -357,36 +463,25 @@ export interface CoverageBook {
  * honest P(≥1 win) so the operator sees the real chance before placing — no guarantee is implied.
  */
 export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions): CoverageBook {
-  const N = pool.length
+  const N0 = pool.length
   const K = Math.max(1, Math.floor(opts.budget / opts.stake))
   const boost = opts.boost ?? boostFor
   const beta = opts.beta ?? calibrateBeta(pool)
+  const target = opts.targetWin ?? opts.stake * 1000
 
-  // pick L: explicit preference, else stack legs (median odds + REAL boost) until payout ≥ target —
-  // exactly the book's own math: stake·odds^L·(1+boost(L)) ≥ targetWin.
-  let L = opts.legPref ?? 0
-  if (!L && opts.targetWin && opts.targetWin > opts.stake) {
-    const medOdds = Math.max(1.05, median(pool.map(a => a.underOdds)))
-    for (let l = 3; l <= 60; l++) {
-      if (opts.stake * Math.pow(medOdds, l) * (1 + boost(l)) >= opts.targetWin) { L = l; break }
-    }
-    if (!L) L = 60
-  }
-  // need N > L so there is room to scatter (drop different games per slip)
-  const wantedL = L || 12
-  L = Math.max(3, Math.min(wantedL, N - 1))
+  // Flip-scatter: base = N legs whose Under parlay × boost ≥ target; variants flip likely-Over legs.
+  const scatter = buildFlipScatter(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost })
+  const pAnyWin = simulateFlipScatter(scatter, { beta, trials: opts.trials ?? 3000 })
 
-  const family = buildDiverseUnderSlips(pool, { L, K, stake: opts.stake, maxPayout: opts.maxPayout, boost, seed: opts.seed ?? 7 })
-  const sim = simulateFamily(family, pool, { beta, trials: opts.trials ?? 1500 })
-
-  const note = wantedL > L
-    ? `pool has only ${N} games — legs capped at ${L} (wanted ${wantedL}). More games ⇒ wider scatter ⇒ higher P(≥1 win).`
-    : ''
+  const distinct = new Set(scatter.vectors.map(v => v.join(''))).size
+  const note = !scatter.reachedTarget
+    ? `only ${N0} qualifying games — base parlay reaches ~₦${Math.round(opts.stake * scatter.slips[0].combinedOdds * (1 + boost(scatter.N))).toLocaleString()}, short of the ₦${target.toLocaleString()} target. Add days / games.`
+    : distinct < K ? `pool of ${N0} games yields ${distinct} distinct variants < ${K} slips — add games for a fuller scatter.` : ''
   return {
-    slips: family.slips, L, K, poolSize: N, beta,
-    pAnyWin: sim.pAnyWin, expWinners: sim.expWinners, meanCutters: sim.meanCutters,
-    medianPayout: median(family.slips.map(s => s.payout)),
-    medianOdds: median(family.slips.map(s => s.combinedOdds)),
-    net: sim.net, note,
+    slips: scatter.slips, L: scatter.N, K, poolSize: N0, beta,
+    pAnyWin, expWinners: pAnyWin, meanCutters: scatter.base.reduce((s, a) => s + cutProb(a), 0),
+    medianPayout: median(scatter.slips.map(s => s.payout)),
+    medianOdds: median(scatter.slips.map(s => s.combinedOdds)),
+    net: 0, note,
   }
 }

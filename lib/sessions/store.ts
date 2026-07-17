@@ -88,6 +88,7 @@ export async function createSession(input: CreateSessionInput): Promise<SessionR
 
 export interface SessionPatch {
   status?: SessionStatus
+  dateTo?: string
   legCount?: number
   slipCount?: number
   poolSize?: number
@@ -100,6 +101,7 @@ export async function updateSession(id: string, patch: SessionPatch): Promise<bo
     const supabase = createServerClient()
     const row: Record<string, unknown> = { updated_at: new Date().toISOString() }
     if (patch.status !== undefined) row.status = patch.status
+    if (patch.dateTo !== undefined) row.date_to = patch.dateTo
     if (patch.legCount !== undefined) row.leg_count = patch.legCount
     if (patch.slipCount !== undefined) row.slip_count = patch.slipCount
     if (patch.poolSize !== undefined) row.pool_size = patch.poolSize

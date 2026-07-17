@@ -64,6 +64,7 @@ export async function POST(request: Request): Promise<Response> {
   let repL: number | undefined
   let repPool: number | undefined
   let repPAny: number | undefined
+  let usedDateTo = req.date_to   // may auto-extend if the window lacks enough games
 
   const cfgById = new Map(req.books.map((id, i) => [id, cfgs[i]]))
   for (const id of req.books) {
@@ -74,6 +75,7 @@ export async function POST(request: Request): Promise<Response> {
       targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost,
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
+    if (built.usedDateTo && built.usedDateTo > usedDateTo) usedDateTo = built.usedDateTo
     const saved = await saveSessionSlips(session.id, id, built.slips)
     totalSlips += saved
     repL ??= built.book.L; repPool ??= built.book.poolSize; repPAny ??= built.book.pAnyWin
@@ -84,14 +86,15 @@ export async function POST(request: Request): Promise<Response> {
   const ok = totalSlips > 0
   await updateSession(session.id, {
     status: ok ? 'placing' : 'failed',
+    dateTo: usedDateTo,
     legCount: repL,
     slipCount: totalSlips,
     poolSize: repPool,
-    meta: { perBookBudget, windowMin, pAnyWin: repPAny, books: bookResults, bookMetas },
+    meta: { perBookBudget, windowMin, usedDateTo, pAnyWin: repPAny, books: bookResults, bookMetas },
   })
 
   return Response.json({
-    session: { ...session, status: ok ? 'placing' : 'failed', legCount: repL, slipCount: totalSlips, poolSize: repPool },
+    session: { ...session, status: ok ? 'placing' : 'failed', dateTo: usedDateTo, legCount: repL, slipCount: totalSlips, poolSize: repPool },
     books: bookResults,
     summary: await sessionSummary(session.id),
   }, { status: ok ? 200 : 422 })
