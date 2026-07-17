@@ -325,13 +325,15 @@ export function planCoverage(pool: BinaryAxis[], opts: PlanOptions): CoveragePla
 // ── placement-time estimate → selection window ──────────────────────────────────
 // Measured ~20s per slip: the SUBMIT is serialized (SportyBet rejects concurrent submits on one
 // account), so extra workers don't cut it much. The selection window must exceed the whole run so no
-// game kicks off mid-placement — window = run × safety. Tune PLACE_SECONDS_PER_SLIP as speed changes.
+// game kicks off mid-placement — window = run + a fixed safety BUFFER (not a big multiplier, which
+// over-provisions long runs). Tune these two constants as placement speed changes.
 export const PLACE_SECONDS_PER_SLIP = 20
+export const WINDOW_BUFFER_MINUTES = 75   // ~1h15m headroom on top of the run (500 slips ⇒ ~4h window)
 
-export function estimatePlacement(slipCount: number, secPerSlip = PLACE_SECONDS_PER_SLIP, safety = 1.8): { runMinutes: number; windowMinutes: number; secPerSlip: number; safety: number } {
+export function estimatePlacement(slipCount: number, secPerSlip = PLACE_SECONDS_PER_SLIP, bufferMinutes = WINDOW_BUFFER_MINUTES): { runMinutes: number; windowMinutes: number; secPerSlip: number; bufferMinutes: number } {
   const runMinutes = Math.ceil((slipCount * secPerSlip) / 60)
-  const windowMinutes = Math.max(60, Math.ceil(runMinutes * safety))
-  return { runMinutes, windowMinutes, secPerSlip, safety }
+  const windowMinutes = Math.max(60, runMinutes + bufferMinutes)
+  return { runMinutes, windowMinutes, secPerSlip, bufferMinutes }
 }
 
 // ── FLIP-SCATTER: the real PEDLA model (base all-Under, variants flip legs to Over) ──────

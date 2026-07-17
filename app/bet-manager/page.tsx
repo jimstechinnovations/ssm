@@ -48,9 +48,9 @@ export default function BetManagerPage() {
 
   const minStake = Math.max(1, ...books.filter(b => selected.includes(b.bookId)).map(b => b.minStake))
   const slipEstimate = Math.floor(budget / minStake)
-  // mirror the server estimate: run ≈ slips × 20s, auto window = run × 1.8
+  // mirror the server estimate: run ≈ slips × 20s, auto window = run + 75m buffer
   const estRunMin = Math.ceil((slipEstimate * 20) / 60)
-  const estWindowMin = windowMin || Math.max(60, Math.ceil(estRunMin * 1.8))
+  const estWindowMin = windowMin || Math.max(60, estRunMin + 75)
   const hrs = (m: number) => m >= 90 ? `${(m / 60).toFixed(1)}h` : `${m}m`
 
   async function build() {
