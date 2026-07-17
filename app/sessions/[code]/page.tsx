@@ -11,12 +11,13 @@
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'next/navigation'
 import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers, Download } from '@/components/Icons'
+import { TotalsChart } from '@/components/TotalsChart'
 
 interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null }
 interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
 interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean } | null }
 interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
-interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number }
+interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null }
 
 const naira = (n?: number | null) => n == null ? '—' : '₦' + Math.round(n).toLocaleString()
 const HEARTBEAT_STALE_MS = 25_000
@@ -34,6 +35,8 @@ export default function SessionPage() {
   const [busy, setBusy] = useState<null | 'dry' | 'live' | 'stop' | 'clone'>(null)
   const [copied, setCopied] = useState<string | null>(null)
   const [workers, setWorkers] = useState(3)
+  const [ai, setAi] = useState<{ text: string; source: string } | null>(null)
+  const [aiBusy, setAiBusy] = useState(false)
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
   const notFound = useRef(false)
@@ -96,6 +99,12 @@ export default function SessionPage() {
     if (games == null) { try { const j = await fetch(`/api/sessions/${code}/games`).then(r => r.json()); setGames(j.games ?? []) } catch { setGames([]) } }
   }
   function copy(text: string) { navigator.clipboard?.writeText(text).then(() => { setCopied(text); setTimeout(() => setCopied(null), 1200) }) }
+  async function analyze() {
+    setAiBusy(true)
+    try { const j = await (await fetch(`/api/sessions/${code}/analyze`, { method: 'POST' })).json(); setAi({ text: j.summary ?? j.error ?? '—', source: j.source ?? '' }) }
+    catch { setAi({ text: 'Could not run analysis.', source: '' }) }
+    finally { setAiBusy(false) }
+  }
 
   if (notFound.current) return <div className="mx-auto max-w-4xl px-4 py-16 text-center text-sm text-zinc-500">Session <span className="font-mono">{code}</span> not found. <a href="/" className="text-blue-600 hover:underline dark:text-blue-400">Back to dashboard</a></div>
   if (!session) return <Loading label={`Loading ${code}…`} />
@@ -130,17 +139,25 @@ export default function SessionPage() {
         <section className="mb-5 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
           <div className="mb-2 flex items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200"><Layers className="h-4 w-4" /> Pool games {games ? `(${games.length})` : ''}</div>
           {games == null ? <div className="py-3"><Spinner /></div> : (
-            <div className="max-h-72 overflow-y-auto text-sm">
+            <>
+            <p className="mb-2 text-xs text-zinc-400">Each bar = a past match's total goals; <span className="text-green-600 dark:text-green-400">green</span> stayed Under 4.5, <span className="text-red-600 dark:text-red-400">red</span> went Over. {games.filter(g => g.history.length).length}/{games.length} games have history.</p>
+            <div className="max-h-96 overflow-y-auto text-sm">
               {games.map((g, i) => (
-                <div key={g.fixtureId} className="flex items-center gap-3 border-t border-zinc-100 py-1.5 first:border-0 dark:border-zinc-800">
-                  <span className="w-6 text-right text-xs text-zinc-400">{i + 1}</span>
-                  <span className="flex-1 text-zinc-800 dark:text-zinc-200">{g.game}</span>
-                  <span className="hidden text-xs text-zinc-400 sm:inline">{g.league}</span>
-                  <span className="text-xs text-zinc-500">{new Date(g.kickoff).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</span>
-                  <span className="w-24 text-right text-xs text-zinc-600 dark:text-zinc-300">Under {g.line} @ {g.underOdds}</span>
+                <div key={g.fixtureId} className="flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-zinc-100 py-2 first:border-0 dark:border-zinc-800">
+                  <span className="w-5 text-right text-xs text-zinc-400">{i + 1}</span>
+                  <div className="min-w-[9rem] flex-1">
+                    <div className="text-zinc-800 dark:text-zinc-200">{g.game}</div>
+                    <div className="text-xs text-zinc-400">{g.league} · {new Date(g.kickoff).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
+                  </div>
+                  <div className="text-zinc-500"><TotalsChart history={g.history} /></div>
+                  <span className="w-28 text-right text-xs text-zinc-600 dark:text-zinc-300">
+                    {g.overRate != null && <span className={g.overRate > 0.25 ? 'text-red-500' : 'text-green-600 dark:text-green-400'}>{Math.round(g.overRate * 100)}% over · </span>}
+                    U{g.line} @ {g.underOdds}
+                  </span>
                 </div>
               ))}
             </div>
+            </>
           )}
         </section>
       )}
@@ -208,6 +225,19 @@ export default function SessionPage() {
         {stalled && <Banner tone="warn">This run stopped unexpectedly (browser closed, laptop slept, or a crash). {summary?.placed ?? 0} slip(s) are safely placed. Press <strong>Resume LIVE</strong> to place the rest — already-placed slips are skipped automatically.</Banner>}
         {msg && <Banner tone={msg.tone}>{msg.text}</Banner>}
         {!liveReady && !running && !done && <Banner tone="muted">Live needs the browser up, logged in and in <strong>REAL</strong> mode — set it up on <a href="/config" className="underline">Config</a> (and <code>PLACEMENT_LIVE=1</code>).</Banner>}
+      </section>
+
+      {/* AI read */}
+      <section className="mb-5 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+        <div className="flex flex-wrap items-center gap-2">
+          <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">AI read</span>
+          {ai?.source && <span className="rounded bg-zinc-100 px-1.5 py-0.5 text-[11px] text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400">{ai.source}</span>}
+          <button onClick={analyze} disabled={aiBusy} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+            {aiBusy ? <Spinner className="h-4 w-4" /> : <Layers className="h-4 w-4" />} {ai ? 'Re-analyse' : 'Analyse risk'}
+          </button>
+        </div>
+        {ai ? <p className="mt-2 text-sm leading-relaxed text-zinc-700 dark:text-zinc-300">{ai.text}</p>
+          : <p className="mt-1 text-xs text-zinc-400">Honest risk read of this session — which games most threaten the all-Under base, grounded in history.</p>}
       </section>
 
       {/* Slips ledger */}
