@@ -60,6 +60,8 @@ await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
 await page.waitForTimeout(4000)
 
 const balNum = async () => { const m = (await page.evaluate(() => document.body.innerText)).match(/NGN\s*([\d,.]+)/); return m ? parseFloat(m[1].replace(/,/g, '')) : NaN }
+// balance can lag a reload by ~8s — poll before trusting a NaN read
+const readBalance = async () => { for (let i = 0; i < 10; i++) { const b = await balNum(); if (!Number.isNaN(b)) return b; await sleep(1200) } return NaN }
 const bodyHas = re => page.evaluate(rs => new RegExp(rs, 'i').test(document.body.innerText), re.source)
 const codeBoxVisible = () => page.locator('input[placeholder="Booking Code"]:visible').count().then(n => n > 0)
 
@@ -72,16 +74,30 @@ const clickLeaf = (reSource) => page.evaluate((rs) => {
   els[0].click(); return true
 }, reSource)
 
+// logged-in signal that doesn't depend on the (laggy) balance render: account-area links present AND
+// no VISIBLE login form (the logged-out form stays in the DOM hidden, so check visibility not presence)
+const loggedInSignal = () => page.evaluate(() => {
+  const t = document.body.innerText
+  const pb = document.querySelector('input[name=phone]')
+  const loginVisible = !!(pb && (pb.offsetWidth || pb.offsetHeight))
+  return /Deposit|Bet History|My Account/i.test(t) && !loginVisible
+})
+
 const ensureLoggedIn = async () => {
-  if (!Number.isNaN(await balNum())) return true
+  // Balance can lag a reload by ~8s — poll patiently before doing anything drastic.
+  if (!Number.isNaN(await readBalance())) return true
+  if (await loggedInSignal()) return true
   const phone = process.env.SPORTY_NUMBER, psd = process.env.SPORTY_PASSWORD
   if (!phone || !psd) return false
+  // Only attempt a login if the form is actually VISIBLE — filling a hidden field hangs 30s.
+  const pbVis = page.locator('input[name=phone]:visible').first()
+  if (!(await pbVis.count())) return !Number.isNaN(await balNum()) || await loggedInSignal()
   console.log('    [keepalive] re-logging in…')
   for (let a = 1; a <= 2; a++) {
-    await page.goto('https://www.sportybet.com/ng/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
-    await page.waitForTimeout(3000)
-    const pb = page.locator('input[name=phone]').first()
-    if (await pb.count()) { await pb.fill(phone.replace(/^\+?234/, '0')).catch(() => {}); await page.fill('input[name=psd]', psd).catch(() => {}); await page.locator('button.m-btn-login').first().click().catch(() => {}); await page.waitForTimeout(7000) }
+    await pbVis.fill(phone.replace(/^\+?234/, '0')).catch(() => {})
+    await page.fill('input[name=psd]:visible', psd).catch(() => {})
+    await page.locator('button.m-btn-login:visible').first().click().catch(() => {})
+    await page.waitForTimeout(7000)
     if (!Number.isNaN(await balNum())) { console.log('    [keepalive] OK'); return true }
   }
   return false
@@ -132,7 +148,7 @@ async function placeOne(slip, idx) {
   if (placedLog[idem]?.placed) { console.log(`  slip ${idx}: SKIP (already placed ${placedLog[idem].code})`); return 'skip' }
 
   if (!(await ensureLoggedIn())) throw new Error('not logged in (keepalive failed)')
-  const before = await balNum()
+  const before = await readBalance()
   if (Number.isNaN(before)) throw new Error('balance unreadable (logged out?)')
   if (before < stake) throw new Error(`insufficient balance ₦${before} < ₦${stake}`)
   if (before > 100000) throw new Error(`balance ₦${before} looks like SIM play-money — check REAL/SIM toggle`)

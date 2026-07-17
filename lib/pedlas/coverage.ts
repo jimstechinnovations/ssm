@@ -351,19 +351,38 @@ function chooseBaseLegs(axes: BinaryAxis[], stake: number, target: number, boost
   return { legs, reached: false } // used every available game and still short of target
 }
 
-/** Lexicographic k-combinations of arr (indices in arr order). */
-function* combinations<T>(arr: T[], k: number): Generator<T[]> {
-  const n = arr.length
-  if (k > n || k < 0) return
-  const idx = Array.from({ length: k }, (_, i) => i)
-  for (;;) {
-    yield idx.map(i => arr[i])
-    let i = k - 1
-    while (i >= 0 && idx[i] === n - k + i) i--
-    if (i < 0) return
-    idx[i]++
-    for (let j = i + 1; j < k; j++) idx[j] = idx[j - 1] + 1
+/**
+ * The K MOST-PROBABLE flip sets (which legs to turn Over), most-likely first, including the empty set
+ * (all-Under). Flipping leg i costs logPen[i] = log P(Over_i) − log P(Under_i) ≤ 0, so the highest-
+ * probability vectors flip only the least-confident legs. This is best-first over subsets (Lawler/
+ * Eppstein k-best): it AUTOMATICALLY covers the most-uncertain games exhaustively (e.g. 8 coin-flips →
+ * their 256 patterns) while committing the confident games to Under. Optimal for P(≥1 exact match).
+ */
+function topKFlipSets(logPen: number[], K: number): number[][] {
+  const n = logPen.length
+  const order = logPen.map((_, i) => i).sort((a, b) => logPen[b] - logPen[a]) // least-negative (least confident) first
+  const d = order.map(i => logPen[i])
+  const results: number[][] = [[]] // empty set = all Under (the single most-probable vector)
+  if (n === 0) return results
+
+  interface Node { score: number; subset: number[]; last: number }
+  const heap: Node[] = [{ score: d[0], subset: [0], last: 0 }]
+  const up = () => { let i = heap.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (heap[p].score >= heap[i].score) break;[heap[p], heap[i]] = [heap[i], heap[p]]; i = p } }
+  const pop = () => {
+    const top = heap[0]; const last = heap.pop()!
+    if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = 2 * i + 2; let m = i; if (l < heap.length && heap[l].score > heap[m].score) m = l; if (r < heap.length && heap[r].score > heap[m].score) m = r; if (m === i) break;[heap[m], heap[i]] = [heap[i], heap[m]]; i = m } }
+    return top
   }
+  while (results.length < K && heap.length) {
+    const node = pop()
+    results.push(node.subset.map(j => order[j])) // d-index → original leg index
+    const nx = node.last + 1
+    if (nx < n) {
+      heap.push({ score: node.score + d[nx], subset: [...node.subset, nx], last: nx }); up()                      // add nx
+      heap.push({ score: node.score - d[node.last] + d[nx], subset: [...node.subset.slice(0, -1), nx], last: nx }); up() // swap last→nx
+    }
+  }
+  return results
 }
 
 export interface FlipScatter {
@@ -384,20 +403,12 @@ export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; sta
   const base = [...legs].sort((a, b) => a.kickoff.localeCompare(b.kickoff)) // scatter order = kickoff
   const N = base.length
 
-  // legs ranked by over-likelihood (which to flip first); restrict flips to the top-m
-  const overRank = base.map((_, i) => i).sort((a, b) => overLikelihood(base[b]) - overLikelihood(base[a]))
-  const m = Math.min(N, opts.flipTop ?? 18)
-  const flipPool = overRank.slice(0, m)
-
+  // Choose the K most-probable outcome vectors: flip only the least-confident legs (penalty =
+  // P(Over)/P(Under)). This exhaustively covers the most-uncertain games and commits the rest to Under.
+  const logPen = base.map(a => { const o = overLikelihood(a); return Math.log(Math.max(1e-6, o)) - Math.log(Math.max(1e-6, 1 - o)) })
+  const flipSets = topKFlipSets(logPen, opts.K)
   const zero = () => new Array(N).fill(0) as (0 | 1)[]
-  const vectors: (0 | 1)[][] = [zero()] // slip 1 = base, all Under
-  for (let w = 1; w <= m && vectors.length < opts.K; w++) {
-    for (const combo of combinations(flipPool, w)) {
-      if (vectors.length >= opts.K) break
-      const v = zero(); for (const idx of combo) v[idx] = 1
-      vectors.push(v)
-    }
-  }
+  const vectors: (0 | 1)[][] = flipSets.map(set => { const v = zero(); for (const i of set) v[i] = 1; return v })
 
   const slips: PedlasSlip[] = vectors.slice(0, opts.K).map((v, k) => {
     const slipLegs = base.map((ax, i) => legFromAxis(ax, v[i] === 1 ? 'Over' : 'Under'))
