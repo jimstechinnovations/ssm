@@ -1,10 +1,12 @@
 /**
  * POST /api/sessions/[id]/slip-status — the placer reports each slip's outcome here so the session
  * page shows live progress. Body: { slipId, status, bookingCode?, betId?, failureReason?, live? }.
+ * The response carries { stop } — the placer stops between slips when the user hits Stop. This POST
+ * also doubles as the run heartbeat (touches the session), so a crashed/closed run reads as stalled.
  */
 
 import { z } from 'zod'
-import { getSession, updateSessionSlipStatus } from '@/lib/sessions/store'
+import { getSession, updateSessionSlipStatus, touchSession } from '@/lib/sessions/store'
 
 export const runtime = 'nodejs'
 
@@ -26,5 +28,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   const parsed = Schema.safeParse(body)
   if (!parsed.success) return Response.json({ error: 'Validation failed', issues: parsed.error.issues.map(i => i.message) }, { status: 400 })
   const ok = await updateSessionSlipStatus(session.id, parsed.data.slipId, parsed.data)
-  return ok ? Response.json({ updated: true }) : Response.json({ error: 'update failed' }, { status: 500 })
+  await touchSession(session.id)   // heartbeat: proves the run is alive
+  const stop = Boolean((session.meta as Record<string, unknown> | null)?.stopRequested)
+  return ok ? Response.json({ updated: true, stop }) : Response.json({ error: 'update failed', stop }, { status: 500 })
 }

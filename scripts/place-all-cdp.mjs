@@ -27,9 +27,14 @@ const WORKERS = Math.max(1, flag('--workers', 1))
 const LIMIT = flag('--limit', 0)   // place only the first N slips (0 = all) — for small live tests
 const STAKE_OVERRIDE = args.includes('--stake') ? flag('--stake', NaN) : null
 const REPORT = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))
+let stopRequested = false   // set when the session's Stop is hit (read from the report response)
 async function report(slipId, status, extra = {}) {
   if (!REPORT || slipId == null) return
-  try { await fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slipId, status, live: !DRY, ...extra }) }) } catch { /* best-effort */ }
+  try {
+    const r = await fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slipId, status, live: !DRY, ...extra }) })
+    const j = await r.json().catch(() => ({}))
+    if (j?.stop) stopRequested = true
+  } catch { /* best-effort */ }
 }
 if (!bookPath || !existsSync(bookPath)) { console.error('usage: node scripts/place-all-cdp.mjs <book.json> [--workers N --stake N --min S --max S --dry --report URL]'); process.exit(1) }
 
@@ -285,6 +290,7 @@ const t0 = Date.now()
 
 async function runWorker(worker, queue) {
   for (let k = 0; k < queue.length; k++) {
+    if (stopRequested) { console.log(`  [stopped] worker halting — ${queue.length - k} slip(s) left unplaced (resume later)`); break }
     const { slip, idx } = queue[k]
     const sid = slip.slipId
     try {

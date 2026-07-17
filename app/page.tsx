@@ -6,6 +6,7 @@
  */
 
 import React, { useEffect, useState, useCallback } from 'react'
+import { Spinner, Dot, Plus } from '@/components/Icons'
 
 interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
 interface Session {
@@ -50,7 +51,7 @@ export default function Dashboard() {
       </div>
 
       <h2 className="mb-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">Recent sessions</h2>
-      {loading && <p className="text-sm text-zinc-500">Loading…</p>}
+      {loading && <div className="flex items-center gap-2 py-6 text-sm text-zinc-500"><Spinner /> Loading sessions…</div>}
       {!loading && sessions.length === 0 && (
         <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700">
           <p className="text-sm text-zinc-500 dark:text-zinc-400">No sessions yet.</p>

@@ -8,6 +8,7 @@
  */
 
 import React, { useEffect, useState } from 'react'
+import { Spinner } from '@/components/Icons'
 
 interface BookConfig { bookId: string; label: string; minStake: number; enabled: boolean; registered: boolean; feedVerified: boolean }
 interface BuiltBook { bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; note?: string; error?: string; detail?: string }
@@ -114,8 +115,8 @@ export default function BetManagerPage() {
 
         <div className="mt-4 flex items-center gap-3">
           <button onClick={build} disabled={building}
-            className="rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
-            {building ? 'Building & analysing…' : 'Build session'}
+            className="inline-flex items-center gap-2 rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
+            {building && <Spinner className="h-4 w-4" />}{building ? 'Building & analysing…' : 'Build session'}
           </button>
           {building && <span className="text-sm text-zinc-500">fetching pool → history/AI → scatter {slipEstimate} slips…</span>}
           {error && <span className="text-sm text-red-600 dark:text-red-400">{error}</span>}

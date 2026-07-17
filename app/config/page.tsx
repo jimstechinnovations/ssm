@@ -7,6 +7,7 @@
  */
 
 import React, { useEffect, useState, useCallback } from 'react'
+import { Spinner, Dot } from '@/components/Icons'
 
 interface BoostRow { legs: number; fraction: number }
 interface BookConfig {
@@ -73,7 +74,7 @@ export default function ConfigPage() {
 
       <BrowserPanel />
 
-      {loading && <p className="text-sm text-zinc-500">Loading…</p>}
+      {loading && <div className="flex items-center gap-2 py-6 text-sm text-zinc-500"><Spinner /> Loading config…</div>}
       {error && <p className="text-sm text-red-600 dark:text-red-400">{error}</p>}
 
       <div className="space-y-4">
@@ -189,7 +190,7 @@ function BoostSection({ config, onCaptured }: { config: BookConfig; onCaptured: 
           : <span className="text-xs text-amber-600 dark:text-amber-400">not captured — payouts assume ZERO boost (honest, but understated)</span>}
         <button onClick={capture} disabled={busy}
           className="ml-auto rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
-          {busy ? 'Capturing…' : 'Capture real boost'}
+          {busy ? <span className="inline-flex items-center gap-1.5"><Spinner className="h-3.5 w-3.5" /> Capturing…</span> : 'Capture real boost'}
         </button>
       </div>
       {table.length > 0 && (
@@ -225,15 +226,16 @@ function BrowserPanel() {
   const naira = (n?: number | null) => n == null ? '—' : '₦' + Math.round(n).toLocaleString()
   return (
     <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-700 dark:bg-zinc-900">
-      <span className="text-sm font-semibold text-zinc-800 dark:text-zinc-200">Placement browser</span>
-      <span className={`rounded px-1.5 py-0.5 text-xs font-medium ${st?.up ? 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300' : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800'}`}>
-        {st?.up ? 'up on :9222' : 'down'}
+      <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+        <Dot tone={st?.up ? (st.mode === 'SIM' ? 'amber' : 'green') : 'zinc'} /> Placement browser
       </span>
-      {st?.up && <span className="text-xs text-zinc-600 dark:text-zinc-400">{st.loggedIn ? 'logged in' : 'not logged in'} · {st.mode ?? '—'} · {naira(st.balance)}</span>}
+      <span className="text-xs text-zinc-600 dark:text-zinc-400">
+        {st == null ? 'checking…' : st.up ? `up · ${st.loggedIn ? 'logged in' : 'not logged in'} · ${st.mode ?? '—'} · ${naira(st.balance)}` : 'down'}
+      </span>
       <div className="ml-auto flex gap-2">
         <button onClick={refresh} className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Refresh</button>
-        <button onClick={launch} disabled={busy || st?.up} className="rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
-          {busy ? 'Launching…' : st?.up ? 'Running' : 'Launch browser'}
+        <button onClick={launch} disabled={busy || st?.up} className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
+          {busy && <Spinner className="h-3.5 w-3.5" />}{busy ? 'Launching…' : st?.up ? 'Running' : 'Launch browser'}
         </button>
       </div>
     </div>

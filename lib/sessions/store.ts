@@ -112,6 +112,23 @@ export async function updateSession(id: string, patch: SessionPatch): Promise<bo
   } catch { return false }
 }
 
+/** Touch updated_at only — a heartbeat so the UI can tell a run is alive vs stalled (crash/close). */
+export async function touchSession(id: string): Promise<void> { try { await updateSession(id, {}) } catch { /* ignore */ } }
+
+/** Ask a running placement to stop (checked by the placer between slips). */
+export async function requestStop(idOrCode: string): Promise<boolean> {
+  const s = await getSession(idOrCode); if (!s) return false
+  return updateSession(s.id, { meta: { ...(s.meta ?? {}), stopRequested: true, stopAt: new Date().toISOString() } })
+}
+/** Clear the stop flag (when a run (re)starts). */
+export async function clearStop(sessionId: string, meta?: Record<string, unknown> | null): Promise<void> {
+  await updateSession(sessionId, { meta: { ...(meta ?? {}), stopRequested: false, runStartedAt: new Date().toISOString() } })
+}
+/** Is a stop currently requested for this session? (read by the slip-status report). */
+export async function isStopRequested(sessionId: string): Promise<boolean> {
+  const s = await getSession(sessionId); return Boolean((s?.meta as any)?.stopRequested)
+}
+
 export async function getSession(idOrCode: string): Promise<SessionRow | null> {
   try {
     const supabase = createServerClient()

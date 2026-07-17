@@ -8,7 +8,7 @@
  */
 
 import { spawn } from 'node:child_process'
-import { getSession, updateSession, sessionSummary } from '@/lib/sessions/store'
+import { getSession, updateSession, sessionSummary, clearStop } from '@/lib/sessions/store'
 import { isLivePlacementAllowed } from '@/lib/placement/queue'
 import { browserStatus } from '@/lib/placement/browser'
 
@@ -34,6 +34,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
     if (st.balance != null && st.balance < session.minStake) return Response.json({ error: `Balance ₦${st.balance} below min stake ₦${session.minStake}` }, { status: 409 })
   }
 
+  await clearStop(session.id, session.meta)   // fresh run: drop any stale stop flag
   const origin = new URL(request.url).origin
   const args = ['scripts/place-session.mjs', session.code, '--base', origin, '--workers', String(workers), ...(live ? ['--live'] : [])]
   const child = spawn('node', args, { stdio: 'ignore', detached: true, shell: process.platform === 'win32' })
