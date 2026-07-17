@@ -24,6 +24,7 @@ const flag = (n, d) => { const i = args.indexOf(n); return i >= 0 ? Number(args[
 const DRY = args.includes('--dry')
 const MIN = flag('--min', 1), MAX = flag('--max', 3)
 const WORKERS = Math.max(1, flag('--workers', 1))
+const LIMIT = flag('--limit', 0)   // place only the first N slips (0 = all) — for small live tests
 const STAKE_OVERRIDE = args.includes('--stake') ? flag('--stake', NaN) : null
 const REPORT = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))
 async function report(slipId, status, extra = {}) {
@@ -34,8 +35,9 @@ if (!bookPath || !existsSync(bookPath)) { console.error('usage: node scripts/pla
 
 const raw = JSON.parse(readFileSync(bookPath, 'utf8'))
 const book = raw.results ? raw.results.find(r => r.book)?.book : (raw.book ?? raw)
-const slips = book?.slips ?? []
+let slips = book?.slips ?? []
 if (!slips.length) { console.error('no slips in book'); process.exit(1) }
+if (LIMIT > 0) slips = slips.slice(0, LIMIT)
 
 const LOG = '.placed-log.json'
 const placedLog = existsSync(LOG) ? JSON.parse(readFileSync(LOG, 'utf8')) : {}
@@ -45,6 +47,12 @@ const savePlaced = () => { saveChain = saveChain.then(() => { try { writeFileSyn
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 const rand = (a, b) => Math.round(a + Math.random() * (b - a))
+
+// Submit mutex: SportyBet rejects two orders submitted at the same instant ("Submission Failed").
+// So the Place→Confirm step is serialized across workers — everything else (code, load, stake, verify)
+// stays parallel. Only ~2s per slip is serial, so N workers still give a big speedup.
+let submitLock = Promise.resolve()
+async function acquireSubmit() { const prev = submitLock; let rel; submitLock = new Promise(r => (rel = r)); await prev; return rel }
 
 async function bookingCode(legs) {
   const selections = legs.map(l => ({ eventId: `sr:match:${l.fixtureId}`, marketId: '18', specifier: `total=${l.line}`, outcomeId: l.side === 'Under' ? '13' : '12' }))
@@ -111,10 +119,15 @@ function makeWorker(page, tag, parallel) {
   }
 
   const clearSlip = async () => {
-    for (let i = 0; i < 7; i++) {
+    for (let i = 0; i < 9; i++) {
       if (await codeBoxVisible()) return
       await ensureRealView()
       if (await successUp()) { await dismissSuccess(); await page.waitForTimeout(500); continue }
+      // a rejected submit leaves a "Submission Failed / something went wrong" dialog — click OK to recover
+      if (await bodyHas(/submission failed|something went wrong/)) {
+        await page.evaluate(() => { const vis = e => e && (e.offsetWidth || e.offsetHeight); const ok = [...document.querySelectorAll('button,span,div')].find(e => e.children.length === 0 && /^OK$/i.test((e.textContent || '').trim()) && vis(e)); if (ok) ok.click() })
+        await page.waitForTimeout(700); continue
+      }
       if (await bodyHas(/about to pay/)) { await clickLeaf('^cancel$'); await page.waitForTimeout(800); continue }
       const removeConfirm = await page.evaluate(() => { const w = [...document.querySelectorAll('.es-dialog-wrap,[class*=dialog-wrap]')].find(e => e.offsetWidth || e.offsetHeight); return w ? /remove betslip|remove all items/i.test(w.innerText) : false })
       if (removeConfirm) { await page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap] [class*=dialog-btn]', { hasText: /^OK$/i }).first().click({ force: true }).catch(() => {}); await page.waitForTimeout(800); continue }
@@ -198,30 +211,36 @@ function makeWorker(page, tag, parallel) {
       if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
       return clickLeaf('^place bet$')
     }
-    let dialog = false
-    for (let a = 1; a <= 6 && !dialog; a++) {
-      await clickPlace(a % 2 === 1)
-      for (let p = 0; p < 10 && !dialog; p++) { await sleep(300); dialog = await bodyHas(/about to pay/) }
-    }
-    if (!dialog) throw new Error('Place Bet (CDP) did not open the About-to-pay dialog')
-
     const clickConfirm = async (useLeaf) => {
       if (useLeaf) return clickLeaf('^confirm$')
       const btn = page.locator('.es-dialog-btn, [class*=dialog-btn], .m-btn-wrapper', { hasText: /^confirm$/i }).first()
       if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
       return clickLeaf('^confirm$')
     }
+
+    // ── serialize the actual submission so concurrent workers never collide ──
+    const release = await acquireSubmit()
     let placed = false, how = ''
-    for (let a = 1; a <= 5 && !placed; a++) {
-      await clickConfirm(a % 2 === 1)
-      for (let p = 0; p < 12 && !placed; p++) {
-        await sleep(400)
-        if (await successUp()) { placed = true; how = 'submission-successful'; break }
-        if (/insufficient|not enough|balance is/i.test(await page.evaluate(() => document.body.innerText))) throw new Error('SportyBet: balance insufficient')
-        if (!parallel) { const after = await balNum(); if (Math.abs((before - after) - stake) <= 0.5) { placed = true; how = 'balance-drop'; break } }
+    try {
+      let dialog = false
+      for (let a = 1; a <= 6 && !dialog; a++) {
+        await clickPlace(a % 2 === 1)
+        for (let p = 0; p < 10 && !dialog; p++) { await sleep(300); dialog = await bodyHas(/about to pay/) }
       }
-      if (!placed && !(await bodyHas(/about to pay/))) break
-    }
+      if (!dialog) throw new Error('Place Bet (CDP) did not open the About-to-pay dialog')
+
+      for (let a = 1; a <= 5 && !placed; a++) {
+        await clickConfirm(a % 2 === 1)
+        for (let p = 0; p < 12 && !placed; p++) {
+          await sleep(400)
+          if (await successUp()) { placed = true; how = 'submission-successful'; break }
+          if (await bodyHas(/submission failed|something went wrong/)) throw new Error('SportyBet rejected the submit (Submission Failed) — retry later')
+          if (/insufficient|not enough|balance is/i.test(await page.evaluate(() => document.body.innerText))) throw new Error('SportyBet: balance insufficient')
+          if (!parallel) { const after = await balNum(); if (Math.abs((before - after) - stake) <= 0.5) { placed = true; how = 'balance-drop'; break } }
+        }
+        if (!placed && !(await bodyHas(/about to pay/))) break
+      }
+    } finally { release() }
     await dismissSuccess()
     if (placed) {
       placedLog[idem] = { placed: true, code, how, at: new Date().toISOString(), stake }; savePlaced()
