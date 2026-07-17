@@ -53,6 +53,16 @@ export default function SessionPage() {
   const loadBrowser = useCallback(async () => {
     try { setBrowser(await fetch('/api/browser').then(r => r.json())) } catch { setBrowser({ up: false }) }
   }, [])
+  const [prepBusy, setPrepBusy] = useState(false)
+  async function prepareBrowser() {
+    setPrepBusy(true); setMsg(null)
+    try {
+      const j = await (await fetch('/api/browser', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ action: 'prepare' }) })).json()
+      setBrowser(j.status ?? { up: false })
+      setMsg({ text: `Browser: ${(j.steps ?? []).join(' → ')}`, tone: j.status?.loggedIn ? 'ok' : 'warn' })
+    } catch { setMsg({ text: 'Could not prepare the browser.', tone: 'warn' }) }
+    finally { setPrepBusy(false) }
+  }
 
   useEffect(() => { void load(); void loadBrowser() }, [load, loadBrowser])
 
@@ -185,6 +195,11 @@ export default function SessionPage() {
             <Dot tone={browser?.up ? (browser.mode === 'SIM' ? 'amber' : 'green') : 'zinc'} />
             {browser == null ? 'checking browser…' : browser.up ? `browser ${browser.loggedIn ? 'ready' : 'not logged in'} · ${browser.mode ?? '—'} · ${naira(browser.balance)}` : 'browser down'}
           </span>
+          {!(running || stopping) && !liveReady && (
+            <button onClick={prepareBrowser} disabled={prepBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-blue-300 px-2.5 py-1 text-xs font-medium text-blue-700 hover:bg-blue-50 disabled:opacity-50 dark:border-blue-800/60 dark:text-blue-300 dark:hover:bg-blue-950/30">
+              {prepBusy ? <Spinner className="h-3.5 w-3.5" /> : <Play className="h-3 w-3" />} Prepare browser
+            </button>
+          )}
           {!(running || stopping) && (
             <label className="ml-auto flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400">
               workers

@@ -29,6 +29,64 @@ export interface BrowserStatus {
   mode?: 'REAL' | 'SIM' | 'unknown'
 }
 
+/**
+ * One-click readiness for LIVE placement: launch Chrome if down → open SportyBet → log in (env creds)
+ * → flip the betslip to REAL → read the balance. Returns the resulting status + a step log so the UI
+ * can show exactly what happened. Best-effort and never throws.
+ */
+export async function prepareBrowser(): Promise<BrowserStatus & { steps: string[] }> {
+  const steps: string[] = []
+  const l = await launchBrowser('dedicated')
+  steps.push(l.up ? (l.started ? 'launched Chrome' : 'Chrome already up') : 'launch failed')
+  if (!l.up) return { up: false, steps }
+
+  try {
+    const { chromium } = await import('playwright')
+    const browser = await chromium.connectOverCDP(CDP)
+    try {
+      const ctx = browser.contexts()[0]
+      let page = ctx.pages().find(p => /sportybet\.com/.test(p.url())) ?? ctx.pages()[0]
+      if (!page) page = await ctx.newPage()
+      if (!/sportybet\.com/.test(page.url())) await page.goto('https://www.sportybet.com/ng/', { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {})
+      await page.waitForTimeout(3000)
+
+      // reliable logged-in check: account links present AND no VISIBLE login form
+      const isLoggedIn = () => page!.evaluate(() => {
+        const pb = document.querySelector('input[name=phone]') as HTMLElement | null
+        return /Deposit|Bet History|My Account/i.test(document.body.innerText) && !(pb && (pb.offsetWidth || pb.offsetHeight))
+      })
+      if (await isLoggedIn()) {
+        steps.push('already logged in')
+      } else {
+        const phone = process.env.SPORTY_NUMBER, psd = process.env.SPORTY_PASSWORD
+        const pb = page.locator('input[name=phone]:visible').first()
+        if (phone && psd && await pb.count()) {
+          await pb.fill(phone.replace(/^\+?234/, '0')).catch(() => {})
+          await page.fill('input[name=psd]:visible', psd).catch(() => {})
+          await page.locator('button.m-btn-login:visible').first().click().catch(() => {})
+          await page.waitForTimeout(8000)
+          steps.push(await isLoggedIn() ? 'logged in' : 'login failed — log in once in the Chrome window (OTP/captcha?)')
+        } else steps.push('not logged in — log in once in the Chrome window')
+      }
+
+      // Switch to REAL only if currently SIM — clicking blindly could toggle a REAL account to SIM.
+      const flipped = await page.evaluate(() => {
+        const l = document.querySelector('[data-op=switch-box-left]')   // REAL
+        const s = document.querySelector('[data-op=switch-box-right]')  // SIM
+        if (!l && !s) return 'no toggle visible (account mode unchanged)'
+        const mode = /show-highlight/.test(l?.className || '') ? 'REAL' : /show-highlight/.test(s?.className || '') ? 'SIM' : 'unknown'
+        if (mode === 'SIM' && l) { ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => l.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))); return 'switched SIM→REAL' }
+        return `already ${mode}`
+      })
+      steps.push(flipped)
+      await page.waitForTimeout(1200)
+    } finally { await browser.close() }
+  } catch (e) { steps.push('prep error: ' + (e instanceof Error ? e.message.slice(0, 80) : 'unknown')) }
+
+  const st = await browserStatus()
+  return { ...st, steps }
+}
+
 /** Deeper status: connect over CDP, read the balance + REAL/SIM toggle. Cheap, read-only. */
 export async function browserStatus(): Promise<BrowserStatus> {
   if (!(await cdpUp())) return { up: false }
@@ -39,16 +97,17 @@ export async function browserStatus(): Promise<BrowserStatus> {
       const ctx = browser.contexts()[0]
       const page = ctx?.pages().find(p => /sportybet\.com/.test(p.url())) ?? ctx?.pages()[0]
       if (!page) return { up: true, loggedIn: false }
-      const text = await page.evaluate(() => document.body.innerText).catch(() => '')
-      const m = text.match(/NGN\s*([\d,.]+)/)
-      const balance = m ? parseFloat(m[1].replace(/,/g, '')) : null
-      const real = await page.evaluate(() => {
-        const l = document.querySelector('[data-op=switch-box-left]')
-        const s = document.querySelector('[data-op=switch-box-right]')
-        if (!l && !s) return 'unknown'
-        return /show-highlight/.test(l?.className || '') ? 'REAL' : /show-highlight/.test(s?.className || '') ? 'SIM' : 'unknown'
-      }).catch(() => 'unknown')
-      return { up: true, loggedIn: balance != null, balance, mode: real as BrowserStatus['mode'] }
+      const info = await page.evaluate(() => {
+        const t = document.body.innerText
+        const pb = document.querySelector('input[name=phone]') as HTMLElement | null
+        const loginVisible = !!(pb && (pb.offsetWidth || pb.offsetHeight))
+        const loggedIn = /Deposit|Bet History|My Account/i.test(t) && !loginVisible
+        const bal = loggedIn ? (t.match(/NGN\s*([\d,.]+)/)?.[1] ?? null) : null   // header balance only when logged in
+        const l = document.querySelector('[data-op=switch-box-left]'), s = document.querySelector('[data-op=switch-box-right]')
+        const mode = (!l && !s) ? 'unknown' : /show-highlight/.test(l?.className || '') ? 'REAL' : /show-highlight/.test(s?.className || '') ? 'SIM' : 'unknown'
+        return { loggedIn, bal, mode }
+      }).catch(() => ({ loggedIn: false, bal: null as string | null, mode: 'unknown' as const }))
+      return { up: true, loggedIn: info.loggedIn, balance: info.bal ? parseFloat(info.bal.replace(/,/g, '')) : null, mode: info.mode as BrowserStatus['mode'] }
     } finally { await browser.close() }
   } catch { return { up: true } }
 }

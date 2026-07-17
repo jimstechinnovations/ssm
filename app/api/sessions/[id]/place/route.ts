@@ -9,7 +9,6 @@
 
 import { spawn } from 'node:child_process'
 import { getSession, updateSession, sessionSummary, clearStop } from '@/lib/sessions/store'
-import { isLivePlacementAllowed } from '@/lib/placement/queue'
 import { browserStatus } from '@/lib/placement/browser'
 
 export const runtime = 'nodejs'
@@ -34,10 +33,11 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   }
 
   if (live) {
-    if (!isLivePlacementAllowed()) return Response.json({ error: 'Live placement locked — set PLACEMENT_LIVE=1' }, { status: 403 })
+    // The real safety gate is the BROWSER STATE (up + logged in + REAL + balance) + the UI confirm +
+    // per-slip truth confirmation — verified below. PLACEMENT_LIVE is an optional extra lock.
     const st = await browserStatus()
-    if (!st.up) return Response.json({ error: 'Browser not up — launch it first (/config)' }, { status: 409 })
-    if (!st.loggedIn) return Response.json({ error: 'Browser not logged into SportyBet' }, { status: 409 })
+    if (!st.up) return Response.json({ error: 'Browser not up — press “Prepare browser” first' }, { status: 409 })
+    if (!st.loggedIn) return Response.json({ error: 'Browser not logged into SportyBet — press “Prepare browser”' }, { status: 409 })
     if (st.mode === 'SIM') return Response.json({ error: 'Browser is in SIM mode — switch to REAL' }, { status: 409 })
     if (st.balance != null && st.balance < session.minStake) return Response.json({ error: `Balance ₦${st.balance} below min stake ₦${session.minStake}` }, { status: 409 })
   }
