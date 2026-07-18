@@ -534,6 +534,80 @@ export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; sta
   }
 }
 
+/**
+ * REALIZER (optimum-plan §10) — a correlated SIMULATION engine that builds the slips.
+ *
+ * It plays the whole day `trials` times under the common-shock model: each game i resolves Over w.p.
+ * `sigmoid(a_i + β·z)` (marginal = the book-only de-vigged P(Over), games moving together via z), keeps
+ * only the REALISTIC paths (≤ P·N Overs and no run of ≥ E consecutive-by-kickoff Overs), tallies how
+ * often each exact vector occurs, and shapes the K slips from the **most-frequent realistic paths**
+ * (ties broken by Σ logit — the more-probable pattern). That IS "cover the K most-probable realistic
+ * vectors under the true correlated law" (§2 Change B), built the way it's intuited: survivors down
+ * each branch ∝ that branch's simulated frequency, so the survival curve is the model's own and no
+ * single game concentrates a cliff. Ranking uses the BOOK price only (§2 Change A). Same honest
+ * ceiling — it shapes the curve and covers optimally; it does not beat the funnel or create EV.
+ */
+export function buildRealizer(axes: BinaryAxis[], opts: { target: number; stake: number; K: number; maxPayout: number; boost?: BoostFn; maxFlipFrac?: number; maxRun?: number; beta?: number; trials?: number; seed?: number }): FlipScatter {
+  const boost = opts.boost ?? boostFor
+  const K = opts.K
+  const { legs, reached } = chooseBaseLegs(axes, opts.stake, opts.target, boost)
+  const base = [...legs].sort((a, b) => a.kickoff.localeCompare(b.kickoff)) // kickoff order
+  const N = base.length
+  const P = opts.maxFlipFrac ?? 0.5
+  const E = opts.maxRun ?? 3
+  const maxOvers = Math.max(1, Math.floor(P * N))
+  const overP = base.map(a => Math.min(0.98, Math.max(0.02, a.overProb)))   // BOOK-only marginals (Change A)
+  const beta = opts.beta ?? calibrateBeta(base)
+  const aI = recentredIntercepts(overP, beta)
+  const logitOf = (i: number) => Math.log(overP[i] / (1 - overP[i]))
+  const trials = opts.trials ?? 40000
+  const rng = mulberry32(opts.seed ?? 0xC0FFEE)
+
+  // Simulate the correlated day; tally realistic exact vectors (layers enforced during the walk).
+  const freq = new Map<string, { count: number; flips: number[] }>()
+  const bits = new Array<0 | 1>(N).fill(0)
+  for (let t = 0; t < trials; t++) {
+    const z = gaussian(rng)
+    let overs = 0, run = 0, ok = true
+    const flips: number[] = []
+    for (let i = 0; i < N; i++) {
+      const over = rng() < sigmoid(aI[i] + beta * z)
+      bits[i] = over ? 1 : 0
+      if (over) { overs++; flips.push(i); run++; if (run >= E || overs > maxOvers) { ok = false; break } }
+      else run = 0
+    }
+    if (!ok) continue                                   // an unrealistic day (pruned by the layers)
+    const key = bits.join('')
+    const e = freq.get(key)
+    if (e) e.count++; else freq.set(key, { count: 1, flips: flips.slice() })
+  }
+  // Shape the slips: most-frequent realistic paths first; ties → higher Σ logit (more-probable pattern).
+  const ranked = [...freq.values()].sort((x, y) => (y.count - x.count) || (y.flips.reduce((s, i) => s + logitOf(i), 0) - x.flips.reduce((s, i) => s + logitOf(i), 0)))
+  const chosen: number[][] = []
+  const seen = new Set<string>()
+  const add = (flips: number[]) => { const k = flips.slice().sort((a, b) => a - b).join(','); if (!seen.has(k) && chosen.length < K) { seen.add(k); chosen.push(flips) } }
+  add([])                                               // the all-Under base (the most-probable day)
+  for (const r of ranked) { if (chosen.length >= K) break; add(r.flips) }
+
+  const eligibleSet = new Set<number>(); for (const f of chosen) for (const i of f) eligibleSet.add(i)
+  const maxFlipReached = chosen.reduce((m, f) => Math.max(m, f.length), 0)
+  const slips: PedlasSlip[] = chosen.map((flips, k) => {
+    const v = new Array(N).fill(0) as (0 | 1)[]; for (const i of flips) v[i] = 1
+    const slipLegs = base.map((ax, i) => legFromAxis(ax, v[i] === 1 ? 'Over' : 'Under'))
+    const skeleton: PedlasSlip = {
+      slipId: k + 1, vector: v, legs: slipLegs, legCount: N, combinedOdds: 0, trueProb: 0,
+      boostPct: 0, stake: opts.stake, payout: 0, uncappedPayout: 0, capped: false, evMultiple: 0, rankScore: 0,
+    }
+    return recomputeSlip(skeleton, base, opts.stake, opts.maxPayout, boost)
+  })
+  const vectors = slips.map(s => s.vector as (0 | 1)[])
+  return {
+    slips, vectors, base, N, reachedTarget: reached,
+    eligible: [...eligibleSet], completeDepth: 0, partialDepth: maxFlipReached, partialCovered: chosen.length - 1,
+    lockedCount: N - eligibleSet.size, threshold: 0, maxFlipReached,
+  }
+}
+
 /** P(≥1 flip-slip wins) = P(the real U/O outcome exactly matches one of our vectors), correlated. */
 export function simulateFlipScatter(scatter: FlipScatter, opts: { trials?: number; beta?: number; seed?: number } = {}): number {
   const trials = opts.trials ?? 3000
@@ -564,6 +638,7 @@ export interface CoverageBookOptions {
   overThreshold?: number    // flip-eligible if P(Over) ≥ this (default 0.12 — the "balanced" gate)
   maxFlipFrac?: number      // if set, SCATTER flips across depths up to this fraction of eligible legs
   maxRun?: number           // in scatter mode: reject slips with ≥ this many consecutive Overs (default 3)
+  realizer?: boolean        // use the correlated SIMULATION engine (optimum-plan §10) instead of scatter
   beta?: number
   trials?: number
   seed?: number
@@ -604,11 +679,15 @@ export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions)
 
   // Layered covering design: base = N legs whose Under parlay × boost ≥ target; the signal picks the
   // flip-eligible set E and we cover its flip-layers as deep as the budget allows.
-  const scatter = buildFlipScatter(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun })
+  const scatter = opts.realizer
+    ? buildRealizer(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun, beta })
+    : buildFlipScatter(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun })
   const pAnyWin = simulateFlipScatter(scatter, { beta, trials: opts.trials ?? 3000 })
 
   const distinct = new Set(scatter.vectors.map(v => v.join(''))).size
-  const guarantee = opts.maxFlipFrac
+  const guarantee = opts.realizer
+    ? `realizer: ${distinct} most-frequent realistic paths (flips 0..${scatter.maxFlipReached}, ≤${Math.round((opts.maxFlipFrac ?? 0.5) * 100)}% Over, no ${opts.maxRun ?? 3}-run) from a correlated simulation.`
+    : opts.maxFlipFrac
     ? `scatters flips 0..${scatter.maxFlipReached} of ${scatter.eligible.length} eligible legs across ${distinct} slips (fully covers ≤${scatter.completeDepth} Overs); ${scatter.lockedCount} locked.`
     : `covers ANY ≤${scatter.completeDepth} of ${scatter.eligible.length} flip-eligible games going Over` +
       (scatter.partialDepth ? ` (+${scatter.partialCovered} of the ${scatter.partialDepth}-Over patterns)` : '') +

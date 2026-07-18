@@ -1,6 +1,6 @@
 import { describe, it, expect } from 'vitest'
 import type { BinaryAxis } from '@/lib/pedlas/types'
-import { buildDiverseUnderSlips, simulateFamily, calibrateBeta, planCoverage, cutProb, buildFlipScatter } from '@/lib/pedlas/coverage'
+import { buildDiverseUnderSlips, simulateFamily, calibrateBeta, planCoverage, cutProb, buildFlipScatter, buildRealizer } from '@/lib/pedlas/coverage'
 import { noBoost } from '@/lib/pedlas/boost'
 
 /** Synthetic pool: Under odds ~1.2 with a spread of cut (Over) probabilities. */
@@ -132,6 +132,19 @@ describe('coverage engine: layered covering design', () => {
       expect(runLen(v)).toBeLessThan(3)                                                          // no 3 consecutive Overs
     }
     expect(fam.maxFlipReached).toBeGreaterThan(2)   // it really does go deeper than the shallow default
+  })
+
+  it('realizer: simulation-built slips are distinct, include the base, and obey the P/E layers', () => {
+    const pool = makePool(20, Array.from({ length: 20 }, () => 0.22)) // 20 games @ ~22% Over
+    const fam = buildRealizer(pool, { target: 100000, stake: 10, K: 300, maxPayout: 1e9, boost: noBoost, maxFlipFrac: 0.5, maxRun: 3, trials: 20000 })
+    const runLen = (v: (0 | 1)[]) => { let m = 0, r = 0; for (const b of v) { r = b ? r + 1 : 0; if (r > m) m = r } return m }
+    expect(fam.vectors.length).toBeGreaterThan(20)                                  // simulation found many realistic paths
+    expect(fam.vectors.some(v => v.every(b => b === 0))).toBe(true)                 // base (all-Under) present
+    expect(new Set(fam.vectors.map(v => v.join(''))).size).toBe(fam.vectors.length) // distinct
+    for (const v of fam.vectors) {
+      expect(v.reduce((a: number, b) => a + b, 0)).toBeLessThanOrEqual(Math.floor(0.5 * fam.N)) // ≤50% Over (Layer 1)
+      expect(runLen(v)).toBeLessThan(3)                                             // no 3-run (Layer 2)
+    }
   })
 
   it('when the cluster is too big for the budget, completes low layers then partially fills the next', () => {

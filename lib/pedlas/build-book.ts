@@ -121,6 +121,8 @@ export interface CoverageAdapterOptions {
   maxFlipFrac?: number
   /** Scatter mode: reject slips with ≥ this many consecutive Overs (default 3). */
   maxRun?: number
+  /** Use the correlated SIMULATION engine (realizer, optimum-plan §10) instead of the scatter. */
+  realizer?: boolean
 }
 
 export interface CoverageResult {
@@ -201,7 +203,7 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
   const book = buildCoverageBook(pool, {
     budget: opts.budget, stake, maxPayout: Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
     boost: opts.boost ?? adapter.boostFor, legPref: opts.legPref, targetWin: opts.targetWin,
-    overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun,
+    overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun, realizer: opts.realizer,
   })
   const meta = {
     scanned: fixtures.length,
