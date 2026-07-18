@@ -81,9 +81,20 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
   })).sort((a, b) => a.range.localeCompare(b.range))
 
   const finishedCount = curve.filter(c => c.finished).length
+  // Realised layer checks (validate P and E against reality): Over-fraction of the finished day and
+  // the longest run of consecutive-by-kickoff Over results. An unfinished game breaks a run ("so far").
+  let run = 0, maxOverRun = 0, overs = 0
+  for (const c of curve) {
+    if (!c.finished) { run = 0; continue }
+    if (c.over) { overs++; run++; if (run > maxOverRun) maxOverRun = run } else run = 0
+  }
+  const realised = {
+    overs, finished: finishedCount, overFraction: finishedCount ? overs / finishedCount : null,
+    maxOverRun, layer1_over50: finishedCount ? overs / finishedCount > 0.5 : null, // true = a >50%-Over day (Layer 1 would have pruned reality)
+  }
   const snapshot = {
     at: new Date().toISOString(), total: vectors.length, alive: alive.length, dead: vectors.length - alive.length,
-    finishedGames: finishedCount, ofGames: games.length, curve, buckets: bucketRows,
+    finishedGames: finishedCount, ofGames: games.length, realised, curve, buckets: bucketRows,
   }
   // keep the dataset (don't bump the placer heartbeat)
   await updateSession(session.id, { meta: { ...(session.meta ?? {}), learnings: snapshot } }, { touch: false })

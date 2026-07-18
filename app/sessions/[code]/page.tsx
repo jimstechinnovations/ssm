@@ -20,7 +20,8 @@ interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | nul
 interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null; source?: string; outcome?: { finished: boolean; total: number | null; over: boolean | null } | null }
 interface SurvGame { order: number; game: string; underOdds: number; bucket: string; overSlips: number; finished: boolean; total: number | null; over: boolean | null; cut: number; aliveAfter: number }
 interface SurvBucket { range: string; games: number; realisedOverRate: number | null; impliedOverApprox: number | null }
-interface Survival { alive: number; dead: number; total: number; finishedGames: number; ofGames: number; curve: SurvGame[]; buckets: SurvBucket[] }
+interface Realised { overs: number; finished: number; overFraction: number | null; maxOverRun: number; layer1_over50: boolean | null }
+interface Survival { alive: number; dead: number; total: number; finishedGames: number; ofGames: number; realised?: Realised; curve: SurvGame[]; buckets: SurvBucket[] }
 interface SlipLeg { fixtureId: number; game: string; kickoff: string; line: number; side: string; odds: number }
 interface SlipDetail { slipId: number; status: string; stake: number; combinedOdds: number; payout: number | null; bookingCode: string | null; betId: string | null; legs: SlipLeg[] }
 
@@ -246,6 +247,17 @@ export default function SessionPage() {
               {survBusy ? <Spinner className="h-3.5 w-3.5" /> : <Refresh className="h-3.5 w-3.5" />} Refresh
             </button>
           </div>
+          {survival.realised && survival.realised.finished > 0 && (
+            <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-zinc-50 px-3 py-2 text-xs dark:bg-zinc-800/50">
+              <span className="text-zinc-500">realised (Layer P/E check):</span>
+              <span className="text-zinc-700 dark:text-zinc-300"><strong>{survival.realised.overs}</strong>/{survival.realised.finished} Over ({Math.round((survival.realised.overFraction ?? 0) * 100)}%)
+                {survival.realised.layer1_over50 === false && <span className="ml-1 text-green-600 dark:text-green-400">✓ ≤50% (Layer 1 held)</span>}
+                {survival.realised.layer1_over50 === true && <span className="ml-1 text-red-500">✗ &gt;50% Over — Layer 1 pruned reality</span>}</span>
+              <span className="text-zinc-700 dark:text-zinc-300">max consecutive-Over run <strong>{survival.realised.maxOverRun}</strong>
+                {survival.realised.maxOverRun < 3 && <span className="ml-1 text-green-600 dark:text-green-400">✓ &lt;3 (Layer 2 held)</span>}
+                {survival.realised.maxOverRun >= 3 && <span className="ml-1 text-red-500">✗ ≥3 — Layer 2 pruned a real run</span>}</span>
+            </div>
+          )}
           <p className="mb-2 text-xs text-zinc-400">Each finished game cuts the slips that called it wrong. An Under result cuts the few that flipped it Over; an <span className="text-red-500">Over</span> cuts the many that kept it Under.</p>
           <div className="max-h-80 overflow-y-auto text-sm">
             {survival.curve.map(c => (
