@@ -1,0 +1,91 @@
+/**
+ * GET /api/sessions/[id]/survival — the per-game survival curve + odds-bucket calibration for a placed
+ * session (optimum-plan §5). For each game in kickoff order it computes, from the REAL slips and live
+ * results: the book's Under odds (bucket), the finished outcome (FT total, O/U), how many still-alive
+ * slips that game cut, and how many survive after it. Also buckets every finished game by its Under
+ * odds and compares the realised Over-4.5 rate to the (approx) implied rate — the §5F hypothesis.
+ * Read-only analysis; persists a snapshot to meta.learnings (touch:false) so the dataset is kept.
+ */
+
+import { getSession, updateSession, listSessionSlips } from '@/lib/sessions/store'
+import { fetchResults } from '@/lib/pedlas/results'
+import type { SlipLeg } from '@/lib/pedlas/settle-slips'
+
+export const runtime = 'nodejs'
+export const maxDuration = 120
+
+type Leg = SlipLeg & { game?: string; kickoff?: string; odds?: number; side: 'Under' | 'Over' }
+const bucketOf = (o: number) => o < 1.1 ? '1.00–1.10' : o < 1.2 ? '1.10–1.20' : o < 1.35 ? '1.20–1.35' : '1.35+'
+
+export async function GET(_request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
+  const { id } = await ctx.params
+  const session = await getSession(id)
+  if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
+
+  // Every slip's per-game side (its exact vector), from the placed slips.
+  const slips = await listSessionSlips(session.id, { withLegs: true, limit: 2000 })
+  const placed = slips.filter(s => ['placed', 'won', 'lost'].includes(s.status) && (s.legs as Leg[])?.length)
+  if (placed.length === 0) return Response.json({ error: 'no placed slips to analyse' }, { status: 409 })
+  const vectors = placed.map(s => {
+    const side = new Map<number, 'Under' | 'Over'>()
+    for (const l of s.legs as Leg[]) side.set(l.fixtureId, l.side)
+    return side
+  })
+
+  // Game set: scan ALL slips' legs. underOdds = the price on any leg where the game is Under (every
+  // game is Under in most slips), so it's always found regardless of which slip we look at.
+  const gmap = new Map<number, { fixtureId: number; game: string; kickoff: string; line: number; underOdds: number }>()
+  for (const s of placed) for (const l of s.legs as Leg[]) {
+    const g = gmap.get(l.fixtureId) ?? { fixtureId: l.fixtureId, game: l.game ?? String(l.fixtureId), kickoff: l.kickoff ?? '', line: l.line ?? 4.5, underOdds: 0 }
+    if (l.side === 'Under' && l.odds && !g.underOdds) g.underOdds = l.odds
+    gmap.set(l.fixtureId, g)
+  }
+  const games = [...gmap.values()].map(g => ({ ...g, underOdds: g.underOdds || 1 })).sort((a, b) => (a.kickoff || '').localeCompare(b.kickoff || ''))
+
+  const results = await fetchResults(games.map(g => g.fixtureId))
+
+  // Walk games in kickoff order; a slip stays alive iff its side matches every FINISHED game so far.
+  let alive = vectors.map((_, i) => i)   // indices into vectors
+  const curve = games.map((g, order) => {
+    const r = results.get(g.fixtureId)
+    const finished = !!r?.finished
+    const total = finished ? (r?.total ?? null) : null
+    const over = finished ? (total! > g.line) : null
+    const outcomeSide: 'Under' | 'Over' | null = over == null ? null : over ? 'Over' : 'Under'
+    let cut = 0
+    if (outcomeSide) {
+      const survivors = alive.filter(i => vectors[i].get(g.fixtureId) === outcomeSide)
+      cut = alive.length - survivors.length
+      alive = survivors
+    }
+    // how many slips (of the whole book) put this game Over — the hedge weight on it
+    const overSlips = vectors.filter(v => v.get(g.fixtureId) === 'Over').length
+    return {
+      order: order + 1, fixtureId: g.fixtureId, game: g.game, kickoff: g.kickoff,
+      underOdds: g.underOdds, bucket: bucketOf(g.underOdds), overSlips,
+      finished, total, over, cut, aliveAfter: alive.length,
+    }
+  })
+
+  // §5F: bucket every FINISHED game by Under odds; realised Over rate vs approx implied.
+  const buckets: Record<string, { games: number; overs: number; impliedOverSum: number }> = {}
+  for (const c of curve) {
+    if (!c.finished) continue
+    const b = (buckets[c.bucket] ??= { games: 0, overs: 0, impliedOverSum: 0 })
+    b.games++; if (c.over) b.overs++
+    b.impliedOverSum += Math.max(0, Math.min(1, 1 - 1 / c.underOdds))   // approx implied P(Over), upper bound
+  }
+  const bucketRows = Object.entries(buckets).map(([range, b]) => ({
+    range, games: b.games, realisedOverRate: b.games ? b.overs / b.games : null,
+    impliedOverApprox: b.games ? b.impliedOverSum / b.games : null,
+  })).sort((a, b) => a.range.localeCompare(b.range))
+
+  const finishedCount = curve.filter(c => c.finished).length
+  const snapshot = {
+    at: new Date().toISOString(), total: vectors.length, alive: alive.length, dead: vectors.length - alive.length,
+    finishedGames: finishedCount, ofGames: games.length, curve, buckets: bucketRows,
+  }
+  // keep the dataset (don't bump the placer heartbeat)
+  await updateSession(session.id, { meta: { ...(session.meta ?? {}), learnings: snapshot } }, { touch: false })
+  return Response.json(snapshot)
+}

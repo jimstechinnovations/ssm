@@ -10,7 +10,7 @@
 
 import React, { useEffect, useState, useCallback, useRef } from 'react'
 import { useParams } from 'next/navigation'
-import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers, Download, XMark } from '@/components/Icons'
+import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers, Download, XMark, Refresh } from '@/components/Icons'
 import { TotalsChart } from '@/components/TotalsChart'
 
 interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null }
@@ -18,6 +18,9 @@ interface Summary { slips: number; pending: number; placed: number; failed: numb
 interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean } | null }
 interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
 interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null; source?: string; outcome?: { finished: boolean; total: number | null; over: boolean | null } | null }
+interface SurvGame { order: number; game: string; underOdds: number; bucket: string; overSlips: number; finished: boolean; total: number | null; over: boolean | null; cut: number; aliveAfter: number }
+interface SurvBucket { range: string; games: number; realisedOverRate: number | null; impliedOverApprox: number | null }
+interface Survival { alive: number; dead: number; total: number; finishedGames: number; ofGames: number; curve: SurvGame[]; buckets: SurvBucket[] }
 interface SlipLeg { fixtureId: number; game: string; kickoff: string; line: number; side: string; odds: number }
 interface SlipDetail { slipId: number; status: string; stake: number; combinedOdds: number; payout: number | null; bookingCode: string | null; betId: string | null; legs: SlipLeg[] }
 
@@ -139,10 +142,20 @@ export default function SessionPage() {
     try {
       const j = await (await fetch(`/api/sessions/${code}/settle`, { method: 'POST' })).json()
       setMsg(j.error ? { text: j.error, tone: 'warn' } : { text: `Settled ${j.settled} (won ${j.won}, lost ${j.lost}) · ${j.pending} still pending · ${j.gamesFinished}/${j.of} games finished.`, tone: 'ok' })
-      await load()
+      await load(); if (showSurvival) await loadSurvival()
     } catch { setMsg({ text: 'Could not check results.', tone: 'warn' }) }
     finally { setSettleBusy(false) }
   }
+
+  const [survival, setSurvival] = useState<Survival | null>(null)
+  const [showSurvival, setShowSurvival] = useState(false)
+  const [survBusy, setSurvBusy] = useState(false)
+  const loadSurvival = useCallback(async () => {
+    setSurvBusy(true)
+    try { const j = await fetch(`/api/sessions/${code}/survival`).then(r => r.json()); if (!j.error) setSurvival(j) }
+    catch { /* keep last */ } finally { setSurvBusy(false) }
+  }, [code])
+  async function toggleSurvival() { setShowSurvival(v => !v); if (survival == null) await loadSurvival() }
 
   if (notFound.current) return <div className="mx-auto max-w-4xl px-4 py-16 text-center text-sm text-zinc-500">Session <span className="font-mono">{code}</span> not found. <a href="/" className="text-blue-600 hover:underline dark:text-blue-400">Back to dashboard</a></div>
   if (!session) return <Loading label={`Loading ${code}…`} />
@@ -164,6 +177,11 @@ export default function SessionPage() {
           {(summary?.placed ?? 0) > 0 && (
             <button onClick={settle} disabled={settleBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
               {settleBusy ? <Spinner className="h-4 w-4" /> : <Check className="h-4 w-4" />} Check results
+            </button>
+          )}
+          {(summary?.placed ?? 0) > 0 && (
+            <button onClick={toggleSurvival} disabled={survBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+              {survBusy ? <Spinner className="h-4 w-4" /> : <Layers className="h-4 w-4" />} Survival
             </button>
           )}
           <button onClick={clone} disabled={busy != null} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
@@ -214,6 +232,51 @@ export default function SessionPage() {
               ))}
             </div>
             </>
+          )}
+        </section>
+      )}
+
+      {/* Survival curve — how many slips remain as each game finishes (+ §5F odds-bucket calibration) */}
+      {showSurvival && survival && (
+        <section className="mb-5 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+          <div className="mb-2 flex flex-wrap items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+            <Layers className="h-4 w-4" /> Survival curve
+            <span className="text-xs font-normal text-zinc-500">{survival.alive}/{survival.total} alive · {survival.dead} cut · {survival.finishedGames}/{survival.ofGames} games in</span>
+            <button onClick={loadSurvival} disabled={survBusy} className="ml-auto inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-2.5 py-1 text-xs font-medium text-zinc-600 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+              {survBusy ? <Spinner className="h-3.5 w-3.5" /> : <Refresh className="h-3.5 w-3.5" />} Refresh
+            </button>
+          </div>
+          <p className="mb-2 text-xs text-zinc-400">Each finished game cuts the slips that called it wrong. An Under result cuts the few that flipped it Over; an <span className="text-red-500">Over</span> cuts the many that kept it Under.</p>
+          <div className="max-h-80 overflow-y-auto text-sm">
+            {survival.curve.map(c => (
+              <div key={c.order} className={`flex flex-wrap items-center gap-x-3 gap-y-1 border-t border-zinc-100 py-1.5 first:border-0 dark:border-zinc-800 ${c.finished ? '' : 'opacity-60'}`}>
+                <span className="w-6 text-right text-xs text-zinc-400">{c.order}</span>
+                <span className="min-w-[8rem] flex-1 text-zinc-800 dark:text-zinc-200">{c.game}</span>
+                <span className="text-xs text-zinc-400">U@{c.underOdds}</span>
+                {c.finished
+                  ? <span className={`rounded px-1.5 py-0.5 text-[10px] font-semibold ${c.over ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300' : 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300'}`}>FT {c.total} · {c.over ? 'OVER' : 'UNDER'}</span>
+                  : <span className="text-[10px] uppercase tracking-wide text-zinc-400">upcoming</span>}
+                <span className="w-32 text-right text-xs">
+                  {c.finished ? <><span className="text-red-500">−{c.cut}</span> <span className="text-zinc-400">→</span> <span className="font-semibold text-zinc-700 dark:text-zinc-300">{c.aliveAfter} alive</span></> : <span className="text-zinc-400">{c.overSlips} slips Over</span>}
+                </span>
+              </div>
+            ))}
+          </div>
+          {survival.buckets.length > 0 && (
+            <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+              <div className="mb-1 text-xs font-semibold text-zinc-700 dark:text-zinc-300">§5F — Under-odds buckets (finished games): realised Over vs implied</div>
+              <div className="space-y-0.5 text-xs">
+                {survival.buckets.map(b => (
+                  <div key={b.range} className="flex items-center gap-3 text-zinc-600 dark:text-zinc-400">
+                    <span className="w-24 font-mono">{b.range}</span>
+                    <span className="w-16">{b.games} game{b.games === 1 ? '' : 's'}</span>
+                    <span className="w-28">realised <strong className={b.realisedOverRate && b.realisedOverRate > (b.impliedOverApprox ?? 1) ? 'text-red-500' : 'text-green-600 dark:text-green-400'}>{b.realisedOverRate != null ? Math.round(b.realisedOverRate * 100) : '—'}% O</strong></span>
+                    <span className="text-zinc-400">implied ~{b.impliedOverApprox != null ? Math.round(b.impliedOverApprox * 100) : '—'}%</span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-1 text-[11px] text-zinc-400">Realised &lt; implied in the ≥1.20 buckets ⇒ Under underpriced (value on our side). Needs many sessions to be real — this is a log, not a verdict.</p>
+            </div>
           )}
         </section>
       )}
