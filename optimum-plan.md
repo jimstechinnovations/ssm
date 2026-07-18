@@ -3,7 +3,18 @@
 **Status:** design/spec (discuss before building). No edge is claimed anywhere in here; every slip
 is still −vig. This plan makes the slip-scatter *optimal at its own objective* (maximise the chance
 that ≥1 slip's exact U/O vector matches the day) and sets up a disciplined way to learn from real
-results. See also `pedlas_v3.md`, and the memories: *pedlas-no-model-edge*, *pedlas-cutter-backtest*.
+results. See also `pedlas_v3.md`, and the memories: *pedlas-no-model-edge*, *pedlas-cutter-backtest*,
+*optimum-plan-and-learning-loop*, *pedlas-placement-gotchas*.
+
+**What's already built vs pending (2026-07):**
+- ✅ BUILT: the constrained scatter (Layer 1 `max_flip_frac`/P + Layer 2 `max_run`/E), the survival
+  tracker (`/api/sessions/[id]/survival`) with per-game cut/alive curve + realised Over-fraction &
+  max-run (P/E check) + §5F Under-odds buckets, `/settle` outcome persistence, the session Survival
+  panel, `recompute-payouts`, non-disruptive `browserStatus`, `/placements` paging+search. See §7.
+- ⏳ PENDING (build from this doc): the **optimum engine** (§2–3: book-only ranking + correlated
+  allocation), the **A/B harness** (§4), the **cross-session learning read** (§5), P/E calibration
+  from real data (§5G), and — only if the data warrants — the sharp-book reference (§6).
+- Placed so far: **S-C76259** (500 real slips, scatter P=0.5 / E=3). Evidence log in §8.
 
 ---
 
@@ -24,6 +35,44 @@ just "greedy on disjoint events," and it is provably optimal. Everything below i
 **Honest ceiling (measured this build):** with N≈35, correlated ~19% Over rate, the best reachable
 value is ~**0.3–0.7%**. No arrangement beats that materially; the target is a needle. This plan gets
 us to the top of that range and no further — it does not create EV.
+
+---
+
+## 0.5 Two shapes of one budget, the survival funnel, and the "high-survival moonshot"
+
+**Two ways to spend `K·stake` on N total-goals games:**
+- **Moonshot** — K distinct **full-length (N-leg)** slips; a slip wins only on an EXACT N-match →
+  `P(win) ~0.3–0.7%`, payout up to the cap. *This is what we place.*
+- **Coverage** — many **shorter** parlays; frequent partial survival, small/regular payouts, low
+  variance. In-code already as the `coverage` objective (`buildDiverseUnderSlips` + `planCoverage`),
+  *not currently placed*. `P(survive)·payout = stake·(1−vig)` always — shortening slips buys survival
+  by giving up jackpot. One-for-one; no free lunch.
+
+**The survival funnel (the governing fact).** A slip wins only by matching the whole N-vector, and
+distinct slips are distinct vectors, so **after the last game at most ONE distinct vector can still be
+alive** (plus any exact duplicates of it). The field *necessarily* funnels K → ≤1. "Many slips
+surviving to the very end" is impossible for distinct full-length slips — it's geometry, not tuning.
+So **"high survival" is a statement about the SHAPE of the curve** (how many alive after game *k*),
+**not about the terminal win-rate.**
+
+**The operator's "high-survival moonshot" (what we actually pursue).** Keep full-length slips (still a
+moonshot, within budget), but *shape the curve to stay tall through the realistic middle* by covering
+ONLY realistic vectors:
+- **Layer 1 (P):** drop any slip with > P·N Overs (default P = 50%). Justified by the base rate —
+  Over-4.5 ~19%/game ⇒ ~6–7 Overs of 35 ⇒ a >50%-Over day ≈ **never happens**, so pruning is
+  essentially FREE and makes the field Under-heavy → tall survival curve. **Keep.**
+- **Layer 2 (E):** drop any slip with ≥ E consecutive-by-kickoff Overs (default E = 3). "Consecutive
+  by kickoff" is **physically arbitrary**, so a real day CAN put E Overs in adjacent slots → we'd
+  prune the actual winner. This is most of the measured P(win) cost (**0.27% scatter vs 0.53%
+  unconstrained**). **Suspect — calibrate before trusting (§5G, §8).**
+- **Selection rule:** legs are strictly `Under 4.5 @ book odds ≥ 1.2` (the flip-eligible line; also
+  what gives each leg enough odds to reach the ₦-target). See §5F for its edge test.
+
+Honest verdict: the layers make the strategy **coherent and reality-aligned** and give a *tall survival
+curve*, but they do **not** raise terminal `P(win)` (the model measures Layer 2 as a net cost). Their
+real payoff is conditional: **IF the P/E priors match reality (real days never exceed them), the pruned
+vectors never occur and the layers cost ~nothing** while buying the survival shape. Whether they match
+reality is exactly the calibration question the tracker now measures (§5G).
 
 ---
 
@@ -77,10 +126,17 @@ common-shock model the judge uses.
     `Σlogit` order for vectors that didn't appear in the sample.
 - Cost: one extra correlated MC pass at build (cheap; we already run 3k trials to report P(win)).
 
-### Change C — make the run / ≤50% constraints an explicit shape TOGGLE, off by default
-For the **max-P(win)** build, drop `max_run` and `max_flip_frac` entirely (cover the true top-K).
-Keep them available as an opt-in "I want a scattered, bigger-jackpot shape" mode — clearly labelled
-as a *variance choice that costs hit-chance*, which the A/B (below) will quantify every time.
+### Change C — split into two builds; make the P/E layers DATA-CALIBRATED
+There are two legitimate targets, so ship two builds off the same pool:
+- **`optimum` (max-P-win):** P = 100%, E = ∞ — no layers; cover the true top-K correlated vectors
+  (Changes A+B). This is the honest ceiling for terminal `P(win)`.
+- **`shape` (high-survival moonshot):** keep the layers, but with **P and E calibrated from realised
+  results (§5G)**, not hunches. Default P = 0.5 (base-rate-justified, ~free), E from the measured
+  max-run distribution (start 3; tighten to 2 for more survival if 3-runs prove genuinely rare, or
+  relax if they're common). Label it honestly as a *survival-shape choice that trades a little
+  terminal P(win) for a taller curve* — the A/B (§4) prints the exact trade every build.
+
+Do NOT treat the layers as a permanent on/off; treat E especially as a knob the data sets.
 
 ---
 
@@ -159,6 +215,18 @@ Also record, for these games, the realised rate of Over 1.5 / Over 2.5 (sanity: 
 priced near-certainty — if the book is loose on the *low* lines too, that's a second, cleaner signal).
 Needs volume: log the buckets every session; a 2-session read is directional only, not significant.
 
+**G. Layer P/E calibration (the operator's high-survival thesis, made rigorous).** The survival
+tracker already records, per finished day, the **realised Over-fraction** and the **max consecutive-
+by-kickoff Over run** (`meta.learnings.realised`). Across sessions:
+- Does any real day exceed **P** (50%) Over? Expected: never ⇒ **Layer 1 confirmed free**, keep it.
+- What's the distribution of the **max-run**? If ≥3-runs are common ⇒ **relax/raise E** (recovering
+  the ~0.26pp of P(win) Layer 2 costs). If genuinely rare across many days ⇒ E = 3 (or even 2) is safe
+  and buys *more* survival. Set E from the counted distribution, not the eyeball.
+Operator's standing observation (pre-count): "always >50% Under; never seen >3 consecutive Overs"
+across many placed slips/days — directional support for both layers, now being logged automatically
+(§8). Confirmation ≠ edge: "Under holds" is *why* the price is 1.2; it doesn't beat the vig (see §5F,
+§6). This item calibrates the survival *shape*, it does not create EV.
+
 Output: append findings to this file (a dated `## Learnings` section) and turn any real, repeated
 signal into a concrete change for the next session. Two sessions is not significance — it's the start
 of a log. The discipline is: **every session's realised result updates β, the calibration check, and
@@ -175,3 +243,50 @@ the form/H2H verdict; nothing gets "improved" on a hunch.**
 - The only path to +EV remains a **sharp-book reference** (place only when a sharper book's de-vigged
   price beats SportyBet's by more than the margin). The learning loop (§5A calibration) is how we'd
   first *detect* whether such a gap exists on our pool — so this plan is also the on-ramp to that.
+
+---
+
+## 7. Already-built infrastructure (the substrate this plan sits on)
+
+- **Selection + gate:** `enrichSignals` (form backbone + H2H bonus + book anchor); every leg gated on
+  real scoring history (form is per-team ⇒ attainable). Legs = `Under 4.5 @ ≥ 1.2`.
+- **Scatter build:** `buildFlipScatter` with `overThreshold` (flip-eligible line), `maxFlipFrac` (P /
+  Layer 1) and `maxRun` (E / Layer 2); progressive layered coverage; honest correlated judge
+  `simulateFlipScatter` (β via `calibrateBeta`).
+- **Settlement:** `POST /api/sessions/[id]/settle` — early-cut verdicts + persists per-game outcomes
+  to `meta.gameResults` (FT total, O/U), `touch:false` so it never fakes a placer heartbeat.
+- **Survival tracker:** `GET /api/sessions/[id]/survival` — from the real placed slips + live results:
+  per-game (kickoff order) cut/alive curve, `realised` {overs, finished, overFraction, maxOverRun,
+  layer1_over50}, and the §5F Under-odds buckets. Persists a snapshot to `meta.learnings`. Rendered in
+  the session **Survival** panel with ✓/✗ Layer-held flags.
+- **Payout integrity:** SportyBet cap = ₦200,000,000 (adapter + `book_configs.max_payout`); the real
+  captured boost table lives in `book_configs.boost_json`; `POST /api/sessions/[id]/recompute-payouts`
+  rewrites stored `potential_payout` = `min(stake·Π(odds)·(1+boost), cap)` so table = slip =
+  /placements. (Betway's cap is ₦50M — do not confuse.) See *pedlas-placement-gotchas*.
+- **Placement reliability:** CDP over a real logged-in Chrome; submit mutex; per-slip truth-confirm;
+  idempotency by booking code; `withLegs` book feed (else bizCode 19000) + pending-only cleanup;
+  anti-throttle Chrome flags + `bringToFront`; read-only non-disruptive `browserStatus`.
+- **Ledger:** `/placements` with server-side paging + search (booking code / slip # / book).
+
+## 8. Provisional evidence log (pre-significance; append every session)
+
+- **Operator eyeball (many placed slips, multiple days):** realised Over always < 50% (Layer 1 held);
+  no > 3 consecutive Overs seen (Layer 2 held). Directional only, small sample — now counted
+  automatically by the survival tracker's `realised` block.
+- **§5F, n = 1:** `S-C76259` game 1 — *Wisła Kraków vs SK Artis Brno*, Under 4.5 @ 1.39 (implied ~28%
+  Over), finished **Under** (FT 4). Consistent with the price; no edge signal yet.
+- **Survival, S-C76259:** 397/500 alive after game 1 (the 103 cut had flipped game 1 Over).
+- **Placed sessions:** S-C76259 (500 real, scatter P = 0.5 / E = 3).
+
+## 9. Build order (when we say go)
+
+1. **Optimum engine** (§2–3): `overLikelihoodForRanking` (book-only) + `topVectorsCorrelated` (B2,
+   correlated) + a `mode: 'optimum' | 'shape'` flag on `buildFlipScatter`; tests.
+2. **A/B harness** (§4): build `optimum` vs `shape` vs current on the same pool, same β/seed judge;
+   surface the table in the builder before placing.
+3. **`shape` build with data-set P/E** (§5G): default P = 0.5; E from the measured max-run
+   distribution once ≥ a few sessions exist.
+4. **Cross-session learning read** (§5) after ≥ 3 settled sessions: β, price calibration (§5A), the
+   form/H2H verdict (§5C), the §5F edge test, the P/E distribution (§5G); write a dated `## Learnings`.
+5. **Only if §5A/§5F shows real, repeated miscalibration:** prototype the **sharp-book reference**
+   (§6) — the sole +EV path. Nothing here is placed on a hunch.
