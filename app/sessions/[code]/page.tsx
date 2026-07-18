@@ -17,7 +17,7 @@ interface Slip { id: string; slipId: number; status: string; stake: number; comb
 interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
 interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean } | null }
 interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
-interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null; source?: string }
+interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null; source?: string; outcome?: { finished: boolean; total: number | null; over: boolean | null } | null }
 interface SlipLeg { fixtureId: number; game: string; kickoff: string; line: number; side: string; odds: number }
 interface SlipDetail { slipId: number; status: string; stake: number; combinedOdds: number; payout: number | null; bookingCode: string | null; betId: string | null; legs: SlipLeg[] }
 
@@ -206,6 +206,9 @@ export default function SessionPage() {
                   <span className="w-28 text-right text-xs text-zinc-600 dark:text-zinc-300">
                     {g.overRate != null && <span className={g.overRate > 0.25 ? 'text-red-500' : 'text-green-600 dark:text-green-400'}>{Math.round(g.overRate * 100)}% over · </span>}
                     U{g.line} @ {g.underOdds}
+                    {g.outcome?.finished
+                      ? <span className={`ml-1 rounded px-1.5 py-0.5 text-[10px] font-semibold ${g.outcome.over ? 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300' : 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300'}`}>FT {g.outcome.total} · {g.outcome.over ? `OVER ${g.line}` : `UNDER ${g.line}`}</span>
+                      : <span className="ml-1 text-[10px] uppercase tracking-wide text-zinc-400">upcoming</span>}
                   </span>
                 </div>
               ))}

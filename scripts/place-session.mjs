@@ -29,10 +29,18 @@ if (!code) { console.error('usage: node scripts/place-session.mjs <S-CODE|uuid> 
 const passthrough = args.filter((a, i) =>
   a !== code && a !== '--live' && a !== '--force' && a !== '--base' && !(baseI >= 0 && i === baseI + 1))
 
-const r = await fetch(`${BASE}/api/sessions/${encodeURIComponent(code)}`).catch(() => null)
+// withLegs=1 + a big limit: the placer needs EVERY slip's legs to build booking codes (the UI-facing
+// default omits legs and paginates to 50 — which would write an empty book and fail every slip).
+const r = await fetch(`${BASE}/api/sessions/${encodeURIComponent(code)}?withLegs=1&limit=1000`).catch(() => null)
 if (!r || !r.ok) { console.error(`could not fetch session ${code} from ${BASE} (is npm run dev running?)`); process.exit(1) }
-const { session, slips, summary } = await r.json()
-if (!slips?.length) { console.error(`session ${code} has no slips`); process.exit(1) }
+const { session, slips: allSlips, summary } = await r.json()
+if (!allSlips?.length) { console.error(`session ${code} has no slips`); process.exit(1) }
+const legless = allSlips.filter(s => !(s.legs?.length)).length
+if (legless > 0) { console.error(`⛔ ${legless}/${allSlips.length} slips returned WITHOUT legs — refusing to place (would fail every booking code). Check the withLegs feed.`); process.exit(1) }
+// Only place slips not already placed (idempotency also guards, but this keeps the book small + fast).
+const slips = allSlips.filter(s => s.status === 'pending' || s.status === 'placing')
+console.log(`${slips.length} unplaced of ${allSlips.length} slip(s) to place (already-placed are skipped).`)
+if (!slips.length) { console.log('nothing to place — all slips already placed/settled.'); process.exit(0) }
 
 // ── pre-flight: every pool game must still be upcoming + its Under-4.5 market active ──
 const poolGames = new Map() // fixtureId → game label

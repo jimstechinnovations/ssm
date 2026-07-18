@@ -127,7 +127,7 @@ export const sportybet: BookAdapter = {
   label: 'SportyBet Nigeria',
   currency: 'NGN',
   minStake: 10, // verified against a real placed slip (₦10, 2026-07-13)
-  maxPayout: 50_000_000, // published NGN max-win cap; verify against a live capped slip
+  maxPayout: 200_000_000, // SportyBet NGN max-win cap (₦200M; Betway's is ₦50M — don't confuse them)
   boostFor: noBoost,     // real bonus table unverified — zero, never overstate
   boostVerified: false,
   feedVerified: true,

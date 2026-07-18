@@ -51,10 +51,17 @@ export interface AxisDecision {
 
 /** History-model view of an axis. Advisory: shown + fed to NIM, but does NOT change odds/EV. */
 export interface AxisAdvisory {
-  pHat: number                          // model p̂ of the DOMINANT side from recent form
+  pHat: number                          // combined P(Over 4.5) — book × form × H2H (drives flip order)
   edge: number                          // p̂_dominant / p_book_dominant  (>1 = model likes the anchor)
   lean: 'back' | 'fade' | 'neutral'     // back = model agrees with the dominant pick
-  note: string                          // short human note (e.g. "form λ 1.8–1.1")
+  note: string                          // short human note (e.g. "form λ 1.8–1.1 · H2H 1/3 O")
+  // ── signal breakdown (present when enrichSignals ran); all are P(Under 4.5) unless noted ──
+  bookUnder?: number                    // book de-vigged P(Under)
+  formUnder?: number                    // recent-form Poisson P(total ≤ line) — null-omitted if sparse
+  h2hUnder?: number                     // fraction of past meetings that finished Under — omitted if none
+  h2hCount?: number                     // number of prior meetings used
+  combinedUnder?: number                // weighted blend actually used = 1 − pHat
+  hasForm?: boolean                     // both teams had ≥3 recent games (the history gate)
 }
 
 /** The opposite total-goals side. */

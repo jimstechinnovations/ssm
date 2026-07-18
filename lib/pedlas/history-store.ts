@@ -16,7 +16,11 @@ export async function upsertMatches(events: LeagueEvent[]): Promise<number> {
   if (!events.length) return 0
   try {
     const supabase = createServerClient()
-    const rows = events.map(e => ({
+    // Dedupe by match_id: Postgres upsert rejects the WHOLE batch if the same conflict key appears
+    // twice ("cannot affect row a second time") — and one match shows up in both teams' recent lists.
+    const byId = new Map<string, LeagueEvent>()
+    for (const e of events) byId.set(e.matchId, e)
+    const rows = [...byId.values()].map(e => ({
       match_id: e.matchId, league_id: e.leagueId, match_date: e.date,
       home_name: e.home, away_name: e.away, home_goals: e.hg, away_goals: e.ag,
     }))

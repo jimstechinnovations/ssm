@@ -8,8 +8,9 @@
  */
 import { chromium } from 'playwright'
 
-const [code, BASE = 'http://localhost:3000', limitArg] = process.argv.slice(2)
+const [code, BASE = 'http://localhost:3000', limitArg, offsetArg] = process.argv.slice(2)
 const LIMIT = Math.min(20, Math.max(1, Number(limitArg) || 8))
+const OFFSET = Math.max(0, Number(offsetArg) || 0)
 const out = (o) => console.log('RESULT ' + JSON.stringify(o))
 if (!code) { out({ error: 'usage: sync-h2h <code> <base> <limit>' }); process.exit(1) }
 
@@ -36,7 +37,7 @@ try {
 
   const batch = []
   let withH2H = 0, withForm = 0, processed = 0
-  for (const gm of games.slice(0, LIMIT)) {
+  for (const gm of games.slice(OFFSET, OFFSET + LIMIT)) {
     processed++
     const [th, ta] = await Promise.all([team(gm.home), team(gm.away)])
     let f = false, h = false
@@ -46,5 +47,5 @@ try {
     await sleep(120)
   }
   const up = await fetch(`${BASE}/api/history/upsert`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events: batch }) }).then(r => r.json()).catch(() => ({ rows: 0 }))
-  out({ games: games.length, processed, withH2H, withForm, rows: up.rows ?? 0, more: games.length > LIMIT })
+  out({ games: games.length, offset: OFFSET, processed, withH2H, withForm, rows: up.rows ?? 0, more: games.length > OFFSET + LIMIT })
 } finally { await page?.close().catch(() => {}); await browser.close() }

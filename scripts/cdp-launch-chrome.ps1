@@ -12,6 +12,16 @@
 param([ValidateSet('dedicated','default')] [string]$Mode = 'dedicated')
 
 $ErrorActionPreference = 'Stop'
+
+# Anti-throttle flags: Chrome slows timers / defers paint on UNFOCUSED or occluded tabs, which makes
+# CDP clicks miss and submits fail when you're using the laptop for something else. These keep every
+# tab running full-speed in the background so the placer is reliable without you focusing the window.
+$antiThrottle = @(
+  "--disable-background-timer-throttling",
+  "--disable-backgrounding-occluded-windows",
+  "--disable-renderer-backgrounding",
+  "--disable-features=CalculateNativeWinOcclusion"
+)
 $chrome = @(
   "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",
   "${env:ProgramFiles(x86)}\Google\Chrome\Application\chrome.exe",
@@ -27,18 +37,16 @@ if ($Mode -eq 'default') {
   }
   $args = @(
     "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1",
-    "--user-data-dir=$env:LocalAppData\Google\Chrome\User Data", "--profile-directory=Default",
-    "https://www.sportybet.com/ng/"
-  )
+    "--user-data-dir=$env:LocalAppData\Google\Chrome\User Data", "--profile-directory=Default"
+  ) + $antiThrottle + @("https://www.sportybet.com/ng/")
 } else {
   # Dedicated profile — a separate instance that coexists with the main Chrome.
   $dedicated = Join-Path (Get-Location) ".chrome-bot"
   New-Item -ItemType Directory -Force $dedicated | Out-Null
   $args = @(
     "--remote-debugging-port=9222", "--remote-debugging-address=127.0.0.1",
-    "--user-data-dir=$dedicated",
-    "https://www.sportybet.com/ng/"
-  )
+    "--user-data-dir=$dedicated"
+  ) + $antiThrottle + @("https://www.sportybet.com/ng/")
 }
 
 & $chrome @args | Out-Null

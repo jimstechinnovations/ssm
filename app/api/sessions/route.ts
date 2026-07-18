@@ -33,6 +33,12 @@ const CreateSchema = z.object({
   selection_window_min: z.number().int().min(15).max(600).optional(),
   /** Only build on games we have real history for (falls back with a note until Sofascore lands). */
   require_history: z.boolean().optional(),
+  /** Flip-eligible if P(Over) ≥ this. Higher ⇒ lock more safe games ⇒ deeper covering guarantee. */
+  over_threshold: z.number().min(0).max(0.9).optional(),
+  /** If set, SCATTER flips across depths up to this fraction of eligible legs (e.g. 0.5). */
+  max_flip_frac: z.number().min(0).max(1).optional(),
+  /** Scatter mode: reject slips with ≥ this many consecutive Overs (default 3). */
+  max_run: z.number().int().min(2).max(10).optional(),
 }).refine(d => {
   const from = new Date(d.date_from), to = new Date(d.date_to)
   const maxTo = new Date(from); maxTo.setDate(maxTo.getDate() + 2)
@@ -80,7 +86,7 @@ export async function POST(request: Request): Promise<Response> {
     const built = await buildCoverageForAdapter(getBook(id), {
       dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake,
       targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost,
-      requireHistory: req.require_history,
+      requireHistory: req.require_history, overThreshold: req.over_threshold, maxFlipFrac: req.max_flip_frac, maxRun: req.max_run,
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
     if (built.usedDateTo && built.usedDateTo > usedDateTo) usedDateTo = built.usedDateTo

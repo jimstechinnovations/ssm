@@ -344,14 +344,13 @@ export function estimatePlacement(slipCount: number, secPerSlip = PLACE_SECONDS_
 // increasing flip-count. A slip wins iff its U/O vector exactly matches the real results — a moonshot
 // by nature (probability is low, honestly reported), but every winning slip pays the full target.
 
-/** How likely this leg is to finish Over 4.5. Base = book P(Over); when the two teams have H2H
- *  history, blend in their head-to-head Over-4.5 rate (advisory.pHat) so games these teams tend to
- *  score in get flipped more. No H2H → book price only. */
+/** How likely this leg is to finish Over 4.5, for flip ordering. When enrichSignals ran, advisory.pHat
+ *  is the combined book×form×H2H P(Over) — use it directly so the least-safe games flip first. No
+ *  advisory (form missing) → book price only. */
 function overLikelihood(a: BinaryAxis): number {
-  const book = cutProb(a)
-  const h2h = a.advisory?.pHat
-  if (h2h != null) return Math.min(0.95, Math.max(0.02, 0.4 * book + 0.6 * h2h))
-  return book
+  const combined = a.advisory?.pHat
+  if (combined != null) return Math.min(0.95, Math.max(0.02, combined))
+  return cutProb(a)
 }
 
 /** Fewest legs (highest Under odds first) whose base parlay × boost clears the target. */
@@ -366,38 +365,44 @@ function chooseBaseLegs(axes: BinaryAxis[], stake: number, target: number, boost
   return { legs, reached: false } // used every available game and still short of target
 }
 
-/**
- * The K MOST-PROBABLE flip sets (which legs to turn Over), most-likely first, including the empty set
- * (all-Under). Flipping leg i costs logPen[i] = log P(Over_i) − log P(Under_i) ≤ 0, so the highest-
- * probability vectors flip only the least-confident legs. This is best-first over subsets (Lawler/
- * Eppstein k-best): it AUTOMATICALLY covers the most-uncertain games exhaustively (e.g. 8 coin-flips →
- * their 256 patterns) while committing the confident games to Under. Optimal for P(≥1 exact match).
- */
-function topKFlipSets(logPen: number[], K: number): number[][] {
-  const n = logPen.length
-  const order = logPen.map((_, i) => i).sort((a, b) => logPen[b] - logPen[a]) // least-negative (least confident) first
-  const d = order.map(i => logPen[i])
-  const results: number[][] = [[]] // empty set = all Under (the single most-probable vector)
-  if (n === 0) return results
+/** n-choose-k (exact for the small n,k we use). */
+function nCk(n: number, k: number): number {
+  if (k < 0 || k > n) return 0
+  k = Math.min(k, n - k)
+  let r = 1
+  for (let i = 0; i < k; i++) r = (r * (n - i)) / (i + 1)
+  return Math.round(r)
+}
 
-  interface Node { score: number; subset: number[]; last: number }
-  const heap: Node[] = [{ score: d[0], subset: [0], last: 0 }]
-  const up = () => { let i = heap.length - 1; while (i > 0) { const p = (i - 1) >> 1; if (heap[p].score >= heap[i].score) break;[heap[p], heap[i]] = [heap[i], heap[p]]; i = p } }
-  const pop = () => {
-    const top = heap[0]; const last = heap.pop()!
-    if (heap.length) { heap[0] = last; let i = 0; for (;;) { const l = 2 * i + 1, r = 2 * i + 2; let m = i; if (l < heap.length && heap[l].score > heap[m].score) m = l; if (r < heap.length && heap[r].score > heap[m].score) m = r; if (m === i) break;[heap[m], heap[i]] = [heap[i], heap[m]]; i = m } }
-    return top
+/** All k-subsets of `items` (each a subset of the item VALUES), lexicographic order; optional cap. */
+function kSubsets(items: number[], k: number, cap = Infinity): number[][] {
+  const out: number[][] = []
+  const n = items.length
+  if (k < 0 || k > n) return out
+  if (k === 0) return [[]]
+  const idx = Array.from({ length: k }, (_, i) => i)
+  for (;;) {
+    out.push(idx.map(i => items[i]))
+    if (out.length >= cap) break
+    let p = k - 1
+    while (p >= 0 && idx[p] === n - k + p) p--
+    if (p < 0) break
+    idx[p]++
+    for (let j = p + 1; j < k; j++) idx[j] = idx[j - 1] + 1
   }
-  while (results.length < K && heap.length) {
-    const node = pop()
-    results.push(node.subset.map(j => order[j])) // d-index → original leg index
-    const nx = node.last + 1
-    if (nx < n) {
-      heap.push({ score: node.score + d[nx], subset: [...node.subset, nx], last: nx }); up()                      // add nx
-      heap.push({ score: node.score - d[node.last] + d[nx], subset: [...node.subset.slice(0, -1), nx], last: nx }); up() // swap last→nx
-    }
-  }
-  return results
+  return out
+}
+
+/** The `count` most-probable d-subsets of E (E ordered most-likely-Over first), ranked by Σ logit(P Over).
+ *  Bounded: only combines the top (d + pad) most-likely games and caps the candidate pool, so it stays
+ *  cheap even for deep d where C(|E|,d) is astronomical. */
+function topSubsetsAtDepth(E: number[], d: number, count: number, logitOf: (i: number) => number): number[][] {
+  if (count <= 0 || d <= 0 || d > E.length) return []
+  const T = Math.min(E.length, d + 14)
+  const pool = E.slice(0, T)                                        // top-T most-likely-Over games
+  const cand = kSubsets(pool, d, Math.min(nCk(T, d), Math.max(count * 20, 500)))
+  cand.sort((a, b) => b.reduce((s, i) => s + logitOf(i), 0) - a.reduce((s, i) => s + logitOf(i), 0))
+  return cand.slice(0, count)
 }
 
 export interface FlipScatter {
@@ -406,39 +411,116 @@ export interface FlipScatter {
   base: BinaryAxis[]         // the N base legs, kickoff-sorted
   N: number
   reachedTarget: boolean
+  // ── covering-design guarantee ──
+  eligible: number[]         // base indices in the flip-eligible set E (signal ≥ threshold), most-likely first
+  completeDepth: number      // survives ANY ≤ this many simultaneous Overs among E (fully-covered layers)
+  partialDepth: number       // the next layer, only partially covered (0 = none)
+  partialCovered: number     // how many of that partial layer's C(|E|,d) patterns are covered
+  lockedCount: number        // N − |E| games locked Under in EVERY slip
+  threshold: number
+  maxFlipReached: number     // deepest flip-count present in any slip (how many legs the deepest slip turns Over)
 }
 
 /**
- * Build the K flip-variant slips (PROGRESSIVE coverage). base = the N legs, kickoff-sorted. Order:
- *   1. base — all Under (the single most-probable outcome)
- *   2. EVERY single-game Over, in kickoff order — so ANY one upset is survived, and a partial run
- *      (you stopped early) still covers the earliest games. This is the fix for "all slips died on
- *      game 1": the base + all singles guarantee coverage of any single Over, no matter how unlikely.
- *   3. the most-probable multi-Over combinations (2, 3, … flips) for the rest of the budget.
+ * Build the K slips as a LAYERED COVERING DESIGN over a signal-pruned eligible set (pedlas_v3 §cover).
+ *
+ * The base is N legs whose all-Under parlay × boost ≥ target. The signal (book × form × H2H, via
+ * overLikelihood) splits them:
+ *   • E = flip-eligible games with P(Over) ≥ threshold — the games that can realistically swing.
+ *   • the rest are LOCKED to Under in every slip (the signal says they're near-certain; we don't
+ *     spend coverage on them, which is what lets the budget buy real depth).
+ *
+ * We then emit slips layer by layer — all 0-flip (base), all 1-flip over E, all 2-flip, … — completing
+ * each layer while the budget lasts. Completing layers 0..m gives a hard guarantee: if AT MOST m of the
+ * eligible games go Over (and the locked games all stay Under), exactly one slip matches every result.
+ * The first layer that doesn't fit is filled with its most-probable patterns first (Σ logit(P Over)).
+ *
+ * Honest limits: still −vig, no edge (pedlas-no-model-edge). The guarantee is CONDITIONAL on the locked
+ * games holding Under; a single locked upset kills every slip. The signal only earns the right to lock.
  */
-export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; stake: number; K: number; maxPayout: number; boost?: BoostFn; flipTop?: number }): FlipScatter {
+export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; stake: number; K: number; maxPayout: number; boost?: BoostFn; overThreshold?: number; maxFlipFrac?: number; maxRun?: number }): FlipScatter {
   const boost = opts.boost ?? boostFor
+  const K = opts.K
+  const threshold = opts.overThreshold ?? 0.12
   const { legs, reached } = chooseBaseLegs(axes, opts.stake, opts.target, boost)
   const base = [...legs].sort((a, b) => a.kickoff.localeCompare(b.kickoff)) // kickoff order (index i = i-th to kick off)
   const N = base.length
 
+  // Eligible set E: games the signal gives a real Over chance (≥ threshold), most-likely first. If E is
+  // so small its full 2^|E| coverage wouldn't even fill the budget, extend down the ranking so we do.
+  const rankedByOver = base.map((_, i) => i).sort((a, b) => overLikelihood(base[b]) - overLikelihood(base[a]))
+  let E = rankedByOver.filter(i => overLikelihood(base[i]) >= threshold)
+  if (E.length < 1) E = rankedByOver.slice(0, Math.min(3, N))   // degenerate pool: cover the top few
+  const logitOf = (i: number) => { const o = Math.min(0.98, Math.max(0.02, overLikelihood(base[i]))); return Math.log(o / (1 - o)) }
+
   const zero = () => new Array(N).fill(0) as (0 | 1)[]
   const vectors: (0 | 1)[][] = []
   const seen = new Set<string>()
-  const push = (v: (0 | 1)[]) => { const k = v.join(''); if (!seen.has(k) && vectors.length < opts.K) { seen.add(k); vectors.push(v) } }
-
-  push(zero())                                                   // 1) base (all Under)
-  for (let i = 0; i < N; i++) { const v = zero(); v[i] = 1; push(v) }   // 2) every single Over, kickoff order
-
-  // 3) most-probable multi-Over sets (≥2 flips) — flip the least-confident games first
-  const logPen = base.map(a => { const o = overLikelihood(a); return Math.log(Math.max(1e-6, o)) - Math.log(Math.max(1e-6, 1 - o)) })
-  for (const set of topKFlipSets(logPen, opts.K + N + 8)) {
-    if (vectors.length >= opts.K) break
-    if (set.length < 2) continue
-    const v = zero(); for (const i of set) v[i] = 1; push(v)
+  const pushFlips = (flips: number[]): boolean => {
+    if (vectors.length >= K) return false
+    const v = zero(); for (const i of flips) v[i] = 1
+    const key = v.join(''); if (seen.has(key)) return false
+    seen.add(key); vectors.push(v); return true
   }
 
-  const slips: PedlasSlip[] = vectors.slice(0, opts.K).map((v, k) => {
+  pushFlips([])                                    // layer 0: base (all Under)
+  let completeDepth = 0, partialDepth = 0, partialCovered = 0
+
+  if (opts.maxFlipFrac && opts.maxFlipFrac > 0) {
+    // CONSTRAINED SCATTER: spread slips across flip-counts 0..maxFlip (≤ maxFlipFrac of the legs), but
+    // only over REALISTIC patterns — no more than maxFlipFrac Overs, and no run of ≥ maxRun consecutive
+    // Overs (kickoff order), so Overs stay scattered through the day. Slots per depth ∝ P(#Overs = d);
+    // most-probable combos first (signal). Trades hit-chance for reach vs. the layered default.
+    const maxFlip = Math.max(2, Math.min(E.length, Math.floor(opts.maxFlipFrac * N)))
+    const maxRun = opts.maxRun ?? 3
+    const runOK = (flips: number[]): boolean => {   // no maxRun consecutive kickoff positions all Over
+      if (!maxRun || maxRun <= 0) return true
+      const s = [...flips].sort((a, b) => a - b)
+      let run = 1
+      for (let i = 1; i < s.length; i++) { if (s[i] === s[i - 1] + 1) { if (++run >= maxRun) return false } else run = 1 }
+      return true
+    }
+    // Poisson-binomial pmf of #Overs among E (independence approx — used only to weight the allocation).
+    let pmf = [1]
+    for (const i of E) { const o = Math.min(0.98, Math.max(0.02, overLikelihood(base[i]))); const nx = new Array(pmf.length + 1).fill(0); for (let d = 0; d < pmf.length; d++) { nx[d] += pmf[d] * (1 - o); nx[d + 1] += pmf[d] * o } pmf = nx }
+    const w = (d: number) => pmf[d] ?? 0
+    const wsum = Array.from({ length: maxFlip }, (_, k) => w(k + 1)).reduce((s, x) => s + x, 0) || 1
+    const slots = new Array(maxFlip + 1).fill(0)
+    for (let d = 1; d <= maxFlip; d++) slots[d] = Math.min(nCk(E.length, d), Math.max(1, Math.round((K - 1) * w(d) / wsum)))
+    const budget = K - 1
+    let tot = slots.reduce((s, x) => s + x, 0)
+    while (tot > budget) { let dm = -1; for (let d = maxFlip; d >= 1; d--) if (slots[d] > 1 && (dm < 0 || w(d) < w(dm))) dm = d; if (dm < 0) { for (let d = maxFlip; d >= 1 && tot > budget; d--) while (slots[d] > 0 && tot > budget) { slots[d]--; tot-- } break } slots[dm]--; tot-- }
+    while (tot < budget) { let dx = -1; for (let d = 1; d <= maxFlip; d++) if (slots[d] < nCk(E.length, d) && (dx < 0 || w(d) > w(dx))) dx = d; if (dx < 0) break; slots[dx]++; tot++ }
+    for (let d = 1; d <= maxFlip; d++) {
+      let got = 0
+      for (const s of topSubsetsAtDepth(E, d, slots[d] * 3 + 30, logitOf)) { if (vectors.length >= K || got >= slots[d]) break; if (!runOK(s)) continue; if (pushFlips(s)) got++ }
+    }
+    // top up to K with the next-most-probable VALID patterns (best-first across depths)
+    for (let d = 1; d <= maxFlip && vectors.length < K; d++) for (const s of topSubsetsAtDepth(E, d, K, logitOf)) { if (vectors.length >= K) break; if (runOK(s)) pushFlips(s) }
+    partialDepth = maxFlip; partialCovered = vectors.length - 1
+  } else {
+    // LAYERED covering design (default): complete flip-layers 0,1,2,… while the budget lasts.
+    for (let k = 1; k <= E.length; k++) {
+      if (vectors.length >= K) break
+      const remaining = K - vectors.length
+      const total = nCk(E.length, k)
+      if (total <= remaining) {
+        for (const s of kSubsets(E, k)) pushFlips(s)  // COMPLETE this layer (order irrelevant to coverage)
+        completeDepth = k
+      } else {
+        // PARTIAL layer: the most-probable k-Over patterns first (Σ logit). Exact-sort when the layer is
+        // small; otherwise take lexicographic-first over the likelihood-sorted E (already most-likely).
+        const subs = total <= 20000 ? kSubsets(E, k) : kSubsets(E, k, remaining)
+        if (total <= 20000) subs.sort((a, b) => b.reduce((s, i) => s + logitOf(i), 0) - a.reduce((s, i) => s + logitOf(i), 0))
+        for (const s of subs) { if (vectors.length >= K) break; if (pushFlips(s)) partialCovered++ }
+        partialDepth = k
+        break
+      }
+    }
+  }
+  const maxFlipReached = vectors.reduce((m, v) => Math.max(m, v.reduce((a: number, b) => a + b, 0)), 0)
+
+  const slips: PedlasSlip[] = vectors.slice(0, K).map((v, k) => {
     const slipLegs = base.map((ax, i) => legFromAxis(ax, v[i] === 1 ? 'Over' : 'Under'))
     const skeleton: PedlasSlip = {
       slipId: k + 1, vector: v, legs: slipLegs, legCount: N, combinedOdds: 0, trueProb: 0,
@@ -446,7 +528,10 @@ export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; sta
     }
     return recomputeSlip(skeleton, base, opts.stake, opts.maxPayout, boost)
   })
-  return { slips, vectors: vectors.slice(0, opts.K), base, N, reachedTarget: reached }
+  return {
+    slips, vectors: vectors.slice(0, K), base, N, reachedTarget: reached,
+    eligible: E, completeDepth, partialDepth, partialCovered, lockedCount: N - E.length, threshold, maxFlipReached,
+  }
 }
 
 /** P(≥1 flip-slip wins) = P(the real U/O outcome exactly matches one of our vectors), correlated. */
@@ -476,6 +561,9 @@ export interface CoverageBookOptions {
   boost?: BoostFn
   legPref?: number          // desired legs per slip (e.g. 33). If unset, derive from targetWin.
   targetWin?: number
+  overThreshold?: number    // flip-eligible if P(Over) ≥ this (default 0.12 — the "balanced" gate)
+  maxFlipFrac?: number      // if set, SCATTER flips across depths up to this fraction of eligible legs
+  maxRun?: number           // in scatter mode: reject slips with ≥ this many consecutive Overs (default 3)
   beta?: number
   trials?: number
   seed?: number
@@ -494,6 +582,12 @@ export interface CoverageBook {
   medianOdds: number
   net: number
   note: string
+  // ── covering-design guarantee (see buildFlipScatter) ──
+  eligibleCount: number     // |E| — flip-eligible games
+  completeDepth: number     // survives ANY ≤ this many Overs among E
+  partialDepth: number      // next layer, partially covered
+  partialCovered: number    // patterns covered in that partial layer
+  lockedCount: number       // games locked Under in every slip
 }
 
 /**
@@ -508,19 +602,27 @@ export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions)
   const beta = opts.beta ?? calibrateBeta(pool)
   const target = opts.targetWin ?? opts.stake * 1000
 
-  // Flip-scatter: base = N legs whose Under parlay × boost ≥ target; variants flip likely-Over legs.
-  const scatter = buildFlipScatter(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost })
+  // Layered covering design: base = N legs whose Under parlay × boost ≥ target; the signal picks the
+  // flip-eligible set E and we cover its flip-layers as deep as the budget allows.
+  const scatter = buildFlipScatter(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun })
   const pAnyWin = simulateFlipScatter(scatter, { beta, trials: opts.trials ?? 3000 })
 
   const distinct = new Set(scatter.vectors.map(v => v.join(''))).size
+  const guarantee = opts.maxFlipFrac
+    ? `scatters flips 0..${scatter.maxFlipReached} of ${scatter.eligible.length} eligible legs across ${distinct} slips (fully covers ≤${scatter.completeDepth} Overs); ${scatter.lockedCount} locked.`
+    : `covers ANY ≤${scatter.completeDepth} of ${scatter.eligible.length} flip-eligible games going Over` +
+      (scatter.partialDepth ? ` (+${scatter.partialCovered} of the ${scatter.partialDepth}-Over patterns)` : '') +
+      `; ${scatter.lockedCount} games locked Under.`
   const note = !scatter.reachedTarget
     ? `only ${N0} qualifying games — base parlay reaches ~₦${Math.round(opts.stake * scatter.slips[0].combinedOdds * (1 + boost(scatter.N))).toLocaleString()}, short of the ₦${target.toLocaleString()} target. Add days / games.`
-    : distinct < K ? `pool of ${N0} games yields ${distinct} distinct variants < ${K} slips — add games for a fuller scatter.` : ''
+    : (distinct < K ? `pool of ${N0} games yields ${distinct} distinct variants < ${K} slips — add games for a fuller scatter. ` : '') + guarantee
   return {
     slips: scatter.slips, L: scatter.N, K, poolSize: N0, beta,
     pAnyWin, expWinners: pAnyWin, meanCutters: scatter.base.reduce((s, a) => s + cutProb(a), 0),
     medianPayout: median(scatter.slips.map(s => s.payout)),
     medianOdds: median(scatter.slips.map(s => s.combinedOdds)),
     net: 0, note,
+    eligibleCount: scatter.eligible.length, completeDepth: scatter.completeDepth,
+    partialDepth: scatter.partialDepth, partialCovered: scatter.partialCovered, lockedCount: scatter.lockedCount,
   }
 }

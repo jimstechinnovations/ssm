@@ -8,7 +8,7 @@ import type { BookAdapter } from '../books/types'
 import type { Fixture, PedlasBook, PedlasParams } from './types'
 import { DEFAULT_PARAMS } from './types'
 import { selectAxes, PEDLA_LINES, MIN_DOMINANT_ODDS } from './market-select'
-import { enrichAxes, enrichH2H, advisoryCoverage } from './enrich'
+import { enrichAxes, enrichSignals, advisoryCoverage } from './enrich'
 import { selectByQuality } from './quality'
 import { buildPedlasBook } from './build'
 import { buildCoverageBook, type CoverageBook } from './coverage'
@@ -115,6 +115,12 @@ export interface CoverageAdapterOptions {
   boost?: import('./boost').BoostFn
   /** Only build on games we have history for (falls back to all + a note if too few exist yet). */
   requireHistory?: boolean
+  /** Flip-eligible if P(Over) ≥ this. Higher ⇒ lock more safe games ⇒ deeper covering guarantee. */
+  overThreshold?: number
+  /** If set, SCATTER flips across depths up to this fraction of eligible legs (instead of layered). */
+  maxFlipFrac?: number
+  /** Scatter mode: reject slips with ≥ this many consecutive Overs (default 3). */
+  maxRun?: number
 }
 
 export interface CoverageResult {
@@ -172,20 +178,21 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     return { error: 'Not enough qualifying Under 4.5 games', detail: `Found ${axesAll.length} (need ≥4) even after extending to ${usedDateTo}.` }
   }
 
-  // HEAD-TO-HEAD advisory (parallel). The gate below can restrict selection to games where the two
-  // teams have actually met before (no team-form fallback — strictly H2H).
-  const enriched = await enrichH2H(axesAll)
-  const withHistory = enriched.filter(a => a.advisory != null)
+  // COMBINED-SIGNAL advisory (parallel): form (both teams' recent scoring) is the history backbone,
+  // with H2H as a bonus and the book line as the anchor. A game is "history-informed" iff it has form
+  // on BOTH teams — achievable, because form is per-team and reusable across fixtures.
+  const enriched = await enrichSignals(axesAll)
+  const withHistory = enriched.filter(a => a.advisory?.hasForm)
   const medOdds = [...enriched.map(a => a.underOdds)].sort((x, y) => x - y)[Math.floor(enriched.length / 2)]
   const needed = legsNeeded(medOdds)
 
-  // GATE: prefer history-backed games; if requireHistory and enough exist, use ONLY those. If not
-  // enough yet (sparse corpus until Sofascore lands), fall back to all + say so (never silently blind).
+  // GATE: when requireHistory, use ONLY the form-backed games if enough exist. If not enough yet
+  // (teams not synced into the corpus), fall back to all + say so (never silently blind).
   let pool = enriched
   let gateNote = ''
   if (opts.requireHistory) {
     if (withHistory.length >= needed) pool = withHistory
-    else gateNote = `Only ${withHistory.length}/${enriched.length} games have history (need ~${needed}). Placed on ALL games — add Sofascore history to gate properly.`
+    else gateNote = `Only ${withHistory.length}/${enriched.length} games are history-informed (need ~${needed}). Placed on ALL games — sync more teams' form to gate properly.`
   } else if (withHistory.length >= needed) {
     // not required, but if we have enough with history, prefer them (cleaner selection)
     pool = withHistory
@@ -194,6 +201,7 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
   const book = buildCoverageBook(pool, {
     budget: opts.budget, stake, maxPayout: Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
     boost: opts.boost ?? adapter.boostFor, legPref: opts.legPref, targetWin: opts.targetWin,
+    overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun,
   })
   const meta = {
     scanned: fixtures.length,
@@ -207,6 +215,12 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     medianOdds: book.medianOdds,
     meanCutters: book.meanCutters,
     beta: book.beta,
+    // covering-design guarantee (layered flip coverage over the signal-eligible set)
+    eligibleCount: book.eligibleCount,
+    completeDepth: book.completeDepth,
+    partialDepth: book.partialDepth,
+    partialCovered: book.partialCovered,
+    lockedCount: book.lockedCount,
     note: [book.note, gateNote].filter(Boolean).join(' '),
     advisory: advisoryCoverage(pool),
     ...sourceMeta,

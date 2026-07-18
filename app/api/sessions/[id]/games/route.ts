@@ -16,6 +16,10 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
 
   const [base] = await listSessionSlips(session.id, { withLegs: true, limit: 1 })
   const legs = (base?.legs as Array<{ fixtureId: number; game: string; league: string; kickoff: string; line: number; odds: number }> | undefined) ?? []
+  // Persisted live outcomes (from /settle), keyed by fixture — shown per game as it finishes.
+  const outcomes = new Map<number, { finished: boolean; total: number | null; over: boolean | null }>(
+    (((session.meta as { gameResults?: Array<{ fixtureId: number; finished: boolean; total: number | null; over: boolean | null }> } | null)?.gameResults) ?? []).map(g => [g.fixtureId, g]),
+  )
 
   const games = await Promise.all(
     legs.map(async (l) => {
@@ -26,7 +30,8 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
       const h2h = dedupe([...hr, ...ar].filter(isH2H))
       const history = h2h.map(m => ({ date: m.date, total: m.hg + m.ag })).sort((a, b) => a.date.localeCompare(b.date)).slice(-14)
       const overRate = history.length ? history.filter(h => h.total >= 5).length / history.length : null
-      return { fixtureId: l.fixtureId, game: l.game, league: l.league, kickoff: l.kickoff, line: l.line, underOdds: l.odds, history, overRate, source: history.length ? 'h2h' : 'none' }
+      const outcome = outcomes.get(l.fixtureId) ?? null
+      return { fixtureId: l.fixtureId, game: l.game, league: l.league, kickoff: l.kickoff, line: l.line, underOdds: l.odds, history, overRate, source: history.length ? 'h2h' : 'none', outcome }
     }),
   )
   games.sort((a, b) => a.kickoff.localeCompare(b.kickoff))

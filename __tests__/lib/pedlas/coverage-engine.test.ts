@@ -92,29 +92,61 @@ describe('coverage engine: honest simulation', () => {
   })
 })
 
-describe('coverage engine: progressive flip-scatter', () => {
-  it('covers the base (all Under) + EVERY single-game Over, so any single upset is survived', () => {
-    const pool = makePool(20)
-    const fam = buildFlipScatter(pool, { target: 100000, stake: 10, K: 500, maxPayout: 1e9, boost: noBoost })
-    const weight = (v: (0 | 1)[]) => v.reduce((a: number, b) => a + b, 0)
+describe('coverage engine: layered covering design', () => {
+  // 6 flip-eligible games (overP ≥ 0.20) + 4 locked games the signal says are near-certain Under (0.04)
+  const coveringPool = () => makePool(10, [0.30, 0.28, 0.26, 0.24, 0.22, 0.20, 0.04, 0.04, 0.04, 0.04])
+
+  it('splits into a signal-eligible set + locked games that are NEVER flipped', () => {
+    const fam = buildFlipScatter(coveringPool(), { target: 100000, stake: 10, K: 500, maxPayout: 1e9, boost: noBoost, overThreshold: 0.12 })
+    expect(fam.eligible.length).toBe(6)     // the 6 games with P(Over) ≥ 0.12
+    expect(fam.lockedCount).toBe(4)
     // base present
-    expect(fam.vectors.some(v => weight(v) === 0)).toBe(true)
-    // every single-game Over present (guarantee: no single upset kills all slips)
-    for (let i = 0; i < fam.N; i++) {
-      expect(fam.vectors.some(v => v[i] === 1 && weight(v) === 1)).toBe(true)
-    }
-    // slips are distinct
+    expect(fam.vectors.some(v => v.every(b => b === 0))).toBe(true)
+    // every ELIGIBLE game has a single-Over slip (complete layer 1)
+    for (const i of fam.eligible) expect(fam.vectors.some(v => v[i] === 1 && v.reduce((a: number, b) => a + b, 0) === 1)).toBe(true)
+    // locked games (indices 6..9) are never turned Over in ANY slip
+    for (let i = 6; i < 10; i++) expect(fam.vectors.every(v => v[i] === 0)).toBe(true)
+    // distinct
     expect(new Set(fam.vectors.map(v => v.join(''))).size).toBe(fam.vectors.length)
   })
 
-  it('orders single-Overs by kickoff, so a partial run still covers the earliest games', () => {
-    const pool = makePool(16)
-    const fam = buildFlipScatter(pool, { target: 50000, stake: 10, K: 40, maxPayout: 1e9, boost: noBoost })
-    // slip 2 = first game (earliest kickoff) Over; slip 3 = second game Over, …
-    const single = (k: number) => fam.vectors[k].findIndex(b => b === 1)
-    expect(fam.vectors[0].every(b => b === 0)).toBe(true) // slip 1 = base
-    expect(single(1)).toBe(0) // slip 2 flips game index 0 (earliest kickoff — base is kickoff-sorted)
-    expect(single(2)).toBe(1)
+  it('completes flip-layers in order — ALL C(|E|,k) patterns present for every k ≤ completeDepth', () => {
+    const fam = buildFlipScatter(coveringPool(), { target: 100000, stake: 10, K: 500, maxPayout: 1e9, boost: noBoost, overThreshold: 0.12 })
+    // 6 eligible ⇒ full 2^6 = 64 patterns fit within 500 ⇒ the whole cluster is covered
+    expect(fam.completeDepth).toBe(6)
+    expect(fam.vectors.length).toBe(64)
+    const present = new Set(fam.vectors.map(v => v.join('')))
+    for (let mask = 0; mask < (1 << fam.eligible.length); mask++) {
+      const v = new Array(fam.N).fill(0)
+      for (let b = 0; b < fam.eligible.length; b++) if (mask & (1 << b)) v[fam.eligible[b]] = 1
+      expect(present.has(v.join(''))).toBe(true)   // every outcome of the 6 eligible games is covered
+    }
+  })
+
+  it('scatter mode: spreads flips deep but obeys ≤maxFlipFrac Overs and no run of ≥maxRun', () => {
+    const overProbs = Array.from({ length: 20 }, () => 0.20) // 20 flip-eligible games
+    const fam = buildFlipScatter(makePool(20, overProbs), { target: 100000, stake: 10, K: 500, maxPayout: 1e9, boost: noBoost, overThreshold: 0.12, maxFlipFrac: 0.5, maxRun: 3 })
+    const runLen = (v: (0 | 1)[]) => { let m = 0, r = 0; for (const b of v) { r = b ? r + 1 : 0; if (r > m) m = r } return m }
+    for (const v of fam.vectors) {
+      expect(v.reduce((a: number, b) => a + b, 0)).toBeLessThanOrEqual(Math.floor(0.5 * fam.N)) // ≤ 50% Over
+      expect(runLen(v)).toBeLessThan(3)                                                          // no 3 consecutive Overs
+    }
+    expect(fam.maxFlipReached).toBeGreaterThan(2)   // it really does go deeper than the shallow default
+  })
+
+  it('when the cluster is too big for the budget, completes low layers then partially fills the next', () => {
+    const overProbs = Array.from({ length: 12 }, (_, i) => 0.30 - i * 0.014) // 12 eligible (all ≥ 0.13)
+    const fam = buildFlipScatter(makePool(12, overProbs), { target: 100000, stake: 10, K: 200, maxPayout: 1e9, boost: noBoost, overThreshold: 0.12 })
+    expect(fam.eligible.length).toBe(12)
+    // base(1) + singles C(12,1)=12 + doubles C(12,2)=66 = 79 ≤ 200; triples C(12,3)=220 overflow ⇒ partial
+    expect(fam.completeDepth).toBe(2)
+    expect(fam.partialDepth).toBe(3)
+    expect(fam.vectors.length).toBe(200)
+    // all singles and all doubles over E are present (the complete guarantee)
+    for (const [i, j] of fam.eligible.flatMap((a, x) => fam.eligible.slice(x + 1).map(b => [a, b] as const))) {
+      const v = new Array(fam.N).fill(0); v[i] = 1; v[j] = 1
+      expect(fam.vectors.some(w => w.join('') === v.join(''))).toBe(true)
+    }
   })
 })
 

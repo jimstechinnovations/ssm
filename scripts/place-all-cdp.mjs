@@ -227,6 +227,7 @@ function makeWorker(page, tag, parallel) {
     const release = await acquireSubmit()
     let placed = false, how = ''
     try {
+      await page.bringToFront().catch(() => {})   // active tab paints reliably for the Place/Confirm clicks
       let dialog = false
       for (let a = 1; a <= 6 && !dialog; a++) {
         await clickPlace(a % 2 === 1)
