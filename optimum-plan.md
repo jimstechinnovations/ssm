@@ -126,17 +126,25 @@ common-shock model the judge uses.
     `Σlogit` order for vectors that didn't appear in the sample.
 - Cost: one extra correlated MC pass at build (cheap; we already run 3k trials to report P(win)).
 
-### Change C — split into two builds; make the P/E layers DATA-CALIBRATED
-There are two legitimate targets, so ship two builds off the same pool:
-- **`optimum` (max-P-win):** P = 100%, E = ∞ — no layers; cover the true top-K correlated vectors
-  (Changes A+B). This is the honest ceiling for terminal `P(win)`.
-- **`shape` (high-survival moonshot):** keep the layers, but with **P and E calibrated from realised
-  results (§5G)**, not hunches. Default P = 0.5 (base-rate-justified, ~free), E from the measured
-  max-run distribution (start 3; tighten to 2 for more survival if 3-runs prove genuinely rare, or
-  relax if they're common). Label it honestly as a *survival-shape choice that trades a little
-  terminal P(win) for a taller curve* — the A/B (§4) prints the exact trade every build.
+### Change C — the P/E layers are part of the ONE moonshot engine, data-calibrated
 
-Do NOT treat the layers as a permanent on/off; treat E especially as a knob the data sets.
+**Engine essence (the only shipping build): the MOONSHOT at its best-possible coverage, combining
+every strategy.** Not the coverage objective (short parlays / frequent small wins) — that code is
+*retained but never the default*. The single default build layers ALL of:
+`history gate (form+H2H) → Under 4.5 @ ≥1.2 selection → book-only best-K ranking (A) → correlated
+allocation (B) → Layer 1 (P, free) → Layer 2 (E, calibrated) → progressive coverage`.
+
+"Best coverage" = cover the K most-probable **realistic** full-day vectors, where *most-probable* is
+A+B and *realistic* is the P/E layers. The one honest caveat lives entirely in **Layer 2 (E)**: it's
+the only strategy that can *cost* terminal `P(win)` (a real day may put E Overs in adjacent kickoff
+slots). So E is a **data-set knob**, not a fixed rule:
+- Default: P = 0.5 (base-rate-justified, ~free — keep), E = 3 (on).
+- The A/B (§4) prints `P(win)` **with vs without E** on every pool, so the cost is always visible.
+- §5G calibrates E from the realised max-run distribution: rare 3-runs ⇒ keep/tighten E (nearly free);
+  common ⇒ relax E to recover `P(win)`.
+
+The bare **`optimum-noE`** (A+B, Layer 1 only, no Layer 2) is **not a product mode** — it exists only
+as the A/B yardstick that measures Layer 2's cost. Shipping default = the full-strategy moonshot above.
 
 ---
 
@@ -280,12 +288,14 @@ the form/H2H verdict; nothing gets "improved" on a hunch.**
 
 ## 9. Build order (when we say go)
 
-1. **Optimum engine** (§2–3): `overLikelihoodForRanking` (book-only) + `topVectorsCorrelated` (B2,
-   correlated) + a `mode: 'optimum' | 'shape'` flag on `buildFlipScatter`; tests.
-2. **A/B harness** (§4): build `optimum` vs `shape` vs current on the same pool, same β/seed judge;
-   surface the table in the builder before placing.
-3. **`shape` build with data-set P/E** (§5G): default P = 0.5; E from the measured max-run
-   distribution once ≥ a few sessions exist.
+1. **The one moonshot engine** (§2–3, Change C): `overLikelihoodForRanking` (book-only) +
+   `topVectorsCorrelated` (B2, correlated), wired as the DEFAULT build with the full strategy stack
+   (history gate + ≥1.2 selection + Layer 1 free + Layer 2 E=3 + progressive). Coverage objective code
+   stays but is never the default. Tests.
+2. **A/B harness** (§4): on every pool, print `P(win)` for the shipping moonshot **with vs without
+   Layer 2 (`optimum-noE` yardstick)** so E's cost is always visible before placing.
+3. **Data-set E** (§5G): keep P = 0.5; set/relax E from the realised max-run distribution once ≥ a few
+   sessions exist. (E is the only knob the data moves; the rest of the stack is fixed.)
 4. **Cross-session learning read** (§5) after ≥ 3 settled sessions: β, price calibration (§5A), the
    form/H2H verdict (§5C), the §5F edge test, the P/E distribution (§5G); write a dated `## Learnings`.
 5. **Only if §5A/§5F shows real, repeated miscalibration:** prototype the **sharp-book reference**
