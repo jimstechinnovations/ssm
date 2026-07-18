@@ -96,10 +96,12 @@ export interface SessionPatch {
   meta?: Record<string, unknown>
 }
 
-export async function updateSession(id: string, patch: SessionPatch): Promise<boolean> {
+export async function updateSession(id: string, patch: SessionPatch, opts: { touch?: boolean } = {}): Promise<boolean> {
   try {
     const supabase = createServerClient()
-    const row: Record<string, unknown> = { updated_at: new Date().toISOString() }
+    // updated_at doubles as the placer heartbeat (run alive vs stalled). Non-placer writes (e.g. settle
+    // persisting game outcomes) pass touch:false so they don't make an idle session look like it's running.
+    const row: Record<string, unknown> = opts.touch === false ? {} : { updated_at: new Date().toISOString() }
     if (patch.status !== undefined) row.status = patch.status
     if (patch.dateTo !== undefined) row.date_to = patch.dateTo
     if (patch.legCount !== undefined) row.leg_count = patch.legCount
@@ -277,6 +279,24 @@ export async function listPlacedSlipsWithLegs(sessionId: string): Promise<Sessio
       returned: r.returned == null ? null : Number(r.returned), failureReason: r.failure_reason,
     }))
   } catch { return [] }
+}
+
+/** Rewrite potential_payout for a batch of slips (e.g. after a max-win cap fix). Chunked. */
+export async function updateSlipPayouts(sessionId: string, updates: { slipId: number; payout: number }[]): Promise<number> {
+  if (!updates.length) return 0
+  try {
+    const supabase = createServerClient()
+    let n = 0
+    const CHUNK = 25
+    for (let i = 0; i < updates.length; i += CHUNK) {
+      const res = await Promise.all(updates.slice(i, i + CHUNK).map(u =>
+        ((supabase.from('pedla_placements') as any)
+          .update({ potential_payout: u.payout, updated_at: new Date().toISOString() })
+          .eq('session_id', sessionId).eq('slip_id', u.slipId)) as Promise<{ error: unknown }>))
+      n += res.filter(r => !r.error).length
+    }
+    return n
+  } catch { return 0 }
 }
 
 /** Record a slip's settlement (won/lost) — status, settled flag, returned amount. */

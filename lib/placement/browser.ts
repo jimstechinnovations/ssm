@@ -87,7 +87,10 @@ export async function prepareBrowser(): Promise<BrowserStatus & { steps: string[
   return { ...st, steps }
 }
 
-/** Deeper status: connect over CDP, read the balance + REAL/SIM toggle. Cheap, read-only. */
+/** Deeper status: connect over CDP and read the balance + REAL/SIM toggle from the EXISTING SportyBet
+ *  tab. READ-ONLY and non-disruptive — it never navigates the browser or steals focus (doing so on a
+ *  status poll made Chrome jump to SportyBet and looked like a placement starting). If no SportyBet tab
+ *  is open it honestly reports unknown; use "Prepare browser" to open/log in. */
 export async function browserStatus(): Promise<BrowserStatus> {
   if (!(await cdpUp())) return { up: false }
   try {
@@ -95,8 +98,11 @@ export async function browserStatus(): Promise<BrowserStatus> {
     const browser = await chromium.connectOverCDP(CDP)
     try {
       const ctx = browser.contexts()[0]
-      const page = ctx?.pages().find(p => /sportybet\.com/.test(p.url())) ?? ctx?.pages()[0]
-      if (!page) return { up: true, loggedIn: false }
+      if (!ctx) return { up: true, loggedIn: false }
+      const page = ctx.pages().find(p => /sportybet\.com/.test(p.url()))
+      if (!page) return { up: true, loggedIn: false, mode: 'unknown' }   // don't navigate — non-disruptive
+      // Read-only wait for header hydration (no bringToFront / no navigate) to avoid a stale snapshot.
+      await page.waitForFunction(() => /Deposit|Bet History|My Account|NGN\s*[\d,.]/i.test(document.body.innerText), { timeout: 3500 }).catch(() => {})
       const info = await page.evaluate(() => {
         const t = document.body.innerText
         const pb = document.querySelector('input[name=phone]') as HTMLElement | null

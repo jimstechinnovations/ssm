@@ -40,6 +40,8 @@ interface Grade {
 const naira = (x: number) => '₦' + Math.round(x).toLocaleString('en-US')
 const when = (iso: string) => new Date(iso).toLocaleString()
 
+const PAGE_SIZE = 25
+
 export default function PlacementsPage() {
   const [rows, setRows] = useState<Placement[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
@@ -47,17 +49,30 @@ export default function PlacementsPage() {
   const [busy, setBusy] = useState<string | null>(null)
   const [msg, setMsg] = useState<string | null>(null)
   const [grades, setGrades] = useState<Record<string, Grade>>({})
+  const [loading, setLoading] = useState(true)
+  const [search, setSearch] = useState('')
+  const [offset, setOffset] = useState(0)
+  const [total, setTotal] = useState(0)
 
   const load = useCallback(async () => {
+    setLoading(true)
     try {
-      const r = await fetch(`/api/placements${includeDry ? '?includeDryRun=1' : ''}`)
+      const qs = new URLSearchParams({ limit: String(PAGE_SIZE), offset: String(offset) })
+      if (includeDry) qs.set('includeDryRun', '1')
+      if (search.trim()) qs.set('search', search.trim())
+      const r = await fetch(`/api/placements?${qs}`)
       const j = await r.json()
       setRows(j.placements ?? [])
+      setTotal(j.total ?? (j.placements?.length ?? 0))
       setSummary(j.summary ?? null)
     } catch { setMsg('Could not load the ledger.') }
-  }, [includeDry])
+    finally { setLoading(false) }
+  }, [includeDry, offset, search])
 
-  useEffect(() => { load() }, [load])
+  // reset to first page when the filter/search changes
+  useEffect(() => { setOffset(0) }, [includeDry, search])
+  // debounce loads (search typing)
+  useEffect(() => { const t = setTimeout(load, search ? 300 : 0); return () => clearTimeout(t) }, [load, search])
 
   async function autoSettle() {
     setBusy('settle'); setMsg(null)
@@ -131,23 +146,32 @@ export default function PlacementsPage() {
         </div>
       )}
 
-      <div className="mb-4 flex items-center gap-4 text-sm">
+      <div className="mb-4 flex flex-wrap items-center gap-3 text-sm">
+        <input
+          type="search" value={search} onChange={e => setSearch(e.target.value)}
+          placeholder="Search booking code, slip #, or book…"
+          className="w-64 max-w-full rounded-lg border border-zinc-300 bg-white px-3 py-1.5 text-sm text-zinc-800 placeholder:text-zinc-400 focus:border-zinc-400 focus:outline-none dark:border-zinc-600 dark:bg-zinc-900 dark:text-zinc-200" />
         <label className="flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
           <input type="checkbox" checked={includeDry} onChange={e => setIncludeDry(e.target.checked)} />
           include dry-run simulations
         </label>
+        {loading && <Spinner className="h-4 w-4 text-zinc-400" />}
+        <span className="text-zinc-500">{total} record{total === 1 ? '' : 's'}</span>
         {msg && <span className="text-zinc-600 dark:text-zinc-300">{msg}</span>}
       </div>
 
-      {rows.length === 0 && (
+      {loading && rows.length === 0 && (
+        <div className="flex items-center justify-center gap-2 rounded-lg border border-zinc-200 bg-white px-4 py-10 text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900">
+          <Spinner className="h-4 w-4" /> Loading the ledger…
+        </div>
+      )}
+      {!loading && rows.length === 0 && (
         <p className="rounded-lg border border-zinc-200 bg-white px-4 py-6 text-center text-sm text-zinc-500 dark:border-zinc-700 dark:bg-zinc-900">
-          No placements yet. Build a book, then run the bot from the builder page.
-          <br />
-          <span className="text-xs">(If you expected rows here, apply <code>supabase/migrations/005_placements.sql</code>.)</span>
+          {search.trim() ? `No placements match “${search.trim()}”.` : <>No placements yet. Build a book, then place from a session.<br /><span className="text-xs">(If you expected rows here, apply <code>supabase/migrations/005_placements.sql</code>.)</span></>}
         </p>
       )}
 
-      <div className="space-y-2">
+      <div className={`space-y-2 ${loading ? 'opacity-60' : ''}`}>
         {rows.map(p => {
           const g = grades[p.id]
           const legResults = p.legResults ?? g?.legResults ?? null
@@ -254,6 +278,20 @@ export default function PlacementsPage() {
           )
         })}
       </div>
+
+      {total > PAGE_SIZE && (
+        <div className="mt-4 flex items-center justify-between text-sm">
+          <span className="text-zinc-500">
+            {offset + 1}–{Math.min(offset + PAGE_SIZE, total)} of {total}
+          </span>
+          <div className="flex gap-2">
+            <button onClick={() => setOffset(o => Math.max(0, o - PAGE_SIZE))} disabled={offset === 0 || loading}
+              className="rounded-lg border border-zinc-300 px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Prev</button>
+            <button onClick={() => setOffset(o => o + PAGE_SIZE)} disabled={offset + PAGE_SIZE >= total || loading}
+              className="rounded-lg border border-zinc-300 px-3 py-1.5 font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-40 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Next</button>
+          </div>
+        </div>
+      )}
     </div>
   )
 }

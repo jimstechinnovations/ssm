@@ -38,7 +38,9 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
     const line = lineByFixture.get(fid) ?? 4.5
     return { fixtureId: fid, finished: !!r?.finished, total: r?.finished ? (r?.total ?? null) : null, over: r?.finished ? (r!.total > line) : null }
   })
-  await updateSession(session.id, { meta: { ...(session.meta ?? {}), gameResults, gameResultsAt: new Date().toISOString() } })
+  // touch:false — persisting outcomes must NOT bump the placer heartbeat (would make an idle session
+  // look like it's actively placing again).
+  await updateSession(session.id, { meta: { ...(session.meta ?? {}), gameResults, gameResultsAt: new Date().toISOString() } }, { touch: false })
 
   // ── 2. Settle the still-unsettled slips (early-cut) ──
   const unsettled = allPlaced.filter(s => s.status === 'placed')

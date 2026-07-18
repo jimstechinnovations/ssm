@@ -8,7 +8,7 @@
  */
 
 import { z } from 'zod'
-import { listPlacements, listOpenPlacements, settlePlacement, ledgerSummary } from '@/lib/placement/store'
+import { listPlacements, listPlacementsPage, listOpenPlacements, settlePlacement, ledgerSummary } from '@/lib/placement/store'
 import { gradeSlip } from '@/lib/placement/results'
 
 export const runtime = 'nodejs'
@@ -24,12 +24,16 @@ const ManualSettleSchema = z.object({
 const GradeSchema = z.object({ action: z.literal('grade'), id: z.string().uuid() })
 
 export async function GET(request: Request): Promise<Response> {
-  const includeDryRun = new URL(request.url).searchParams.get('includeDryRun') === '1'
-  const [placements, summary] = await Promise.all([
-    listPlacements({ limit: 100, includeDryRun }),
+  const url = new URL(request.url)
+  const includeDryRun = url.searchParams.get('includeDryRun') === '1'
+  const limit = Math.min(200, Math.max(1, Number(url.searchParams.get('limit')) || 25))
+  const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
+  const search = url.searchParams.get('search') ?? ''
+  const [page, summary] = await Promise.all([
+    listPlacementsPage({ limit, offset, includeDryRun, search }),
     ledgerSummary(),
   ])
-  return Response.json({ placements, summary })
+  return Response.json({ placements: page.rows, total: page.total, page: { limit, offset }, summary })
 }
 
 export async function POST(request: Request): Promise<Response> {

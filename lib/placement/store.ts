@@ -126,6 +126,28 @@ export async function listPlacements(opts: { limit?: number; includeDryRun?: boo
   }
 }
 
+/** Paged + searchable ledger for the /placements table. Search matches booking code, book, or slip #. */
+export async function listPlacementsPage(opts: { limit?: number; offset?: number; includeDryRun?: boolean; search?: string } = {}): Promise<{ rows: PlacementRecord[]; total: number }> {
+  try {
+    const supabase = createServerClient()
+    const limit = Math.min(200, Math.max(1, opts.limit ?? 50)), offset = Math.max(0, opts.offset ?? 0)
+    let q = supabase.from('pedla_placements').select('*', { count: 'exact' }).order('created_at', { ascending: false })
+    if (!opts.includeDryRun) q = q.eq('dry_run', false)
+    const s = (opts.search ?? '').trim().replace(/[%,()]/g, '')
+    if (s) {
+      const ors = [`booking_code.ilike.%${s}%`, `book_id.ilike.%${s}%`]
+      if (/^\d+$/.test(s)) ors.push(`slip_id.eq.${s}`)
+      q = q.or(ors.join(','))
+    }
+    q = q.range(offset, offset + limit - 1)
+    const { data, error, count } = await (q as any) as { data: any[] | null; error: unknown; count: number | null }
+    if (error || !data) return { rows: [], total: 0 }
+    return { rows: data.map(mapRow), total: count ?? data.length }
+  } catch {
+    return { rows: [], total: 0 }
+  }
+}
+
 /** Placed-but-unsettled real slips — the ones the results loop should chase. */
 export async function listOpenPlacements(): Promise<PlacementRecord[]> {
   try {
