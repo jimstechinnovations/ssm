@@ -11,9 +11,12 @@ results. See also `pedlas_v3.md`, and the memories: *pedlas-no-model-edge*, *ped
   tracker (`/api/sessions/[id]/survival`) with per-game cut/alive curve + realised Over-fraction &
   max-run (P/E check) + §5F Under-odds buckets, `/settle` outcome persistence, the session Survival
   panel, `recompute-payouts`, non-disruptive `browserStatus`, `/placements` paging+search. See §7.
-- ⏳ PENDING (build from this doc): the **optimum engine** (§2–3: book-only ranking + correlated
-  allocation), the **A/B harness** (§4), the **cross-session learning read** (§5), P/E calibration
-  from real data (§5G), and — only if the data warrants — the sharp-book reference (§6).
+- ✅ BUILT (2026-07-19): the **realizer engine** (§10) — correlated simulation build, book-only
+  ranking, layers on — is now the **DEFAULT** shipping build (`buildRealizer`; scatter/layered are
+  legacy behind `realizer:false`). A/B measured **realizer 1.067% vs scatter 0.800% P(win)** (+33%).
+- ⏳ PENDING (build from this doc): the `optimum-noE` A/B yardstick (§4, measure Layer 2's cost), the
+  **cross-session learning read** (§5) at ≥3 sessions, P/E calibration (§5G), and — only if the data
+  warrants — the sharp-book reference (§6).
 - Placed so far: **S-C76259** (500 real slips, scatter P=0.5 / E=3). Evidence log in §8.
 
 ---

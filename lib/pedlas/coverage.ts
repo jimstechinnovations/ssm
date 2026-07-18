@@ -679,13 +679,16 @@ export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions)
 
   // Layered covering design: base = N legs whose Under parlay × boost ≥ target; the signal picks the
   // flip-eligible set E and we cover its flip-layers as deep as the budget allows.
-  const scatter = opts.realizer
+  // DEFAULT = the realizer (optimum-plan §10): the shipping "moonshot at its best coverage". The scatter
+  // and layered paths are legacy, reached only by explicitly passing realizer:false.
+  const useRealizer = opts.realizer !== false
+  const scatter = useRealizer
     ? buildRealizer(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun, beta })
     : buildFlipScatter(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun })
   const pAnyWin = simulateFlipScatter(scatter, { beta, trials: opts.trials ?? 3000 })
 
   const distinct = new Set(scatter.vectors.map(v => v.join(''))).size
-  const guarantee = opts.realizer
+  const guarantee = useRealizer
     ? `realizer: ${distinct} most-frequent realistic paths (flips 0..${scatter.maxFlipReached}, ≤${Math.round((opts.maxFlipFrac ?? 0.5) * 100)}% Over, no ${opts.maxRun ?? 3}-run) from a correlated simulation.`
     : opts.maxFlipFrac
     ? `scatters flips 0..${scatter.maxFlipReached} of ${scatter.eligible.length} eligible legs across ${distinct} slips (fully covers ≤${scatter.completeDepth} Overs); ${scatter.lockedCount} locked.`
