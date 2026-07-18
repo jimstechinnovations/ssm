@@ -300,3 +300,64 @@ the form/H2H verdict; nothing gets "improved" on a hunch.**
    form/H2H verdict (§5C), the §5F edge test, the P/E distribution (§5G); write a dated `## Learnings`.
 5. **Only if §5A/§5F shows real, repeated miscalibration:** prototype the **sharp-book reference**
    (§6) — the sole +EV path. Nothing here is placed on a hunch.
+
+---
+
+## Learnings — 2026-07-18 (2 sessions: S-C76259 500-slip, S-03CFC8 20-slip; both fully cut)
+
+Directional only (n=2, ~53 finished games) — a log entry, not significance.
+
+- **Layer 1 (≤50% Over): CONFIRMED free.** Realised Over-fraction 25% (S-C76259, 6/24) and 28%
+  (S-03CFC8, 8/29). Never near 50%. Keep P = 0.5.
+- **Layer 2 (E=3): held both times.** Max consecutive-Over run = **2** in both sessions — no 3-run
+  occurred. Tentative support for E=3, and a hint E=2 might be safe (buys more survival). Needs volume
+  before tightening.
+- **§5F — leans AGAINST the "Under underpriced" hope.** In the **1.20–1.35** bucket, realised Over
+  ≈ **26%** combined (22% + 29%) vs implied ~22% — Over came *slightly more* than priced ⇒ if anything
+  Under 4.5 @ 1.2–1.35 is **mildly OVERpriced** (our parlays a touch *worse* than modelled), the
+  opposite of the edge we hoped. The 1.35+ bucket was ~calibrated (28% vs ~29%). No edge in our favour;
+  a faint lean the wrong way. n=2 — treat as noise-tinted signal, keep logging.
+- **Pool Over rate ≈ 25–28%/game** (we select the goals-prone `≥1.2` line) ⇒ ~6–8 Overs per 35-game
+  day ⇒ winning needs the exact 6–8-flip vector, which 500 slips can't cover ⇒ **all-cut is the
+  expected outcome**, confirmed twice.
+- **The survival CLIFF:** S-C76259 collapsed at **game 4 (Crystal Palace v Swindon, U@1.39, FT6) —
+  cut 378 in one step** (the field was concentrated on "g4 Under"). The riskiest (highest-odds) games
+  are the cutters, and a single early one flattens the curve. ⇒ motivates the **realizer** (§10):
+  spread survival more evenly across the risky games so no single result is a 378-cliff.
+
+Actions banked: keep P=0.5, E=3 (revisit E=2 at more volume); the §5F edge test stays open but is
+currently *neutral-to-negative*; build the optimum + realizer and A/B them.
+
+---
+
+## 10. The realizer engine (kickoff-ordered, survival-aware construction)
+
+The operator's idea: build the slips by walking games in **kickoff order** and, at each game, deciding
+"if this cuts, how many survive?" — progressively to the end, history-informed, layers on. Honestly
+assessed, **this is the *constructive* form of the optimum (§2 Change B), not a rival to it** — and
+it's the cleaner way to build it, because it produces the survival curve as a first-class output.
+
+**Algorithm (probability tree over kickoff order):**
+- Root holds the whole budget K. Games sorted by kickoff: g1..gN.
+- At game i, split the current node's budget between its **Under** and **Over** children in proportion
+  to the (correlated, book-only) branch probabilities `p_U : p_O` — i.e. *survivors down each branch ∝
+  that branch's probability*. That is exactly "if this cuts, how many survive."
+- **Layers as path constraints:** a path may not exceed `P·N` Overs (Layer 1) nor `E` consecutive
+  Overs (Layer 2); pruned branches hand their budget back to allowed siblings.
+- Recurse to leaves (full N-vectors); each distinct leaf = one slip. Taking the budget-weighted
+  highest-probability leaves recovers the **K most-probable realistic vectors** — the same target as
+  `topVectorsCorrelated`, but built so every node reports its survivor count.
+
+**What it buys (honest):**
+- A **first-class, smooth survival curve** and explicit "survivors if this game cuts" at every node —
+  which directly addresses the 378-cliff (spread budget so risky games don't concentrate survivors).
+- It **unifies** the operator's high-survival intuition with the P(win)-optimum: same covered set,
+  intuitive construction, layers baked in as path rules, history in the gate.
+
+**What it does NOT do (honest):** it cannot beat the **funnel** (≤1 distinct survivor at the end) or
+raise `P(win)` above the top-K ceiling, and given the §5F lean above it does not create EV. It shapes
+the curve and makes the build inspectable — that's its job.
+
+**Build + A/B:** implement `buildRealizer(pool, K, {betaShock, P, E})` alongside `topVectorsCorrelated`;
+A/B all three (realizer / optimum-sampled / current scatter) on the same pool with the same
+`simulateFlipScatter` judge. Expect: realizer ≈ optimum on `P(win)`, strictly smoother survival curve.
