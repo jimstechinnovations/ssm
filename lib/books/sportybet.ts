@@ -7,13 +7,29 @@
 // outcomes [{desc: "Over X" | "Under X", odds}]. We keep only half-lines (X.5) that map onto
 // the engine's OVER_UNDER_<line> markets.
 //
-// Win Boost: SportyBet NG has a multiple-bet bonus, but its table is NOT yet verified against
-// a live betslip — so this adapter uses ZERO boost (never overstate payouts, pedla_v1.md §3).
+// Win Boost: SportyBet NG's Multi Bet Bonus (MBB), plan MBB_1699286159923, qualifyingOddsLimit 1.20
+// (each leg must be ≥1.20 — the reason MIN_DOMINANT_ODDS is 1.20). CAPTURED from live betslips on
+// 2026-07-19 (scripts read the real Bonus vs Total Odds for ≥1.20 Under-4.5 slips, leg counts 3–38).
+// The bonus is odds-dependent (a min–max range per leg count); this table is the realized % for our
+// actual all-Under ≥1.20 profile — the LOWEST-odds slip at each leg count, so it never overstates the
+// higher-odds flipped slips (boostFromTable floors to the entry ≤ N). Verified — no longer zero.
 
 import 'server-only'
 import type { BookAdapter } from './types'
 import type { Fixture, OddsValue, MarketType } from '../pedlas/types'
-import { noBoost } from '../pedlas/boost'
+import { boostFromTable } from '../pedlas/boost'
+
+// SportyBet MBB — realized bonus fraction by qualifying leg count (captured from live betslips).
+const SPORTYBET_MBB: { legs: number; fraction: number }[] = [
+  { legs: 3, fraction: 0.05 }, { legs: 4, fraction: 0.09 }, { legs: 5, fraction: 0.15 },
+  { legs: 6, fraction: 0.19 }, { legs: 7, fraction: 0.23 }, { legs: 8, fraction: 0.26 },
+  { legs: 9, fraction: 0.30 }, { legs: 10, fraction: 0.34 }, { legs: 11, fraction: 0.38 },
+  { legs: 12, fraction: 0.43 }, { legs: 14, fraction: 0.54 }, { legs: 16, fraction: 0.64 },
+  { legs: 18, fraction: 0.76 }, { legs: 20, fraction: 0.92 }, { legs: 23, fraction: 1.14 },
+  { legs: 26, fraction: 1.39 }, { legs: 29, fraction: 1.66 }, { legs: 32, fraction: 1.90 },
+  { legs: 35, fraction: 2.31 }, { legs: 38, fraction: 2.74 },
+]
+const sportyBoost = boostFromTable(SPORTYBET_MBB)
 
 const BASE = 'https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents'
 const PAGE_SIZE = 100
@@ -128,8 +144,8 @@ export const sportybet: BookAdapter = {
   currency: 'NGN',
   minStake: 10, // verified against a real placed slip (₦10, 2026-07-13)
   maxPayout: 200_000_000, // SportyBet NGN max-win cap (₦200M; Betway's is ₦50M — don't confuse them)
-  boostFor: noBoost,     // real bonus table unverified — zero, never overstate
-  boostVerified: false,
+  boostFor: sportyBoost, // SportyBet MBB, captured from live betslips 2026-07-19 (see SPORTYBET_MBB)
+  boostVerified: true,
   feedVerified: true,
   credentialEnv: { username: 'SPORTY_NUMBER', password: 'SPORTY_PASSWORD' },
 
