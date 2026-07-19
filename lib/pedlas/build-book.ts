@@ -7,7 +7,7 @@ import 'server-only'
 import type { BookAdapter } from '../books/types'
 import type { Fixture, PedlasBook, PedlasParams } from './types'
 import { DEFAULT_PARAMS } from './types'
-import { selectAxes, PEDLA_LINES, MIN_DOMINANT_ODDS } from './market-select'
+import { selectAxes, PEDLA_LINES, PEDLAS_LINES, MIN_DOMINANT_ODDS } from './market-select'
 import { enrichAxes, enrichSignals, advisoryCoverage } from './enrich'
 import { selectByQuality } from './quality'
 import { buildPedlasBook } from './build'
@@ -126,6 +126,9 @@ export interface CoverageAdapterOptions {
   /** Realizer: blend history p̂ into the coverage marginal (0=book-only default, 1=history). The honest
    *  P(win) is always book-measured, so >0 only helps IF history beats the book (backtest: it doesn't). */
   signalWeight?: number
+  /** Anchor market policy. 'under_4.5' (default) = Under-4.5 anchors only. 'multi_line' = per game pick
+   *  the most reliable dominant anchor across all total lines (Over 1.5 for goals-games, Under 3.5, …). */
+  marketPolicy?: 'under_4.5' | 'multi_line'
   /** Drop games whose league matches any of these substrings (e.g. ["friendl"]) — the cutter leagues. */
   excludeLeagues?: string[]
 }
@@ -174,7 +177,11 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     } catch (err) {
       return { error: `Failed to fetch ${adapter.label} odds`, detail: err instanceof Error ? err.message : String(err) }
     }
-    axesAll = selectAxes(fixtures, { lines: PEDLA_LINES, requireDominantSide: 'Under' })
+    // Anchor policy: Under-4.5 only (default), or multi-line best-anchor per game (Over 1.5 / Under 3.5 /
+    // Under 4.5 / … — the most reliable dominant side across all total lines). Both are −vig.
+    axesAll = opts.marketPolicy === 'multi_line'
+      ? selectAxes(fixtures, { lines: PEDLAS_LINES })
+      : selectAxes(fixtures, { lines: PEDLA_LINES, requireDominantSide: 'Under' })
     // League exclusion (learnings 2026-07-18): friendlies go Over ~26–43% (the cutters) vs ~17% in
     // real competitions. Drop excluded leagues before selection so the pool is competitive-only.
     if (opts.excludeLeagues?.length) {

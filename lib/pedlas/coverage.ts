@@ -16,11 +16,24 @@
 
 import 'server-only'
 import type { BinaryAxis, PedlasSlip } from './types'
+import { sideOdds, sideProb, stateSide } from './types'
 import { legFromAxis, recomputeSlip } from './edit'
 import { boostFor, type BoostFn } from './boost'
 
-/** Cut probability for a game = the book's de-vigged P(Over 4.5). */
-export const cutProb = (a: BinaryAxis): number => Math.min(0.98, Math.max(0.02, a.overProb))
+// ── anchor/breakout helpers (multi-line aware) ────────────────────────────────────
+// Each axis has a DOMINANT (anchor) side = the more-probable side (state 0) and a BREAKOUT side
+// (state 1). For the classic Under-4.5 axis the anchor is Under and the breakout is Over, so every
+// formula below is IDENTICAL to the old Under-hardcoded one — but it now also builds correctly when
+// the anchor is Over (e.g. Over 1.5 for a goals-expected game) or a different line (Under 3.5, …).
+const anchorSideOf = (a: BinaryAxis): 'Over' | 'Under' => a.dominantSide ?? 'Under'
+const breakoutSideOf = (a: BinaryAxis): 'Over' | 'Under' => anchorSideOf(a) === 'Under' ? 'Over' : 'Under'
+/** Odds of the anchor (dominant) leg — what the all-anchor base parlay multiplies. */
+export const anchorOdds = (a: BinaryAxis): number => sideOdds(a, anchorSideOf(a))
+/** Probability the anchor FAILS (the game breaks out to state 1) — the honest "cut" probability. */
+export const breakoutProb = (a: BinaryAxis): number => sideProb(a, breakoutSideOf(a))
+
+/** Cut probability for a game = the book's de-vigged P(anchor fails). (Under-4.5 axis → P(Over 4.5).) */
+export const cutProb = (a: BinaryAxis): number => Math.min(0.98, Math.max(0.02, breakoutProb(a)))
 
 // ── deterministic RNG (reproducible plans) ──────────────────────────────────────
 function mulberry32(seed: number): () => number {
@@ -77,7 +90,7 @@ export function buildDiverseUnderSlips(pool: BinaryAxis[], opts: BuildSlipsOptio
   const buildLegs = (dropSet: Set<number>) => {
     const legs = []
     const legIdx: number[] = []
-    for (let i = 0; i < N; i++) if (!dropSet.has(i)) { legs.push(legFromAxis(pool[i], 'Under')); legIdx.push(i) }
+    for (let i = 0; i < N; i++) if (!dropSet.has(i)) { legs.push(legFromAxis(pool[i], anchorSideOf(pool[i]))); legIdx.push(i) }
     return { legs, legIdx }
   }
 
@@ -348,18 +361,21 @@ export function estimatePlacement(slipCount: number, secPerSlip = PLACE_SECONDS_
  *  is the combined book×form×H2H P(Over) — use it directly so the least-safe games flip first. No
  *  advisory (form missing) → book price only. */
 function overLikelihood(a: BinaryAxis): number {
-  const combined = a.advisory?.pHat
+  // advisory.pHat is P(Over 4.5) specifically — use it as the breakout likelihood ONLY for the classic
+  // Under-4.5 anchor (where breakout = Over 4.5). For any other anchor/line it doesn't apply → book price.
+  const classic = (a.dominantSide ?? 'Under') === 'Under' && a.line === 4.5
+  const combined = classic ? a.advisory?.pHat : undefined
   if (combined != null) return Math.min(0.95, Math.max(0.02, combined))
   return cutProb(a)
 }
 
-/** Fewest legs (highest Under odds first) whose base parlay × boost clears the target. */
+/** Fewest legs (highest ANCHOR odds first) whose all-anchor base parlay × boost clears the target. */
 function chooseBaseLegs(axes: BinaryAxis[], stake: number, target: number, boost: BoostFn): { legs: BinaryAxis[]; reached: boolean } {
-  const byOdds = [...axes].sort((a, b) => b.underOdds - a.underOdds)
+  const byOdds = [...axes].sort((a, b) => anchorOdds(b) - anchorOdds(a))
   const legs: BinaryAxis[] = []
   let prod = 1
   for (const a of byOdds) {
-    legs.push(a); prod *= a.underOdds
+    legs.push(a); prod *= anchorOdds(a)
     if (stake * prod * (1 + boost(legs.length)) >= target) return { legs, reached: true }
   }
   return { legs, reached: false } // used every available game and still short of target
@@ -521,7 +537,7 @@ export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; sta
   const maxFlipReached = vectors.reduce((m, v) => Math.max(m, v.reduce((a: number, b) => a + b, 0)), 0)
 
   const slips: PedlasSlip[] = vectors.slice(0, K).map((v, k) => {
-    const slipLegs = base.map((ax, i) => legFromAxis(ax, v[i] === 1 ? 'Over' : 'Under'))
+    const slipLegs = base.map((ax, i) => legFromAxis(ax, stateSide(ax, v[i])))   // bit 0 = anchor, 1 = breakout
     const skeleton: PedlasSlip = {
       slipId: k + 1, vector: v, legs: slipLegs, legCount: N, combinedOdds: 0, trueProb: 0,
       boostPct: 0, stake: opts.stake, payout: 0, uncappedPayout: 0, capped: false, evMultiple: 0, rankScore: 0,
@@ -563,9 +579,13 @@ export function buildRealizer(axes: BinaryAxis[], opts: { target: number; stake:
   // from the BOOK marginal, so history never inflates the reported chance (pedlas-no-model-edge).
   const w = Math.min(1, Math.max(0, opts.signalWeight ?? 0))
   const clampP = (p: number) => Math.min(0.98, Math.max(0.02, p))
+  // Marginal = P(anchor fails) = breakoutProb (state-1 rate). For an Under-4.5 axis this is P(Over 4.5),
+  // identical to before; for an Over-1.5 anchor it is P(Under 1.5), etc. The history blend (pHat = P(Over
+  // 4.5)) only applies to the classic Under-4.5 anchor — elsewhere the book breakout prob is used.
   const overP = base.map(a => {
-    const hist = a.advisory?.pHat
-    return clampP(w > 0 && hist != null ? (1 - w) * a.overProb + w * hist : a.overProb)
+    const classic = (a.dominantSide ?? 'Under') === 'Under' && a.line === 4.5
+    const hist = classic ? a.advisory?.pHat : undefined
+    return clampP(w > 0 && hist != null ? (1 - w) * breakoutProb(a) + w * hist : breakoutProb(a))
   })
   const beta = opts.beta ?? calibrateBeta(base)
   const aI = recentredIntercepts(overP, beta)
@@ -603,7 +623,7 @@ export function buildRealizer(axes: BinaryAxis[], opts: { target: number; stake:
   const maxFlipReached = chosen.reduce((m, f) => Math.max(m, f.length), 0)
   const slips: PedlasSlip[] = chosen.map((flips, k) => {
     const v = new Array(N).fill(0) as (0 | 1)[]; for (const i of flips) v[i] = 1
-    const slipLegs = base.map((ax, i) => legFromAxis(ax, v[i] === 1 ? 'Over' : 'Under'))
+    const slipLegs = base.map((ax, i) => legFromAxis(ax, stateSide(ax, v[i])))   // bit 0 = anchor, 1 = breakout
     const skeleton: PedlasSlip = {
       slipId: k + 1, vector: v, legs: slipLegs, legCount: N, combinedOdds: 0, trueProb: 0,
       boostPct: 0, stake: opts.stake, payout: 0, uncappedPayout: 0, capped: false, evMultiple: 0, rankScore: 0,
