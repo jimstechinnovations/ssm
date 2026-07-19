@@ -21,7 +21,9 @@ interface Game { fixtureId: number; game: string; league: string; kickoff: strin
 interface SurvGame { order: number; game: string; underOdds: number; bucket: string; overSlips: number; finished: boolean; total: number | null; over: boolean | null; cut: number; aliveAfter: number }
 interface SurvBucket { range: string; games: number; realisedOverRate: number | null; impliedOverApprox: number | null }
 interface Realised { overs: number; finished: number; overFraction: number | null; maxOverRun: number; layer1_over50: boolean | null }
-interface Survival { alive: number; dead: number; total: number; finishedGames: number; ofGames: number; realised?: Realised; curve: SurvGame[]; buckets: SurvBucket[] }
+interface SurvLeague { league: string; games: number; overs: number; overRate: number | null; slipsCut: number }
+interface TopSlip { slipId: number; bookingCode: string | null; payout: number; overs: number; status: string; alive: boolean }
+interface Survival { alive: number; dead: number; total: number; finishedGames: number; ofGames: number; realised?: Realised; curve: SurvGame[]; buckets: SurvBucket[]; leagues?: SurvLeague[]; topSlip?: TopSlip; winner?: { slipId: number; bookingCode: string | null; payout: number } | null }
 interface SlipLeg { fixtureId: number; game: string; kickoff: string; line: number; side: string; odds: number }
 interface SlipDetail { slipId: number; status: string; stake: number; combinedOdds: number; payout: number | null; bookingCode: string | null; betId: string | null; legs: SlipLeg[] }
 
@@ -247,6 +249,21 @@ export default function SessionPage() {
               {survBusy ? <Spinner className="h-3.5 w-3.5" /> : <Refresh className="h-3.5 w-3.5" />} Refresh
             </button>
           </div>
+          {survival.winner && (
+            <div className="mb-2 rounded-lg border border-green-300 bg-green-50 px-3 py-2 text-sm font-semibold text-green-800 dark:border-green-700/60 dark:bg-green-950/40 dark:text-green-300">
+              🎉 WON — slip #{survival.winner.slipId} · code {survival.winner.bookingCode} · ₦{Math.round(survival.winner.payout).toLocaleString()}
+            </div>
+          )}
+          {survival.topSlip && (
+            <div className="mb-2 flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg bg-zinc-50 px-3 py-2 text-xs dark:bg-zinc-800/50">
+              <span className="text-zinc-500">biggest-win slip:</span>
+              <span className="font-semibold text-zinc-800 dark:text-zinc-200">#{survival.topSlip.slipId}</span>
+              {survival.topSlip.bookingCode && <span className="rounded bg-zinc-200 px-1.5 py-0.5 font-mono text-zinc-700 dark:bg-zinc-700 dark:text-zinc-200">{survival.topSlip.bookingCode}</span>}
+              <span className="text-green-700 dark:text-green-400">₦{Math.round(survival.topSlip.payout).toLocaleString()}</span>
+              <span className="text-zinc-500">· {survival.topSlip.overs} Over</span>
+              <span className={survival.topSlip.alive ? 'font-semibold text-green-600 dark:text-green-400' : 'text-red-500'}>· {survival.topSlip.alive ? 'still alive' : 'cut'}</span>
+            </div>
+          )}
           {survival.realised && survival.realised.finished > 0 && (
             <div className="mb-2 flex flex-wrap items-center gap-x-4 gap-y-1 rounded-lg bg-zinc-50 px-3 py-2 text-xs dark:bg-zinc-800/50">
               <span className="text-zinc-500">realised (Layer P/E check):</span>
@@ -288,6 +305,22 @@ export default function SessionPage() {
                 ))}
               </div>
               <p className="mt-1 text-[11px] text-zinc-400">Realised &lt; implied in the ≥1.20 buckets ⇒ Under underpriced (value on our side). Needs many sessions to be real — this is a log, not a verdict.</p>
+            </div>
+          )}
+          {survival.leagues && survival.leagues.length > 0 && (
+            <div className="mt-3 border-t border-zinc-100 pt-3 dark:border-zinc-800">
+              <div className="mb-1 text-xs font-semibold text-zinc-700 dark:text-zinc-300">By league (finished games): Over rate + slips cut — safest first</div>
+              <div className="space-y-0.5 text-xs">
+                {survival.leagues.map(l => (
+                  <div key={l.league} className="flex items-center gap-3 text-zinc-600 dark:text-zinc-400">
+                    <span className="w-14"><strong className={(l.overRate ?? 0) > 0.25 ? 'text-red-500' : 'text-green-600 dark:text-green-400'}>{l.overRate != null ? Math.round(l.overRate * 100) : '—'}% O</strong></span>
+                    <span className="w-12 text-zinc-400">{l.overs}/{l.games}</span>
+                    <span className="w-20 text-zinc-500">cut {l.slipsCut}</span>
+                    <span className="flex-1 text-zinc-700 dark:text-zinc-300">{l.league}</span>
+                  </div>
+                ))}
+              </div>
+              <p className="mt-1 text-[11px] text-zinc-400">High-Over leagues (esp. friendlies) are the cutters — build with <code>exclude_leagues</code> to drop them.</p>
             </div>
           )}
         </section>

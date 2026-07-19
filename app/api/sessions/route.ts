@@ -41,6 +41,8 @@ const CreateSchema = z.object({
   max_run: z.number().int().min(2).max(10).optional(),
   /** Use the correlated SIMULATION engine (realizer, optimum-plan §10). */
   realizer: z.boolean().optional(),
+  /** Drop games whose league matches any of these substrings (e.g. ["friendl"] to skip friendlies). */
+  exclude_leagues: z.array(z.string()).optional(),
 }).refine(d => {
   const from = new Date(d.date_from), to = new Date(d.date_to)
   const maxTo = new Date(from); maxTo.setDate(maxTo.getDate() + 2)
@@ -88,7 +90,7 @@ export async function POST(request: Request): Promise<Response> {
     const built = await buildCoverageForAdapter(getBook(id), {
       dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake,
       targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost,
-      requireHistory: req.require_history, overThreshold: req.over_threshold, maxFlipFrac: req.max_flip_frac, maxRun: req.max_run, realizer: req.realizer,
+      requireHistory: req.require_history, overThreshold: req.over_threshold, maxFlipFrac: req.max_flip_frac, maxRun: req.max_run, realizer: req.realizer, excludeLeagues: req.exclude_leagues,
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
     if (built.usedDateTo && built.usedDateTo > usedDateTo) usedDateTo = built.usedDateTo

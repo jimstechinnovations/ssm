@@ -123,6 +123,8 @@ export interface CoverageAdapterOptions {
   maxRun?: number
   /** Use the correlated SIMULATION engine (realizer, optimum-plan §10) instead of the scatter. */
   realizer?: boolean
+  /** Drop games whose league matches any of these substrings (e.g. ["friendl"]) — the cutter leagues. */
+  excludeLeagues?: string[]
 }
 
 export interface CoverageResult {
@@ -170,6 +172,12 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
       return { error: `Failed to fetch ${adapter.label} odds`, detail: err instanceof Error ? err.message : String(err) }
     }
     axesAll = selectAxes(fixtures, { lines: PEDLA_LINES, requireDominantSide: 'Under' })
+    // League exclusion (learnings 2026-07-18): friendlies go Over ~26–43% (the cutters) vs ~17% in
+    // real competitions. Drop excluded leagues before selection so the pool is competitive-only.
+    if (opts.excludeLeagues?.length) {
+      const rx = new RegExp(opts.excludeLeagues.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i')
+      axesAll = axesAll.filter(a => !rx.test(a.league))
+    }
     if (axesAll.length >= 4) {
       const medOdds = [...axesAll.map(a => a.underOdds)].sort((x, y) => x - y)[Math.floor(axesAll.length / 2)]
       if (axesAll.length >= legsNeeded(medOdds)) break   // enough games to reach target

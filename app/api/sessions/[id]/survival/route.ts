@@ -14,7 +14,7 @@ import type { SlipLeg } from '@/lib/pedlas/settle-slips'
 export const runtime = 'nodejs'
 export const maxDuration = 120
 
-type Leg = SlipLeg & { game?: string; kickoff?: string; odds?: number; side: 'Under' | 'Over' }
+type Leg = SlipLeg & { game?: string; league?: string; kickoff?: string; odds?: number; side: 'Under' | 'Over' }
 const bucketOf = (o: number) => o < 1.1 ? '1.00–1.10' : o < 1.2 ? '1.10–1.20' : o < 1.35 ? '1.20–1.35' : '1.35+'
 
 export async function GET(_request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
@@ -34,13 +34,14 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
 
   // Game set: scan ALL slips' legs. underOdds = the price on any leg where the game is Under (every
   // game is Under in most slips), so it's always found regardless of which slip we look at.
-  const gmap = new Map<number, { fixtureId: number; game: string; kickoff: string; line: number; underOdds: number }>()
+  const gmap = new Map<number, { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number }>()
   for (const s of placed) for (const l of s.legs as Leg[]) {
-    const g = gmap.get(l.fixtureId) ?? { fixtureId: l.fixtureId, game: l.game ?? String(l.fixtureId), kickoff: l.kickoff ?? '', line: l.line ?? 4.5, underOdds: 0 }
+    const g = gmap.get(l.fixtureId) ?? { fixtureId: l.fixtureId, game: l.game ?? String(l.fixtureId), league: l.league ?? '—', kickoff: l.kickoff ?? '', line: l.line ?? 4.5, underOdds: 0 }
     if (l.side === 'Under' && l.odds && !g.underOdds) g.underOdds = l.odds
     gmap.set(l.fixtureId, g)
   }
   const games = [...gmap.values()].map(g => ({ ...g, underOdds: g.underOdds || 1 })).sort((a, b) => (a.kickoff || '').localeCompare(b.kickoff || ''))
+  const leagueOf = new Map(games.map(g => [g.fixtureId, g.league]))
 
   const results = await fetchResults(games.map(g => g.fixtureId))
 
@@ -92,9 +93,36 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
     overs, finished: finishedCount, overFraction: finishedCount ? overs / finishedCount : null,
     maxOverRun, layer1_over50: finishedCount ? overs / finishedCount > 0.5 : null, // true = a >50%-Over day (Layer 1 would have pruned reality)
   }
+
+  // Per-LEAGUE calibration: which competitions stayed Under (our friend) vs went Over (the cutters).
+  // "Where we survive most" = lowest Over rate. Directional across sessions → maybe restrict selection.
+  const lg: Record<string, { games: number; overs: number; cut: number }> = {}
+  for (const c of curve) {
+    if (!c.finished) continue
+    const name = leagueOf.get(c.fixtureId) || '—'
+    const b = (lg[name] ??= { games: 0, overs: 0, cut: 0 })
+    b.games++; if (c.over) b.overs++; b.cut += c.cut
+  }
+  const leagues = Object.entries(lg).map(([league, b]) => ({
+    league, games: b.games, overs: b.overs, overRate: b.games ? b.overs / b.games : null, slipsCut: b.cut,
+  })).sort((a, b) => (a.overRate ?? 1) - (b.overRate ?? 1))   // safest (lowest Over rate) first
+
+  // The biggest-jackpot slip (the "dream" ticket): its code, payout, and whether it's still alive.
+  let topIdx = 0
+  for (let i = 1; i < placed.length; i++) if ((placed[i].potentialPayout ?? 0) > (placed[topIdx].potentialPayout ?? 0)) topIdx = i
+  const aliveSet = new Set(alive)
+  const top = placed[topIdx]
+  const topSlip = {
+    slipId: top.slipId, bookingCode: top.bookingCode, payout: top.potentialPayout ?? 0,
+    overs: [...vectors[topIdx].values()].filter(s => s === 'Over').length,
+    status: top.status, alive: aliveSet.has(topIdx),
+  }
+  const winnerSlip = placed.find(s => s.status === 'won')
+  const winner = winnerSlip ? { slipId: winnerSlip.slipId, bookingCode: winnerSlip.bookingCode, payout: winnerSlip.returned ?? winnerSlip.potentialPayout ?? 0 } : null
+
   const snapshot = {
     at: new Date().toISOString(), total: vectors.length, alive: alive.length, dead: vectors.length - alive.length,
-    finishedGames: finishedCount, ofGames: games.length, realised, curve, buckets: bucketRows,
+    finishedGames: finishedCount, ofGames: games.length, realised, curve, buckets: bucketRows, leagues, topSlip, winner,
   }
   // keep the dataset (don't bump the placer heartbeat)
   await updateSession(session.id, { meta: { ...(session.meta ?? {}), learnings: snapshot } }, { touch: false })
