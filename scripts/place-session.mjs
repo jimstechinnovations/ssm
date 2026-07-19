@@ -65,11 +65,12 @@ for (let pg = 1; pg <= 10; pg++) {
 }
 const bad = [...poolGames.entries()].filter(([id]) => liveOk.get(id) !== true)
 if (bad.length > 0) {
-  console.error(`\n⛔ pre-flight FAILED — ${bad.length} game(s) suspended/started/missing from the live feed:`)
-  for (const [id, g] of bad) console.error(`   ${g.game} (fixture ${id}, kickoff ${g.kickoff})`)
-  console.error(`\nWith ${session.legCount}-leg slips these poison ~every slip. Rebuild the session (cheap) and place fresh.`)
-  if (!FORCE) process.exit(2)
-  console.error('--force given: continuing anyway (affected slips will be skipped one by one).')
+  // Suspended games just DROP from each slip — the placer places the remaining legs (shorter combos).
+  // So a few dead games are fine; only a fully-dead pool (nothing to place) is fatal.
+  console.error(`\n⚠ pre-flight: ${bad.length}/${poolGames.size} game(s) suspended — those legs drop; each slip places its remaining games (shorter combo):`)
+  for (const [id, g] of bad) console.error(`   ✗ ${g.game} (fixture ${id})`)
+  if (bad.length >= poolGames.size) { console.error('\n⛔ ALL pool games suspended — nothing to place. Rebuild fresh.'); if (!FORCE) process.exit(2) }
+  else console.error('→ continuing: placing the live legs of every slip.')
 } else {
   console.log('pre-flight OK: all pool games live + markets active')
 }
