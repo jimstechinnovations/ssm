@@ -193,9 +193,16 @@ function makeWorker(page, tag, parallel) {
 
     const betslipText = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? p.innerText : '' })
     const loadedLegs = (betslipText.match(/Over\/Under/g) || []).length
-    if (loadedLegs !== slip.legs.length) throw new Error(`wrong slip: ${loadedLegs} legs vs ${slip.legs.length} — NOT placing`)
-    const firstTeam = slip.legs[0]?.game?.split(' vs ')[0]?.trim()
-    if (firstTeam && !betslipText.includes(firstTeam)) throw new Error(`stale betslip (missing "${firstTeam}") — NOT placing`)
+    // The booking code IS this slip. If it loads SHORTER than built, some legs were suspended mid-run —
+    // the combo is still valid, so PLACE whatever games remain (default going forward). Reject ONLY when
+    // the slip is fully empty (0 legs — every game suspended / betslip didn't load) or somehow LONGER
+    // than built (impossible → wrong betslip).
+    if (loadedLegs > slip.legs.length || loadedLegs < 1) throw new Error(`empty/invalid betslip: ${loadedLegs} legs vs ${slip.legs.length} — NOT placing`)
+    if (loadedLegs < slip.legs.length) log(`  ℹ ${slip.legs.length - loadedLegs} leg(s) suspended — placing ${loadedLegs}-leg combo anyway`)
+    // Lenient staleness guard: at least one of this slip's own teams must be on the betslip (else it's a
+    // stale/old betslip, not this code's selections). Checks the first few legs so a dropped game 1 is OK.
+    const anyTeam = slip.legs.slice(0, 6).some(l => { const tm = l.game?.split(' vs ')[0]?.trim(); return tm && betslipText.includes(tm) })
+    if (!anyTeam) throw new Error(`stale/empty betslip (none of this slip's teams present) — NOT placing`)
 
     log(`slip ${idx}: code ${code} · ₦${stake} @ ${slip.combinedOdds?.toFixed?.(2) ?? '?'} · ${slip.legs.length} legs`)
     if (DRY) { log('  [dry] skipping Place/Confirm'); return { result: 'dry', code } }
@@ -304,10 +311,9 @@ async function runWorker(worker, queue) {
     } catch (e) {
       results.failed++; console.log(`  slip ${idx}: FAILED — ${e.message}`)
       if (!DRY) await report(sid, 'failed', { failureReason: e.message.slice(0, 200) })
-      // CIRCUIT BREAKER: a run of "wrong slip: N legs vs M" means a pool game got suspended mid-run —
-      // every remaining slip will fail the same way. Halt cleanly (rebuild + place fresh) instead of
-      // churning hundreds of failures.
-      if (/wrong slip/i.test(e.message)) { if (++wrongSlipStreak >= 5) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive "wrong slip" failures — a pool game was SUSPENDED. Halting. Rebuild the session (drops the dead game) and place the remaining budget fresh.\n`) } }
+      // CIRCUIT BREAKER: shorter slips now PLACE (suspended legs are fine). We only halt when slips load
+      // EMPTY/stale repeatedly — the betslip isn't loading at all (browser wedged) or every game died.
+      if (/empty\/invalid|stale/i.test(e.message)) { if (++wrongSlipStreak >= 8) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive empty/stale betslips — the betslip isn't loading (browser wedged?) or all games died. Halting.\n`) } }
       else wrongSlipStreak = 0
     }
     if (k < queue.length - 1) await sleep(rand(MIN, MAX) * 1000)
