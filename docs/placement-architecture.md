@@ -5,30 +5,36 @@ of a laptop running one debug Chrome. This is a design doc to agree the approach
 
 ## The current setup (works, but laptop-bound)
 - One debug Chrome (:9222) on the laptop, driven over CDP by `scripts/place-all-cdp.mjs`.
-- N workers = N tabs in one logged-in session. A **submit mutex** serializes Place→Confirm because
-  **SportyBet rejects concurrent submits from one account** ("Submission Failed").
+- N "workers" = N **tabs in one context**. A **submit mutex** serializes Place→Confirm.
 - Places 50%+ of 600 slips unsupervised, but: laptop sleep / network drops / occasional worker stalls
   make it unreliable, and it's not fast.
 
-## The hard bottleneck (why more tabs don't help much)
-**The submit is serial *per account*.** Place→Confirm is ~2s and can't overlap on one account, so:
-```
-600 slips ÷ 1 account × ~2s  ≈  20–30 min   (regardless of tab count)
-```
-Workers only parallelize the *non-submit* work (load booking code, set stake). And the order API body
-is **encrypted** (memory `sportybet-placement-api`), so we can't bypass the browser with a fast direct
-POST — we're stuck with browser clicks at ~2s/slip/account. **So the only real speed lever is more
-accounts, not more tabs.**
+## The REAL bottleneck — TESTED 2026-07-19 (scripts/test-parallel-place.mjs)
+Two layers, both real:
+1. **Shared betslip per context.** A browser context has ONE betslip, shared by every tab
+   (`betslips` / `betslipsSelections` in localStorage — verified). So tabs can't even *load* two codes at
+   once. Fix: separate contexts (each its own betslip; `newContext({storageState})` clones the login).
+2. **A per-account submit lock (server-side).** Even with two *independent* sessions (separate betslips,
+   same account), a live 4-slip / 3-session test collided: w1 and w2 submitted ~0.8s apart, w2 SUCCEEDED
+   and w1 got **"Submission Failed"** at the same instant. Balance-confirmed 2 of 4 placed (₦20 drop).
+   So concurrent Place→Confirm within ~2–4s **is** rejected per account — the operator's cross-device
+   "no block" was human-staggered timing, not truly simultaneous.
 
-## The three levers
+The order API body is also **encrypted** (memory `sportybet-placement-api`), so each submit is ~2s of
+browser clicks. Net: **submit is serial per account** (~2s/slip); only PREP (load/stake) parallelizes.
 
-### Lever 1 — Multi-account (the real speed win)
-The serial-submit limit is *per account*. With **M accounts placing in parallel**, throughput is ~M×:
+## The levers
+
+### Lever 1 — Multi-ACCOUNT (the real speed win)
+The submit lock is **per account**. True parallel submit ⇒ **M accounts**, each its own session + lock:
 ```
+600 slips ÷ 1 account  × ~2s  ≈  20–30 min
 600 slips ÷ 5 accounts × ~2s  ≈  4–6 min   →  near match-time feasible
 ```
-Each account gets a disjoint share of the 600 slips. Requires M funded accounts + M logged-in sessions.
-This is the single biggest change and the only way to hit "near match-time."
+Multi-SESSION on ONE account only parallelizes prep (still-serial submit) — a *modest* gain, and it needs
+a **cross-session submit mutex + retry** (the failed slip just needs a re-submit; it wasn't bad). Cloning
+the login into extra contexts works (`newContext({storageState})`, grounded), so a one-account rig can
+prep-ahead while submitting serially — but for near-match-time speed you need real accounts.
 
 ### Lever 2 — Off the laptop (reliability)
 Move the placer to an **always-on machine** (dedicated box, or a cloud/VPS). Headless Chrome + CDP works
