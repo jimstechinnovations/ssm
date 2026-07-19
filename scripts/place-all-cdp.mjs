@@ -218,13 +218,24 @@ function makeWorker(page, tag, parallel) {
       await sleep(1500)
     }
 
+    // Odds can shift right at submit time → the betslip shows "Accept Changes" instead of "Place Bet".
+    // Accept the new odds first (every attempt, not just once up front), then place. We accept because
+    // the slip is still the same games/sides — only the price moved; SportyBet recomputes the payout.
+    const acceptChangesIfAny = async () => {
+      return page.evaluate(() => {
+        const b = [...document.querySelectorAll('span,div,button,a')].find(e => e.children.length === 0 && /accept chang/i.test((e.textContent || '').trim()) && (e.offsetWidth || e.offsetHeight))
+        if (b) { b.click(); return true } return false
+      })
+    }
     const clickPlace = async (useLeaf) => {
+      if (await acceptChangesIfAny()) await sleep(700)   // clear an odds-change prompt before placing
       if (useLeaf) return clickLeaf('^place bet$')
       const btn = page.locator('.m-btn-wrapper, button.af-button', { hasText: /place bet/i }).first()
       if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
       return clickLeaf('^place bet$')
     }
     const clickConfirm = async (useLeaf) => {
+      if (await acceptChangesIfAny()) await sleep(600)   // odds can also shift on the About-to-pay dialog
       if (useLeaf) return clickLeaf('^confirm$')
       const btn = page.locator('.es-dialog-btn, [class*=dialog-btn], .m-btn-wrapper', { hasText: /^confirm$/i }).first()
       if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
