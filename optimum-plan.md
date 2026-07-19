@@ -364,3 +364,30 @@ the curve and makes the build inspectable — that's its job.
 **Build + A/B:** implement `buildRealizer(pool, K, {betaShock, P, E})` alongside `topVectorsCorrelated`;
 A/B all three (realizer / optimum-sampled / current scatter) on the same pool with the same
 `simulateFlipScatter` judge. Expect: realizer ≈ optimum on `P(win)`, strictly smoother survival curve.
+
+---
+
+## §11 — Measured verdict (2026-07-19, from S-863EB4 + a realistic 35-game probe)
+
+The realizer redesign question ("prevent the massive early cut; make layers + history + realizer
+work together") was measured, not asserted. Probe: K=600, β≈0.65, 35 games with book Over-probs
+0.02–0.27 and a history p̂ that disagrees with the book on some games.
+
+**Findings (all honest, book-measured P(win)):**
+1. **The realizer is already P(win)-optimal.** P(≥1 win) = Σ P(vector = reality); disjoint outcomes ⇒
+   maximized by the K most-probable vectors = exactly what the realizer covers. No dispersion/
+   re-selection can beat it (it would cover less-probable vectors → lower P(win)).
+2. **The early massive cut is the calibrated floor.** Game g going Over cuts (1−overProb_g)·K slips
+   (S-863EB4: Levadia overProb≈22% → 467/600). Over-share per game already ≈ its book Over-prob.
+   Cutting fewer = over-betting a low-prob event, which loses on the ~80% of days it stays Under.
+   → Not a bug. Unavoidable. The realizer is not broken.
+3. **Layer 1 / Layer 2 are ~free.** Relaxing P50/E3 → P90/E8 moved P(win) ~0.3%. The pruned days are
+   too rare to matter — keep them (safety at ~no cost).
+4. **Blending history LOWERS the honest chance.** signalWeight 0→0.5→1 gave 47.55% → 46.9% → 44.9%
+   (book-measured). History has no edge over the book (pedlas-no-model-edge), so the optimal weight
+   is **0**. Knob shipped off-by-default only so all signals *can* combine if history ever beats book.
+
+**What shipped (visibility, not prevention):** `cutRiskProfile()` → `CoverageBook.cutRisk` — per-game
+ifOverCut, risk-weight (underSlips×overProb), calibration gap, E[final alive]. The operator SEES the
+exposure and the near-50/50 games that carry the most variance, before placing. API knob `signal_weight`
+(0–1, default 0). No edge created; every slip still −vig.
