@@ -301,17 +301,18 @@ const workers = pages.map((p, w) => makeWorker(p, WORKERS > 1 ? `  [w${w}] ` : '
 await Promise.all(workers.map(w => w.prep()))
 
 // round-robin partition so load stays balanced even if some slips retry
+const MAX_TRIES = flag('--retries', 3)   // auto-retry a failed slip in-run before giving up
 const queues = Array.from({ length: WORKERS }, () => [])
-slips.forEach((s, i) => queues[i % WORKERS].push({ slip: s, idx: i + 1 }))
+slips.forEach((s, i) => queues[i % WORKERS].push({ slip: s, idx: i + 1, tries: 0 }))
 
-console.log(`\nCDP BATCH: ${slips.length} slip(s) · ${WORKERS} worker(s) · pacing ${MIN}-${MAX}s${DRY ? ' · DRY-RUN' : ''}\n`)
-const results = { placed: 0, skip: 0, dry: 0, suspended: 0, failed: 0 }
+console.log(`\nCDP BATCH: ${slips.length} slip(s) · ${WORKERS} worker(s) · pacing ${MIN}-${MAX}s · retries ${MAX_TRIES - 1}${DRY ? ' · DRY-RUN' : ''}\n`)
+const results = { placed: 0, skip: 0, dry: 0, suspended: 0, failed: 0, retried: 0 }
 const t0 = Date.now()
 
 async function runWorker(worker, queue) {
-  for (let k = 0; k < queue.length; k++) {
-    if (stopRequested) { console.log(`  [stopped] worker halting — ${queue.length - k} slip(s) left unplaced (resume later)`); break }
-    const { slip, idx } = queue[k]
+  while (queue.length) {
+    if (stopRequested) { console.log(`  [stopped] worker halting — ${queue.length} slip(s) left unplaced (resume later)`); break }
+    const { slip, idx, tries } = queue.shift()
     const sid = slip.slipId
     try {
       const { result: r, code } = await worker.placeOne(slip, idx)
@@ -320,18 +321,26 @@ async function runWorker(worker, queue) {
       else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
       else results.dry++
     } catch (e) {
-      results.failed++; console.log(`  slip ${idx}: FAILED — ${e.message}`)
-      if (!DRY) await report(sid, 'failed', { failureReason: e.message.slice(0, 200) })
+      // AUTO-RETRY: transient failures (odds change, click timeout, betslip not loaded) usually clear on a
+      // retry. Re-queue the slip (idempotency skips it if it actually placed) up to MAX_TRIES before giving
+      // up — so workers self-heal without a manual requeue.
+      if (tries + 1 < MAX_TRIES && !stopRequested) {
+        results.retried++; queue.push({ slip, idx, tries: tries + 1 })
+        console.log(`  slip ${idx}: retry ${tries + 1}/${MAX_TRIES - 1} — ${e.message.slice(0, 80)}`)
+      } else {
+        results.failed++; console.log(`  slip ${idx}: FAILED (after ${tries + 1} tries) — ${e.message}`)
+        if (!DRY) await report(sid, 'failed', { failureReason: e.message.slice(0, 200) })
+      }
       // CIRCUIT BREAKER: shorter slips now PLACE (suspended legs are fine). We only halt when slips load
       // EMPTY/stale repeatedly — the betslip isn't loading at all (browser wedged) or every game died.
       if (/empty\/invalid|stale/i.test(e.message)) { if (++wrongSlipStreak >= 8) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive empty/stale betslips — the betslip isn't loading (browser wedged?) or all games died. Halting.\n`) } }
       else wrongSlipStreak = 0
     }
-    if (k < queue.length - 1) await sleep(rand(MIN, MAX) * 1000)
+    if (queue.length) await sleep(rand(MIN, MAX) * 1000)
   }
 }
 
 await Promise.all(workers.map((w, i) => runWorker(w, queues[i])))
 const secs = ((Date.now() - t0) / 1000).toFixed(1)
-console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, failed ${results.failed}${DRY ? `, dry ${results.dry}` : ''}`)
+console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, retried ${results.retried}, failed ${results.failed}${DRY ? `, dry ${results.dry}` : ''}`)
 await browser.close()
