@@ -24,8 +24,8 @@ interface Realised { overs: number; finished: number; overFraction: number | nul
 interface SurvLeague { league: string; games: number; overs: number; overRate: number | null; slipsCut: number }
 interface TopSlip { slipId: number; bookingCode: string | null; payout: number; overs: number; status: string; alive: boolean }
 interface Survival { alive: number; dead: number; total: number; finishedGames: number; ofGames: number; realised?: Realised; curve: SurvGame[]; buckets: SurvBucket[]; leagues?: SurvLeague[]; topSlip?: TopSlip; winner?: { slipId: number; bookingCode: string | null; payout: number } | null }
-interface SlipLeg { fixtureId: number; game: string; kickoff: string; line: number; side: string; odds: number }
-interface SlipDetail { slipId: number; status: string; stake: number; combinedOdds: number; payout: number | null; bookingCode: string | null; betId: string | null; legs: SlipLeg[] }
+interface SlipLeg { fixtureId: number; game: string; kickoff: string; line: number; side: string; odds: number; suspended?: boolean }
+interface SlipDetail { slipId: number; status: string; stake: number; combinedOdds: number; payout: number | null; reconciledPayout?: number | null; bookingCode: string | null; betId: string | null; legs: SlipLeg[] }
 
 const naira = (n?: number | null) => n == null ? '—' : '₦' + Math.round(n).toLocaleString()
 const HEARTBEAT_STALE_MS = 25_000
@@ -160,6 +160,17 @@ export default function SessionPage() {
   }, [code])
   async function toggleSurvival() { setShowSurvival(v => !v); if (survival == null) await loadSurvival() }
 
+  const [recBusy, setRecBusy] = useState(false)
+  async function reconcile() {
+    setRecBusy(true); setMsg(null)
+    try {
+      const j = await (await fetch(`/api/sessions/${code}/reconcile`, { method: 'POST' })).json()
+      setMsg(j.error ? { text: j.error, tone: 'warn' }
+        : { text: j.affected ? `Reconciled ${j.affected} slip(s) with suspended legs (${(j.suspendedFixtures || []).length} game(s) dropped). Open a slip to see the adjusted payout.` : 'No suspended legs — all games live.', tone: 'ok' })
+    } catch { setMsg({ text: 'Could not reconcile.', tone: 'warn' }) }
+    finally { setRecBusy(false) }
+  }
+
   if (notFound.current) return <div className="mx-auto max-w-4xl px-4 py-16 text-center text-sm text-zinc-500">Session <span className="font-mono">{code}</span> not found. <a href="/" className="text-blue-600 hover:underline dark:text-blue-400">Back to dashboard</a></div>
   if (!session) return <Loading label={`Loading ${code}…`} />
 
@@ -185,6 +196,11 @@ export default function SessionPage() {
           {(summary?.placed ?? 0) > 0 && (
             <button onClick={toggleSurvival} disabled={survBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
               {survBusy ? <Spinner className="h-4 w-4" /> : <Layers className="h-4 w-4" />} Survival
+            </button>
+          )}
+          {(summary?.placed ?? 0) > 0 && (
+            <button onClick={reconcile} disabled={recBusy} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
+              {recBusy ? <Spinner className="h-4 w-4" /> : <Refresh className="h-4 w-4" />} Reconcile
             </button>
           )}
           <button onClick={clone} disabled={busy != null} className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-sm font-medium text-zinc-700 hover:bg-zinc-100 disabled:opacity-50 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
@@ -475,19 +491,24 @@ function SlipModal({ view, onClose, onCopy, copied }: { view: { slipId: number; 
           <>
             <div className="flex flex-wrap gap-x-4 gap-y-1 border-b border-zinc-100 px-4 py-2 text-xs text-zinc-600 dark:border-zinc-800 dark:text-zinc-400">
               <span>{d.legs.length} legs</span><span>odds {d.combinedOdds?.toFixed?.(1)}</span>
-              <span>stake {naira(d.stake)}</span><span>payout <strong className="text-zinc-800 dark:text-zinc-200">{naira(d.payout)}</strong></span>
+              <span>stake {naira(d.stake)}</span>
+              <span>payout {d.reconciledPayout != null && d.reconciledPayout !== d.payout
+                ? <><span className="text-zinc-400 line-through">{naira(d.payout)}</span> <strong className="text-amber-600 dark:text-amber-400">{naira(d.reconciledPayout)}</strong> <span className="text-[10px] text-amber-600 dark:text-amber-400">(leg suspended)</span></>
+                : <strong className="text-zinc-800 dark:text-zinc-200">{naira(d.payout)}</strong>}</span>
               {d.bookingCode && <button onClick={() => onCopy(d.bookingCode!)} className="inline-flex items-center gap-1 font-mono text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200">{d.bookingCode} {copied === d.bookingCode ? <Check className="h-3 w-3 text-green-500" /> : <Copy className="h-3 w-3 opacity-50" />}</button>}
             </div>
             <div className="max-h-[60vh] overflow-y-auto">
               {d.legs.map((l, i) => (
-                <div key={l.fixtureId} className="flex items-center gap-3 border-b border-zinc-100 px-4 py-2 text-sm last:border-0 dark:border-zinc-800">
+                <div key={l.fixtureId} className={`flex items-center gap-3 border-b border-zinc-100 px-4 py-2 text-sm last:border-0 dark:border-zinc-800 ${l.suspended ? 'opacity-60' : ''}`}>
                   <span className="w-5 text-right text-xs text-zinc-400">{i + 1}</span>
                   <div className="min-w-0 flex-1">
-                    <div className="truncate text-zinc-800 dark:text-zinc-200">{l.game}</div>
+                    <div className={`truncate text-zinc-800 dark:text-zinc-200 ${l.suspended ? 'line-through' : ''}`}>{l.game}</div>
                     <div className="text-xs text-zinc-400">{new Date(l.kickoff).toLocaleString([], { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}</div>
                   </div>
-                  <span className={`rounded px-2 py-0.5 text-xs font-semibold ${l.side === 'Under' ? 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300'}`}>{l.side} {l.line}</span>
-                  <span className="w-12 text-right text-xs text-zinc-500">{l.odds}</span>
+                  {l.suspended
+                    ? <span className="rounded bg-amber-100 px-2 py-0.5 text-xs font-semibold text-amber-700 dark:bg-amber-950/50 dark:text-amber-300">SUSPENDED · dropped</span>
+                    : <span className={`rounded px-2 py-0.5 text-xs font-semibold ${l.side === 'Under' ? 'bg-green-100 text-green-700 dark:bg-green-950/50 dark:text-green-300' : 'bg-red-100 text-red-700 dark:bg-red-950/50 dark:text-red-300'}`}>{l.side} {l.line}</span>}
+                  <span className={`w-12 text-right text-xs text-zinc-500 ${l.suspended ? 'line-through' : ''}`}>{l.odds}</span>
                 </div>
               ))}
             </div>
