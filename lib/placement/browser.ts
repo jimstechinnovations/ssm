@@ -113,10 +113,14 @@ export async function browserStatus(): Promise<BrowserStatus> {
         return { loggedIn, bal, mode }
       }).catch(() => ({ loggedIn: false, bal: null as string | null, mode: 'unknown' as const }))
       const balance = info.bal ? parseFloat(info.bal.replace(/,/g, '')) : null
-      // The REAL/SIM toggle only shows in the betslip; on other views it's 'unknown'. When logged in
-      // with a balance, infer from size (SIM wallets are large play-money; >₦100k = SIM, else REAL).
+      // The REAL/SIM toggle CLASS read is UNRELIABLE — proven 2026-07-20: it reported SIM on a REAL
+      // ₦29.29 account (the placer then confirmed REAL via a ₦20 balance-drop). So when logged in with a
+      // known balance, trust the BALANCE as the mode signal (SIM play-money is large; REAL is small),
+      // not the toggle class. This is a best-effort GATE only — the ground truth is still the per-slip
+      // balance-drop confirmation (1 worker) before real money moves. Toggle read is a last-resort
+      // fallback when the balance is unknown.
       let mode = info.mode as BrowserStatus['mode']
-      if (mode === 'unknown' && info.loggedIn && balance != null) mode = balance > 100_000 ? 'SIM' : 'REAL'
+      if (info.loggedIn && balance != null) mode = balance > 100_000 ? 'SIM' : 'REAL'
       return { up: true, loggedIn: info.loggedIn, balance, mode }
     } finally { await browser.close() }
   } catch { return { up: true } }
