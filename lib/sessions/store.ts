@@ -190,6 +190,8 @@ export async function updateSessionSlipStatus(sessionId: string, slipId: number,
   betId?: string | null
   failureReason?: string | null
   live?: boolean
+  droppedFixtures?: number[]
+  placedLegs?: number
 }): Promise<boolean> {
   try {
     const supabase = createServerClient()
@@ -198,6 +200,19 @@ export async function updateSessionSlipStatus(sessionId: string, slipId: number,
     if (patch.betId !== undefined) row.bet_id = patch.betId
     if (patch.failureReason !== undefined) row.failure_reason = patch.failureReason
     if (patch.status === 'placed') { row.dry_run = !patch.live ? true : false; row.confirmed_by = 'balance+history'; row.placed_at = new Date().toISOString(); row.failure_reason = null } // clear any prior failure on successful retry
+    // Match the DB to what was ACTUALLY placed: if the placer dropped legs (games suspended at placement),
+    // mark those legs suspended in the stored slip and record the real leg count, so settle/survival/payout
+    // all reflect the shorter combo that was truly staked — not the built 32-leg record.
+    if (patch.status === 'placed' && patch.droppedFixtures?.length) {
+      const { data: cur } = await (supabase.from('pedla_placements')
+        .select('legs').eq('session_id', sessionId).eq('slip_id', slipId).single()) as { data: { legs: unknown } | null }
+      const legs = (cur?.legs as Array<{ fixtureId: number; suspended?: boolean }> | undefined) ?? []
+      if (legs.length) {
+        const drop = new Set(patch.droppedFixtures)
+        row.legs = legs.map(l => drop.has(l.fixtureId) ? { ...l, suspended: true } : l)
+      }
+      if (patch.placedLegs != null) row.leg_count = patch.placedLegs
+    }
     const { error } = await ((supabase.from('pedla_placements') as any)
       .update(row).eq('session_id', sessionId).eq('slip_id', slipId)) as { error: unknown }
     return !error

@@ -10,8 +10,11 @@ import { getSession, listPlacedSlipsWithLegs } from '@/lib/sessions/store'
 import { createServerClient } from '@/lib/supabase/server'
 import { getBookConfig } from '@/lib/books/config-store'
 import { getBook } from '@/lib/books/registry'
-import { boostedPayout, boostFromTable } from '@/lib/pedlas/boost'
-import type { BoostFn } from '@/lib/pedlas/boost'
+import { boostFromTable, reconciledPayout } from '@/lib/pedlas/boost'
+import { fetchResults } from '@/lib/pedlas/results'
+
+// re-exported for callers that import it from this route (e.g. the settle route)
+export { reconciledPayout }
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
@@ -38,14 +41,6 @@ async function suspendedFixtures(ids: number[]): Promise<Set<number>> {
   return new Set([...want].filter(id => !active.has(id)))
 }
 
-/** Reconciled payout = only the non-suspended legs, with the book's boost for the shorter combo, capped. */
-export function reconciledPayout(legs: Leg[], stake: number, boost: BoostFn, cap: number): number {
-  const live = legs.filter(l => !l.suspended)
-  if (live.length === 0) return 0
-  const odds = live.reduce((p, l) => p * (l.odds || 1), 1)
-  return Math.min(boostedPayout(stake, odds, live.length, boost), cap)
-}
-
 export async function POST(_request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
   const { id } = await ctx.params
   const session = await getSession(id)
@@ -55,8 +50,13 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
   if (placed.length === 0) return Response.json({ checked: 0, affected: 0, note: 'no placed slips' })
 
   const fixtureIds = [...new Set(placed.flatMap(s => (s.legs as Leg[]).map(l => l.fixtureId)))]
-  const suspended = await suspendedFixtures(fixtureIds)
-  if (suspended.size === 0) return Response.json({ checked: placed.length, affected: 0, suspendedFixtures: [] })
+  const notActive = await suspendedFixtures(fixtureIds)
+  // A FINISHED game is also absent from the upcoming feed — but it played, so it is NOT a dropped leg.
+  // Only games that are missing from the feed AND have not finished are genuinely suspended/void/pulled.
+  // (Without this, running reconcile after kickoff would mark every played game as "suspended".)
+  const results = await fetchResults([...notActive])
+  const suspended = new Set([...notActive].filter(id => !results.get(id)?.finished))
+  if (suspended.size === 0) return Response.json({ checked: placed.length, affected: 0, suspendedFixtures: [], note: 'no void legs (games either live or finished)' })
 
   const cfg = await getBookConfig(session.bookIds[0]); const adapter = getBook(session.bookIds[0])
   const boost = cfg.boost ? boostFromTable(cfg.boost) : adapter.boostFor

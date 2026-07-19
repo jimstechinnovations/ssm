@@ -70,3 +70,12 @@ export function boostedPayout(stake: number, combinedOdds: number, legCount: num
 export function honestEvMultiple(trueProb: number, combinedOdds: number, legCount: number, boost: BoostFn = boostFor): number {
   return trueProb * boostedPayout(1, combinedOdds, legCount, boost)
 }
+
+/** Reconciled payout when some legs were dropped at placement: only the LIVE (non-suspended) legs count,
+ *  with the book's boost recomputed for the shorter combo, capped. Matches what was actually staked. */
+export function reconciledPayout(legs: { odds?: number; suspended?: boolean }[], stake: number, boost: BoostFn, cap: number): number {
+  const live = legs.filter(l => !l.suspended)
+  if (live.length === 0) return 0
+  const odds = live.reduce((p, l) => p * (l.odds || 1), 1)
+  return Math.min(boostedPayout(stake, odds, live.length, boost), cap)
+}

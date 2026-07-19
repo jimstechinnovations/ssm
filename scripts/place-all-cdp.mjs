@@ -223,6 +223,15 @@ function makeWorker(page, tag, parallel) {
       return n
     })
     if (removed) { log(`  ⏭ removed ${removed} suspended leg(s) from slip — placing the rest`); await page.waitForTimeout(700) }
+
+    // Record WHICH legs are actually being placed vs dropped, so the DB matches reality (not the built
+    // 32-leg record). A leg is "dropped" if its home team is no longer on the (post-removal) betslip.
+    const finalText = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? p.innerText : '' })
+    const droppedFixtures = slip.legs
+      .filter(l => { const tm = l.game?.split(' vs ')[0]?.trim(); return tm && !finalText.includes(tm) })
+      .map(l => l.fixtureId)
+    if (droppedFixtures.length) log(`  ↳ dropped fixtures ${droppedFixtures.join(', ')} — recording ${slip.legs.length - droppedFixtures.length}-leg combo to DB`)
+
     // NOTE: "Accept Changes" is NOT a separate blocker — it's the SAME primary green button relabelled
     // when odds move. Clicking it accepts the new price and relabels back to "Place Bet". So the place/
     // confirm clickers below just target that button by EITHER label; clicking it repeatedly walks
@@ -282,7 +291,7 @@ function makeWorker(page, tag, parallel) {
     if (placed) {
       placedLog[idem] = { placed: true, code, how, at: new Date().toISOString(), stake }; savePlaced()
       log(`  ✓ PLACED (${how}) — code ${code}`)
-      return { result: 'placed', code }
+      return { result: 'placed', code, droppedFixtures, placedLegs: slip.legs.length - droppedFixtures.length }
     }
     throw new Error('not confirmed (no success signal); check Bet History')
   }
@@ -327,8 +336,8 @@ async function runWorker(worker, queue) {
     const { slip, idx, tries } = queue.shift()
     const sid = slip.slipId
     try {
-      const { result: r, code } = await worker.placeOne(slip, idx)
-      if (r === 'placed') { results.placed++; wrongSlipStreak = 0; if (!DRY) await report(sid, 'placed', { bookingCode: code }) }
+      const { result: r, code, droppedFixtures, placedLegs } = await worker.placeOne(slip, idx)
+      if (r === 'placed') { results.placed++; wrongSlipStreak = 0; if (!DRY) await report(sid, 'placed', { bookingCode: code, droppedFixtures, placedLegs }) }
       else if (r === 'skip') { results.skip++; wrongSlipStreak = 0; if (!DRY && code) await report(sid, 'placed', { bookingCode: code }) } // already placed → ensure code persisted
       else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
       else results.dry++

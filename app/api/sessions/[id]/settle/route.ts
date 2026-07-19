@@ -11,6 +11,9 @@
 import { getSession, updateSession, listPlacedSlipsWithLegs, settleSessionSlip, sessionSummary } from '@/lib/sessions/store'
 import { fetchResults } from '@/lib/pedlas/results'
 import { settleSlip, cutLegs, type SlipLeg } from '@/lib/pedlas/settle-slips'
+import { getBookConfig } from '@/lib/books/config-store'
+import { getBook } from '@/lib/books/registry'
+import { boostFromTable, reconciledPayout } from '@/lib/pedlas/boost'
 
 export const runtime = 'nodejs'
 export const maxDuration = 120
@@ -42,15 +45,26 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
   // look like it's actively placing again).
   await updateSession(session.id, { meta: { ...(session.meta ?? {}), gameResults, gameResultsAt: new Date().toISOString() } }, { touch: false })
 
-  // ── 2. Settle the still-unsettled slips (early-cut) ──
+  // ── 2. Settle the still-unsettled slips (early-cut), judged on the legs ACTUALLY placed ──
+  // A won slip pays only its live legs: if any leg was dropped at placement (suspended), the real bet is
+  // the shorter combo, so credit the reconciled (shorter) payout — not the original 32-leg payout.
+  const anyDropped = allPlaced.some(s => (s.legs as (SlipLeg & { suspended?: boolean })[]).some(l => l.suspended))
+  let boost = null as ReturnType<typeof boostFromTable> | null, cap = Infinity
+  if (anyDropped) {
+    const cfg = await getBookConfig(session.bookIds[0]); const adapter = getBook(session.bookIds[0])
+    boost = cfg.boost ? boostFromTable(cfg.boost) : adapter.boostFor
+    cap = Math.min(cfg.maxPayout ?? adapter.maxPayout, adapter.maxPayout)
+  }
   const unsettled = allPlaced.filter(s => s.status === 'placed')
   let won = 0, lost = 0, pending = 0
   for (const s of unsettled) {
-    const legs = s.legs as SlipLeg[]
+    const legs = s.legs as (SlipLeg & { suspended?: boolean; odds?: number })[]
     const verdict = settleSlip(legs, results)
     if (verdict === 'pending') { pending++; continue }
-    const returned = verdict === 'won' ? (s.potentialPayout ?? 0) : 0
-    const note = verdict === 'lost' ? `cut by ${cutLegs(legs, results).slice(0, 2).map(l => l.fixtureId).join(', ')}` : 'all legs landed'
+    const dropped = legs.some(l => l.suspended)
+    const returned = verdict !== 'won' ? 0
+      : (dropped && boost) ? reconciledPayout(legs, Number(s.stake), boost, cap) : (s.potentialPayout ?? 0)
+    const note = verdict === 'lost' ? `cut by ${cutLegs(legs, results).slice(0, 2).map(l => l.fixtureId).join(', ')}` : (dropped ? 'live legs landed (shorter combo)' : 'all legs landed')
     await settleSessionSlip(session.id, s.slipId, verdict === 'won', returned, note)
     if (verdict === 'won') won++; else lost++
   }

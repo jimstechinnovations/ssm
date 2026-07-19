@@ -14,7 +14,7 @@ import type { SlipLeg } from '@/lib/pedlas/settle-slips'
 export const runtime = 'nodejs'
 export const maxDuration = 120
 
-type Leg = SlipLeg & { game?: string; league?: string; kickoff?: string; odds?: number; side: 'Under' | 'Over' }
+type Leg = SlipLeg & { game?: string; league?: string; kickoff?: string; odds?: number; side: 'Under' | 'Over'; suspended?: boolean }
 const bucketOf = (o: number) => o < 1.1 ? '1.00–1.10' : o < 1.2 ? '1.10–1.20' : o < 1.35 ? '1.20–1.35' : '1.35+'
 
 export async function GET(_request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {
@@ -26,9 +26,11 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
   const slips = await listSessionSlips(session.id, { withLegs: true, limit: 2000 })
   const placed = slips.filter(s => ['placed', 'won', 'lost'].includes(s.status) && (s.legs as Leg[])?.length)
   if (placed.length === 0) return Response.json({ error: 'no placed slips to analyse' }, { status: 409 })
+  // Each slip's vector = only the legs ACTUALLY placed (dropped/suspended legs weren't staked, so they
+  // must not count toward whether the slip survives).
   const vectors = placed.map(s => {
     const side = new Map<number, 'Under' | 'Over'>()
-    for (const l of s.legs as Leg[]) side.set(l.fixtureId, l.side)
+    for (const l of s.legs as Leg[]) if (!l.suspended) side.set(l.fixtureId, l.side)
     return side
   })
 

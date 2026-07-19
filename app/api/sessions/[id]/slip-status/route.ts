@@ -17,6 +17,8 @@ const Schema = z.object({
   betId: z.string().nullish(),
   failureReason: z.string().nullish(),
   live: z.boolean().optional(),
+  droppedFixtures: z.array(z.number().int()).optional(),   // legs the placer dropped (game suspended at placement)
+  placedLegs: z.number().int().optional(),                 // actual leg count on the real bet
 })
 
 export async function POST(request: Request, ctx: { params: Promise<{ id: string }> }): Promise<Response> {

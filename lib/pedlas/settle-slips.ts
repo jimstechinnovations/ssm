@@ -4,16 +4,22 @@
 
 export interface GameResult { finished: boolean; total: number }   // total goals (home + away)
 export type Verdict = 'won' | 'lost' | 'pending'
-export interface SlipLeg { fixtureId: number; side: string; line: number }
+export interface SlipLeg { fixtureId: number; side: string; line: number; suspended?: boolean }
+
+// A leg marked `suspended` was DROPPED at placement (the game was suspended/void when we placed) — it is
+// NOT part of the actual bet on SportyBet, so it must never settle or cut the slip. This mirrors what
+// was really staked (a shorter combo), which is the whole point of place-shorter.
+const live = (legs: SlipLeg[]) => legs.filter(l => !l.suspended)
 
 /**
- * Verdict for one slip. A leg is Under X.5 → correct iff total < line; Over X.5 → correct iff total >
- * line. As soon as any FINISHED game contradicts its leg, the slip is LOST (regardless of games still
- * to play). If every leg is finished and correct → won. Otherwise pending.
+ * Verdict for one slip — judged on the legs ACTUALLY placed (suspended/dropped legs excluded). A leg is
+ * Under X.5 → correct iff total < line; Over X.5 → correct iff total > line. As soon as any FINISHED
+ * game contradicts its leg, the slip is LOST (regardless of games still to play). If every real leg is
+ * finished and correct → won. Otherwise pending.
  */
 export function settleSlip(legs: SlipLeg[], results: Map<number, GameResult | null>): Verdict {
   let anyPending = false
-  for (const leg of legs) {
+  for (const leg of live(legs)) {
     const r = results.get(leg.fixtureId)
     if (!r || !r.finished) { anyPending = true; continue }
     const wentOver = r.total > leg.line                 // e.g. 5 goals > 4.5 → Over
@@ -23,9 +29,9 @@ export function settleSlip(legs: SlipLeg[], results: Map<number, GameResult | nu
   return anyPending ? 'pending' : 'won'
 }
 
-/** How many of a slip's legs are already decided against it (for a "cut by" note). */
+/** How many of a slip's (actually-placed) legs are already decided against it (for a "cut by" note). */
 export function cutLegs(legs: SlipLeg[], results: Map<number, GameResult | null>): SlipLeg[] {
-  return legs.filter(leg => {
+  return live(legs).filter(leg => {
     const r = results.get(leg.fixtureId)
     if (!r || !r.finished) return false
     const wentOver = r.total > leg.line
