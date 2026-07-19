@@ -218,18 +218,20 @@ function makeWorker(page, tag, parallel) {
     // confirm clickers below just target that button by EITHER label; clicking it repeatedly walks
     // Accept Changes → Place Bet → About-to-pay even if the price keeps shifting.
 
-    const clickPlace = async (useLeaf) => {
-      if (useLeaf) return clickLeaf('^(place bet|accept changes)$')
-      const btn = page.locator('.m-btn-wrapper, button.af-button', { hasText: /place bet|accept chang/i }).first()
-      if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
-      return clickLeaf('^(place bet|accept changes)$')
-    }
-    const clickConfirm = async (useLeaf) => {
-      if (useLeaf) return clickLeaf('^(confirm|accept changes)$')
-      const btn = page.locator('.es-dialog-btn, [class*=dialog-btn], .m-btn-wrapper', { hasText: /^confirm$|accept chang/i }).first()
-      if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
-      return clickLeaf('^(confirm|accept changes)$')
-    }
+    // Robustly click a betslip button by EXACT label. Finds the label element, then climbs to its
+    // clickable BUTTON ancestor and clicks that (clicking a bare text span often doesn't fire SportyBet's
+    // handler — which is why it looked "stuck" on Accept Changes). Returns true if it clicked something.
+    const clickBtn = async (labelSrc) => page.evaluate((src) => {
+      const rx = new RegExp(src, 'i')
+      const els = [...document.querySelectorAll('button, [role=button], [class*=btn], [class*=button], span, div, a')]
+        .filter(e => (e.offsetWidth || e.offsetHeight) && rx.test((e.textContent || '').trim()) && (e.textContent || '').trim().length <= 22)
+      if (!els.length) return false
+      els.sort((a, b) => (a.offsetWidth * a.offsetHeight) - (b.offsetWidth * b.offsetHeight))   // smallest = the label
+      let t = els[0]
+      for (let i = 0; i < 4 && t && t.parentElement; i++) { if (t.tagName === 'BUTTON' || /btn|button|wrapper/i.test(t.className || '') || t.getAttribute?.('role') === 'button') break; t = t.parentElement }
+      ;(t || els[0]).click(); return true
+    }, labelSrc)
+    const hasBtn = async (labelSrc) => page.evaluate((src) => { const rx = new RegExp(src, 'i'); return [...document.querySelectorAll('span,div,button,a')].some(e => (e.offsetWidth || e.offsetHeight) && rx.test((e.textContent || '').trim()) && (e.textContent || '').trim().length <= 22) }, labelSrc)
 
     // ── serialize the actual submission so concurrent workers never collide ──
     const release = await acquireSubmit()
@@ -237,19 +239,25 @@ function makeWorker(page, tag, parallel) {
     try {
       await page.bringToFront().catch(() => {})   // active tab paints reliably for the Place/Confirm clicks
       const betLegs = async () => page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? (p.innerText.match(/Over\/Under/g) || []).length : 0 })
+      // STEP 1 — reach the "About to pay" dialog. Each pass: if "Accept Changes" is showing, click it and
+      // WAIT for it to become "Place Bet" (separate steps, not one button); then click "Place Bet". If
+      // accepting emptied the slip, skip fast (no loop).
       let dialog = false
-      for (let a = 1; a <= 6 && !dialog; a++) {
-        await clickPlace(a % 2 === 1)   // clicks Accept-Changes or Place Bet (same green button)
+      for (let a = 1; a <= 8 && !dialog; a++) {
+        if (await hasBtn('^accept changes$')) {
+          await clickBtn('^accept changes$')
+          for (let w = 0; w < 12 && await hasBtn('^accept changes$'); w++) await sleep(300)   // wait for it to clear
+          if ((await betLegs()) === 0) throw new Error('SKIP: betslip emptied by odds/leg changes — nothing left to place')
+        }
+        await clickBtn('^place bet$')
         for (let p = 0; p < 10 && !dialog; p++) { await sleep(300); dialog = await bodyHas(/about to pay/) }
-        // Accept-Changes can REMOVE unavailable legs; if it emptied the slip, there's nothing to place —
-        // skip it fast (no retry) instead of reloading and looping.
-        if (!dialog && (await betLegs()) === 0) throw new Error('SKIP: betslip emptied by odds/leg changes — nothing left to place')
       }
-      // Odds too volatile to settle (never opened the pay dialog): skip fast, don't retry/loop.
       if (!dialog) throw new Error('SKIP: odds unstable — pay dialog never opened after retries')
 
-      for (let a = 1; a <= 5 && !placed; a++) {
-        await clickConfirm(a % 2 === 1)
+      // STEP 2 — confirm. The dialog can also show "Accept Changes"; accept then confirm.
+      for (let a = 1; a <= 6 && !placed; a++) {
+        if (await hasBtn('^accept changes$')) { await clickBtn('^accept changes$'); await sleep(600) }
+        await clickBtn('^confirm$')
         for (let p = 0; p < 12 && !placed; p++) {
           await sleep(400)
           if (await successUp()) { placed = true; how = 'submission-successful'; break }
