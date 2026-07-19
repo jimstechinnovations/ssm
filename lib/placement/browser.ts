@@ -69,17 +69,16 @@ export async function prepareBrowser(): Promise<BrowserStatus & { steps: string[
         } else steps.push('not logged in — log in once in the Chrome window')
       }
 
-      // Switch to REAL only if currently SIM — clicking blindly could toggle a REAL account to SIM.
-      const flipped = await page.evaluate(() => {
-        const l = document.querySelector('[data-op=switch-box-left]')   // REAL
-        const s = document.querySelector('[data-op=switch-box-right]')  // SIM
-        if (!l && !s) return 'no toggle visible (account mode unchanged)'
-        const mode = /show-highlight/.test(l?.className || '') ? 'REAL' : /show-highlight/.test(s?.className || '') ? 'SIM' : 'unknown'
-        if (mode === 'SIM' && l) { ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => l.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))); return 'switched SIM→REAL' }
-        return `already ${mode}`
+      // DO NOT auto-toggle REAL/SIM. The toggle's DOM can't be read reliably (the highlight class
+      // moved), and a wrong guess FLIPS a REAL account to SIM — worse than doing nothing. Report the
+      // best-effort mode only; the operator sets REAL in the window if needed (they can see it).
+      const modeSeen = await page.evaluate(() => {
+        const l = document.querySelector('[data-op=switch-box-left]'), s = document.querySelector('[data-op=switch-box-right]')
+        if (!l && !s) return 'toggle not visible'
+        return /show-highlight/.test(l?.className || '') ? 'REAL?' : /show-highlight/.test(s?.className || '') ? 'SIM?' : 'unknown'
       })
-      steps.push(flipped)
-      await page.waitForTimeout(1200)
+      steps.push(`mode seen: ${modeSeen} — NOT auto-toggled (set REAL in the window if needed)`)
+      await page.waitForTimeout(500)
     } finally { await browser.close() }
   } catch (e) { steps.push('prep error: ' + (e instanceof Error ? e.message.slice(0, 80) : 'unknown')) }
 
