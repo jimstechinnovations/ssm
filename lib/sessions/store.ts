@@ -238,14 +238,47 @@ export interface SessionSlip {
   failureReason: string | null
 }
 
+/** Which DB column each UI sort key maps to (whitelist — never interpolate user input into a query). */
+const SORT_COLS: Record<string, string> = {
+  slipId: 'slip_id', legs: 'leg_count', odds: 'combined_odds', payout: 'potential_payout', status: 'status',
+}
+
+export interface ListSlipsOpts {
+  withLegs?: boolean; limit?: number; offset?: number
+  status?: string            // filter to one status (placed/won/lost/pending/failed/skipped); 'all' = no filter
+  search?: string            // match a booking code (prefix) or an exact slip number
+  sortBy?: string            // one of SORT_COLS keys
+  sortDir?: 'asc' | 'desc'
+}
+
+/** Apply the shared status/search filters to a pedla_placements query builder. */
+function applySlipFilters(q: any, opts: ListSlipsOpts) {
+  if (opts.status && opts.status !== 'all') {
+    if (opts.status === 'pending') q = q.in('status', ['pending', 'placing'])
+    else q = q.eq('status', opts.status)
+  }
+  const s = opts.search?.trim()
+  if (s) {
+    if (/^\d+$/.test(s)) q = q.or(`slip_id.eq.${Number(s)},booking_code.ilike.${s}%`)
+    else q = q.ilike('booking_code', `${s}%`)
+  }
+  return q
+}
+
 /** List a session's slips. `withLegs` pulls the heavy 34-leg JSON (only clone needs it); `limit`
- *  caps rows for the UI table. Excluding legs keeps the dashboard/detail fast on 500-slip sessions. */
-export async function listSessionSlips(sessionId: string, opts: { withLegs?: boolean; limit?: number; offset?: number } = {}): Promise<SessionSlip[]> {
+ *  caps rows for the UI table. Excluding legs keeps the dashboard/detail fast on 500-slip sessions.
+ *  Supports server-side status filter, booking-code/slip# search, and column sort (so "all placed
+ *  together" and search work across the whole book, not just the visible page). */
+export async function listSessionSlips(sessionId: string, opts: ListSlipsOpts = {}): Promise<SessionSlip[]> {
   try {
     const supabase = createServerClient()
     const cols = 'id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason'
       + (opts.withLegs ? ',legs' : '')
-    let q = supabase.from('pedla_placements').select(cols).eq('session_id', sessionId).order('slip_id', { ascending: true })
+    let q = supabase.from('pedla_placements').select(cols).eq('session_id', sessionId)
+    q = applySlipFilters(q, opts)
+    const sortCol = (opts.sortBy && SORT_COLS[opts.sortBy]) || 'slip_id'
+    const asc = opts.sortDir ? opts.sortDir === 'asc' : true
+    q = q.order(sortCol, { ascending: asc }).order('slip_id', { ascending: true })   // stable tiebreak
     if (opts.offset != null && opts.limit) q = q.range(opts.offset, opts.offset + opts.limit - 1)
     else if (opts.limit) q = q.limit(opts.limit)
     const { data, error } = await (q as any) as { data: any[] | null; error: unknown }
@@ -258,6 +291,17 @@ export async function listSessionSlips(sessionId: string, opts: { withLegs?: boo
       returned: r.returned == null ? null : Number(r.returned), failureReason: r.failure_reason,
     }))
   } catch { return [] }
+}
+
+/** Count a session's slips under the same status/search filters (for filtered pagination). */
+export async function countSessionSlips(sessionId: string, opts: ListSlipsOpts = {}): Promise<number> {
+  try {
+    const supabase = createServerClient()
+    let q = supabase.from('pedla_placements').select('slip_id', { count: 'exact', head: true }).eq('session_id', sessionId)
+    q = applySlipFilters(q, opts)
+    const { count, error } = await (q as any) as { count: number | null; error: unknown }
+    return error ? 0 : (count ?? 0)
+  } catch { return 0 }
 }
 
 /** One slip WITH legs (for the click-to-view overlay) — a single-row query, not the whole book. */

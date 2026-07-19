@@ -48,17 +48,24 @@ export default function SessionPage() {
   const [slipView, setSlipView] = useState<null | { slipId: number; loading: boolean; data?: SlipDetail }>(null)
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
+  const [filter, setFilter] = useState('all')                          // status filter
+  const [query, setQuery] = useState('')                               // booking-code / slip# search
+  const [sort, setSort] = useState<{ by: string; dir: 'asc' | 'desc' }>({ by: 'slipId', dir: 'asc' })
   const notFound = useRef(false)
   const PAGE = 50
 
   const load = useCallback(async () => {
     try {
-      const r = await fetch(`/api/sessions/${code}?offset=${page * PAGE}&limit=${PAGE}`)
+      const qs = new URLSearchParams({ offset: String(page * PAGE), limit: String(PAGE), status: filter, sort: sort.by, dir: sort.dir })
+      if (query.trim()) qs.set('q', query.trim())
+      const r = await fetch(`/api/sessions/${code}?${qs}`)
       if (r.status === 404) { notFound.current = true; setSession(null); return }
       const s = await r.json()
       if (s.session) { setSession(s.session); setSlips(s.slips ?? []); setSummary(s.summary); setTotal(s.page?.total ?? s.summary?.slips ?? 0) }
     } catch { /* keep last state */ }
-  }, [code, page])
+  }, [code, page, filter, query, sort])
+  // reset to the first page whenever the filter/search/sort changes
+  useEffect(() => { setPage(0) }, [filter, query, sort])
   const loadBrowser = useCallback(async () => {
     try { setBrowser(await fetch('/api/browser').then(r => r.json())) } catch { setBrowser({ up: false }) }
   }, [])
@@ -426,17 +433,40 @@ export default function SessionPage() {
       </section>
 
       {/* Slips ledger */}
-      <div className="mb-2 flex items-center justify-between gap-2">
-        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Slips <span className="font-normal text-zinc-400">· {total} total</span></h2>
+      <div className="mb-2 flex flex-wrap items-center justify-between gap-2">
+        <h2 className="text-sm font-semibold text-zinc-700 dark:text-zinc-300">Slips <span className="font-normal text-zinc-400">· {total}{filter !== 'all' || query.trim() ? ' matched' : ' total'}</span></h2>
         <a href={`/sessions/${code}/print`} target="_blank" rel="noopener"
           className="inline-flex items-center gap-1.5 rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">
           <Download className="h-3.5 w-3.5" /> Export PDF
         </a>
       </div>
+      {/* filter + search: server-side, so they act on the WHOLE book (not just this page) */}
+      <div className="mb-2 flex flex-wrap items-center gap-2">
+        <div className="flex flex-wrap gap-1">
+          {(['all', 'placed', 'won', 'lost', 'pending', 'failed', 'skipped'] as const).map(f => (
+            <button key={f} onClick={() => setFilter(f)}
+              className={`rounded-full px-2.5 py-1 text-xs font-medium capitalize transition ${filter === f ? 'bg-zinc-900 text-white dark:bg-zinc-100 dark:text-zinc-900' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700'}`}>
+              {f}{f !== 'all' && summary ? ` ${summary[f as keyof Summary] ?? 0}` : ''}
+            </button>
+          ))}
+        </div>
+        <div className="relative ml-auto">
+          <input value={query} onChange={e => setQuery(e.target.value)} placeholder="search code or #"
+            className="w-44 rounded-lg border border-zinc-300 bg-white px-2.5 py-1.5 text-xs text-zinc-700 placeholder:text-zinc-400 focus:border-zinc-500 focus:outline-none dark:border-zinc-600 dark:bg-zinc-800 dark:text-zinc-200" />
+          {query && <button onClick={() => setQuery('')} className="absolute right-1.5 top-1/2 -translate-y-1/2 rounded p-0.5 text-zinc-400 hover:text-zinc-700 dark:hover:text-zinc-200"><XMark className="h-3.5 w-3.5" /></button>}
+        </div>
+      </div>
       <div className="overflow-x-auto rounded-xl border border-zinc-200 dark:border-zinc-700">
         <table className="w-full min-w-[560px] text-left text-sm">
           <thead className="bg-zinc-50 text-xs text-zinc-500 dark:bg-zinc-800/50 dark:text-zinc-400">
-            <tr><Th>#</Th><Th>legs</Th><Th>odds</Th><Th>payout</Th><Th>status</Th><Th>booking code</Th></tr>
+            <tr>
+              <SortTh k="slipId" sort={sort} setSort={setSort}>#</SortTh>
+              <SortTh k="legs" sort={sort} setSort={setSort}>legs</SortTh>
+              <SortTh k="odds" sort={sort} setSort={setSort}>odds</SortTh>
+              <SortTh k="payout" sort={sort} setSort={setSort}>payout</SortTh>
+              <SortTh k="status" sort={sort} setSort={setSort}>status</SortTh>
+              <Th>booking code</Th>
+            </tr>
           </thead>
           <tbody>
             {slips.map(s => (
@@ -541,6 +571,18 @@ function Stat({ label, value, highlight, onClick, action }: { label: string; val
 }
 
 function Th({ children }: { children: React.ReactNode }) { return <th className="px-3 py-2 font-medium">{children}</th> }
+
+function SortTh({ k, sort, setSort, children }: { k: string; sort: { by: string; dir: 'asc' | 'desc' }; setSort: (s: { by: string; dir: 'asc' | 'desc' }) => void; children: React.ReactNode }) {
+  const active = sort.by === k
+  return (
+    <th className="px-3 py-2 font-medium">
+      <button onClick={() => setSort({ by: k, dir: active && sort.dir === 'asc' ? 'desc' : 'asc' })}
+        className={`inline-flex items-center gap-1 hover:text-zinc-800 dark:hover:text-zinc-200 ${active ? 'text-zinc-800 dark:text-zinc-200' : ''}`}>
+        {children}<span className="text-[9px]">{active ? (sort.dir === 'asc' ? '▲' : '▼') : '↕'}</span>
+      </button>
+    </th>
+  )
+}
 
 function Banner({ tone, children }: { tone: 'ok' | 'warn' | 'info' | 'muted'; children: React.ReactNode }) {
   const cls = {

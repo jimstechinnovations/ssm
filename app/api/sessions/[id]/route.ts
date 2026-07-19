@@ -9,7 +9,7 @@
  * original struck-through). Original fields are never overwritten, so nothing is lost.
  */
 
-import { getSession, listSessionSlips, scoreboards } from '@/lib/sessions/store'
+import { getSession, listSessionSlips, countSessionSlips, scoreboards } from '@/lib/sessions/store'
 import { getBookConfig } from '@/lib/books/config-store'
 import { getBook } from '@/lib/books/registry'
 import { boostFromTable, boostedPayout } from '@/lib/pedlas/boost'
@@ -29,9 +29,17 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   // legs for speed — but we still pull them here to compute the reconciled shorter-combo values, then
   // strip them from the response unless the caller (the placer) explicitly asked for them.
   const withLegs = url.searchParams.get('withLegs') === '1'
-  const [rawSlips, sb] = await Promise.all([
-    listSessionSlips(session.id, { limit, offset, withLegs: true }),
+  // Server-side filter / search / sort so they work across the WHOLE book, not just the visible page.
+  const status = url.searchParams.get('status') || 'all'
+  const search = url.searchParams.get('q') || ''
+  const sortBy = url.searchParams.get('sort') || 'slipId'
+  const sortDir = (url.searchParams.get('dir') === 'desc' ? 'desc' : 'asc') as 'asc' | 'desc'
+  const filtered = status !== 'all' || Boolean(search.trim())
+  const listOpts = { limit, offset, withLegs: true, status, search, sortBy, sortDir }
+  const [rawSlips, sb, filteredTotal] = await Promise.all([
+    listSessionSlips(session.id, listOpts),
     scoreboards([{ id: session.id, slipCount: session.slipCount }]),
+    filtered ? countSessionSlips(session.id, { status, search }) : Promise.resolve(null),
   ])
 
   // Book boost/cap once, so we can price each reconciled (shorter) combo exactly as the book would.
@@ -53,5 +61,6 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
     return withLegs ? { ...rest, legs, reconciled } : { ...rest, reconciled }
   })
 
-  return Response.json({ session, slips, summary: sb[session.id], page: { offset, limit, total: session.slipCount ?? sb[session.id]?.slips ?? slips.length } })
+  const total = filteredTotal ?? session.slipCount ?? sb[session.id]?.slips ?? slips.length
+  return Response.json({ session, slips, summary: sb[session.id], page: { offset, limit, total } })
 }
