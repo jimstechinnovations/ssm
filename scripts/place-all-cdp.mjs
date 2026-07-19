@@ -124,9 +124,27 @@ function makeWorker(page, tag, parallel) {
     await page.waitForTimeout(1800)
   }
 
+  // GLOBAL BLOCKER SWEEP: dismiss stray dialogs that wedge an unsupervised run — cookie/consent banners,
+  // promo/notification popups, session-expired / logged-out notices, generic error modals ("try again").
+  // NEVER touches the placement flow (about-to-pay / place bet / accept changes / confirm / betslip).
+  const dismissBlockers = async () => page.evaluate(() => {
+    const vis = e => e && (e.offsetWidth || e.offsetHeight)
+    const boxes = [...document.querySelectorAll('[class*=dialog],[class*=modal],[class*=popup],[class*=mask],[class*=overlay],[class*=toast],[class*=notice],[class*=cookie],[class*=consent]')].filter(vis)
+    let n = 0
+    for (const b of boxes) {
+      const txt = (b.innerText || '')
+      if (/about to pay|accept change|place bet|total stake|booking code|potential win|submission/i.test(txt)) continue // placement UI — leave it
+      const btn = [...b.querySelectorAll('button,span,div,a,i')].find(e => vis(e) && e.children.length === 0 && /^(ok|okay|got it|close|accept( all)?|agree|allow|dismiss|continue|confirm|try again|reload|retry|×|✕|✖|x)$/i.test((e.textContent || '').trim()))
+      if (btn) { btn.click(); n++ }
+    }
+    return n
+  }).catch(() => 0)
+
   const clearSlip = async () => {
     for (let i = 0; i < 9; i++) {
       if (await codeBoxVisible()) return
+      await dismissBlockers()                                  // clear stray popups/consent/error modals first
+      if (i >= 2 && !(await loggedInSignal()) && Number.isNaN(await balNum())) await ensureLoggedIn()  // session dropped mid-run → re-login
       await ensureRealView()
       if (await successUp()) { await dismissSuccess(); await page.waitForTimeout(500); continue }
       // a rejected submit leaves a "Submission Failed / something went wrong" dialog — click OK to recover
@@ -141,6 +159,16 @@ function makeWorker(page, tag, parallel) {
       if (await ra.count()) { await ra.click({ force: true }).catch(() => {}); await page.waitForTimeout(800); continue }
       const del = page.locator('[class*=betslip] [class*=icon-delete]:visible').first()
       if (await del.count()) { await del.click({ force: true }).catch(() => {}); await page.waitForTimeout(600); continue }
+      // NUCLEAR RESET (last resort): if the buttons can't clear it (e.g. a betslip full of "Unavailable"
+      // selections that Remove All won't drop), wipe the betslip localStorage + reload. Auth cookies are
+      // untouched, so it stays logged in — this guarantees clearSlip always recovers to the code box.
+      if (i === 6) {
+        log('  [reset] betslip wedged — clearing selection storage + reloading')
+        // ONLY the selection lists — NOT the REAL/SIM or country prefs (clearing those flips to SIM).
+        await page.evaluate(() => { for (const k of Object.keys(localStorage)) if (/^(betslips|betslipsSelections|wapBetslips|betslipsBankers)$/i.test(k)) localStorage.removeItem(k) }).catch(() => {})
+        await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
+        await page.waitForTimeout(2800); await ensureRealView(); continue
+      }
       await page.waitForTimeout(600)
     }
     if (!(await codeBoxVisible())) throw new Error('could not reset betslip to the Booking Code box')
@@ -296,63 +324,66 @@ function makeWorker(page, tag, parallel) {
     throw new Error('not confirmed (no success signal); check Bet History')
   }
 
-  return { placeOne, ensureLoggedIn, ensureRealView, prep: async () => { await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {}); await page.waitForTimeout(3000); await ensureLoggedIn(); await ensureRealView() } }
+  return { placeOne, ensureLoggedIn, ensureRealView, dismissBlockers, page, prep: async () => { await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {}); await page.waitForTimeout(3000); await ensureLoggedIn(); await ensureRealView() } }
 }
 
-// ── set up N tabs in the one logged-in session ──
-// Serial (1 worker) reuses the existing tab; parallel opens FRESH tabs (a fresh tab has an empty
-// betslip → clean start, whereas the base tab can carry a dirty/loaded betslip that stalls clearSlip).
+// ── robust worker rig: SHARED queue, per-slip watchdog, crash-respawn supervisor ──
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9222')
 const ctx = browser.contexts()[0]
-const pages = []
-if (WORKERS === 1) {
-  let base = ctx.pages().find(p => /sportybet\.com/.test(p.url()))
-  if (!base) { base = await ctx.newPage(); await base.goto('https://www.sportybet.com/ng/', { waitUntil: 'domcontentloaded' }) }
-  pages.push(base)
-} else {
-  for (let w = 0; w < WORKERS; w++) {
-    const p = await ctx.newPage()
-    await p.goto('https://www.sportybet.com/ng/', { waitUntil: 'domcontentloaded' }).catch(() => {})
-    pages.push(p)
-  }
-}
-
 const parallel = WORKERS > 1
-const workers = pages.map((p, w) => makeWorker(p, WORKERS > 1 ? `  [w${w}] ` : '  ', parallel))
-await Promise.all(workers.map(w => w.prep()))
+const SPORTY = 'https://www.sportybet.com/ng/'
+const MAX_TRIES = flag('--retries', 3)     // auto-retry a failed slip in-run before giving up
+const SLIP_TIMEOUT_MS = flag('--slip-timeout', 150) * 1000   // watchdog: a wedged slip is retried, not hung
 
-// round-robin partition so load stays balanced even if some slips retry
-const MAX_TRIES = flag('--retries', 3)   // auto-retry a failed slip in-run before giving up
-const queues = Array.from({ length: WORKERS }, () => [])
-slips.forEach((s, i) => queues[i % WORKERS].push({ slip: s, idx: i + 1, tries: 0 }))
+// Spawn one worker on its own tab (serial reuses the existing SportyBet tab; parallel opens fresh tabs
+// so each has a clean betslip). Returns a prepped worker or throws.
+async function spawn(wi, reuseBase) {
+  let page
+  if (reuseBase) { page = ctx.pages().find(p => /sportybet\.com/.test(p.url())); if (!page) { page = await ctx.newPage(); await page.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {}) } }
+  else { page = await ctx.newPage(); await page.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {}) }
+  const w = makeWorker(page, parallel ? `  [w${wi}] ` : '  ', parallel)
+  await w.prep()
+  return w
+}
+// A dead page/context/CDP error means the WORKER crashed (not the slip) — respawn it, don't fail the slip.
+const workerDead = e => /Target closed|Session closed|browser has been closed|context was destroyed|Execution context|Protocol error|detached|crashed|WATCHDOG/i.test(e?.message || '')
+const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`WATCHDOG: ${label} exceeded ${ms / 1000}s`)), ms))])
 
-console.log(`\nCDP BATCH: ${slips.length} slip(s) · ${WORKERS} worker(s) · pacing ${MIN}-${MAX}s · retries ${MAX_TRIES - 1}${DRY ? ' · DRY-RUN' : ''}\n`)
-const results = { placed: 0, skip: 0, dry: 0, suspended: 0, failed: 0, retried: 0 }
+const workersArr = []
+for (let wi = 0; wi < WORKERS; wi++) workersArr.push(await spawn(wi, WORKERS === 1))
+
+// SHARED queue: every worker pulls from one list, so a dying worker's in-flight slip is requeued and any
+// other worker picks up the rest (nothing is stranded on a per-worker queue). .shift/.unshift are atomic
+// in JS's single thread. Failed slips push back here up to MAX_TRIES.
+const queue = slips.map((s, i) => ({ slip: s, idx: i + 1, tries: 0 }))
+console.log(`\nCDP BATCH: ${slips.length} slip(s) · ${WORKERS} worker(s) · pacing ${MIN}-${MAX}s · retries ${MAX_TRIES - 1} · slip-watchdog ${SLIP_TIMEOUT_MS / 1000}s${DRY ? ' · DRY-RUN' : ''}\n`)
+const results = { placed: 0, skip: 0, dry: 0, suspended: 0, failed: 0, retried: 0, respawns: 0 }
 const t0 = Date.now()
 
-async function runWorker(worker, queue) {
-  while (queue.length) {
-    if (stopRequested) { console.log(`  [stopped] worker halting — ${queue.length} slip(s) left unplaced (resume later)`); break }
-    const { slip, idx, tries } = queue.shift()
+// One worker's loop. On a WORKER crash it throws to the supervisor (which respawns + re-runs); on a SLIP
+// failure it requeues/marks-failed and keeps going.
+async function runWorker(wi) {
+  while (queue.length && !stopRequested) {
+    const item = queue.shift(); if (!item) break
+    const { slip, idx, tries } = item
     const sid = slip.slipId
     try {
-      const { result: r, code, droppedFixtures, placedLegs } = await worker.placeOne(slip, idx)
+      const { result: r, code, droppedFixtures, placedLegs } = await withTimeout(workersArr[wi].placeOne(slip, idx), SLIP_TIMEOUT_MS, `slip ${idx}`)
       if (r === 'placed') { results.placed++; wrongSlipStreak = 0; if (!DRY) await report(sid, 'placed', { bookingCode: code, droppedFixtures, placedLegs }) }
-      else if (r === 'skip') { results.skip++; wrongSlipStreak = 0; if (!DRY && code) await report(sid, 'placed', { bookingCode: code }) } // already placed → ensure code persisted
+      else if (r === 'skip') { results.skip++; wrongSlipStreak = 0; if (!DRY && code) await report(sid, 'placed', { bookingCode: code }) }
       else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
       else results.dry++
     } catch (e) {
-      // SKIP (no retry): the slip can't settle (odds too volatile / emptied by leg removals). Retrying
-      // just reloads and loops, so mark it skipped and move on fast.
+      // WORKER CRASH (page/CDP dead or watchdog): requeue THIS slip at the front, throw to supervisor to respawn.
+      if (workerDead(e)) { queue.unshift(item); throw e }
+      // SKIP (no retry): odds too volatile / emptied — retrying just loops.
       if (/^SKIP:/.test(e.message)) {
         results.skip++; wrongSlipStreak = 0; console.log(`  slip ${idx}: ⏭ ${e.message}`)
         if (!DRY) await report(sid, 'skipped', { failureReason: e.message.slice(0, 200) })
-        if (queue.length) await sleep(rand(MIN, MAX) * 1000)
-        continue
+        if (queue.length) await sleep(rand(MIN, MAX) * 1000); continue
       }
-      // AUTO-RETRY: transient failures (odds change, click timeout, betslip not loaded) usually clear on a
-      // retry. Re-queue the slip (idempotency skips it if it actually placed) up to MAX_TRIES before giving
-      // up — so workers self-heal without a manual requeue.
+      // AUTO-RETRY: transient failures clear on a retry; requeue to the SHARED queue (idempotency skips it
+      // if it actually placed) up to MAX_TRIES, so any worker self-heals it.
       if (tries + 1 < MAX_TRIES && !stopRequested) {
         results.retried++; queue.push({ slip, idx, tries: tries + 1 })
         console.log(`  slip ${idx}: retry ${tries + 1}/${MAX_TRIES - 1} — ${e.message.slice(0, 80)}`)
@@ -360,16 +391,31 @@ async function runWorker(worker, queue) {
         results.failed++; console.log(`  slip ${idx}: FAILED (after ${tries + 1} tries) — ${e.message}`)
         if (!DRY) await report(sid, 'failed', { failureReason: e.message.slice(0, 200) })
       }
-      // CIRCUIT BREAKER: shorter slips now PLACE (suspended legs are fine). We only halt when slips load
-      // EMPTY/stale repeatedly — the betslip isn't loading at all (browser wedged) or every game died.
-      if (/empty\/invalid|stale/i.test(e.message)) { if (++wrongSlipStreak >= 8) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive empty/stale betslips — the betslip isn't loading (browser wedged?) or all games died. Halting.\n`) } }
+      if (/empty\/invalid|stale/i.test(e.message)) { if (++wrongSlipStreak >= 8) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive empty/stale betslips — betslip not loading (browser wedged?) or all games died. Halting.\n`) } }
       else wrongSlipStreak = 0
     }
     if (queue.length) await sleep(rand(MIN, MAX) * 1000)
   }
 }
 
-await Promise.all(workers.map((w, i) => runWorker(w, queues[i])))
+// Supervisor: runs a worker; if it crashes, respawns a fresh tab (up to a few times) and resumes on the
+// SHARED queue — so one wedged/closed tab never ends the run.
+async function supervise(wi) {
+  while (queue.length && !stopRequested) {
+    try { await runWorker(wi); return }
+    catch (e) {
+      results.respawns++
+      console.log(`  [w${wi}] ⚠ worker crashed (${(e.message || '').slice(0, 60)}) — respawning (${queue.length} slip(s) left)`)
+      try { if (WORKERS > 1) await workersArr[wi].page?.close().catch(() => {}) } catch { /* ignore */ }
+      let ok = false
+      for (let a = 0; a < 4 && !ok && !stopRequested; a++) { try { workersArr[wi] = await spawn(wi, WORKERS === 1); ok = true } catch (se) { console.log(`  [w${wi}] respawn attempt ${a + 1} failed: ${(se.message || '').slice(0, 50)}`); await sleep(4000) } }
+      if (!ok) { console.log(`  [w${wi}] ✗ could not respawn — worker retiring (others continue)`); return }
+    }
+  }
+}
+
+await Promise.all(workersArr.map((_, wi) => supervise(wi)))
 const secs = ((Date.now() - t0) / 1000).toFixed(1)
-console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, retried ${results.retried}, failed ${results.failed}${DRY ? `, dry ${results.dry}` : ''}`)
+console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, retried ${results.retried}, failed ${results.failed}, respawns ${results.respawns}${DRY ? `, dry ${results.dry}` : ''}`)
+if (queue.length) console.log(`  ${queue.length} slip(s) left unplaced (stopped/retired) — click Resume to finish; already-placed are skipped.`)
 await browser.close()
