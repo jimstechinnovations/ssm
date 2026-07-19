@@ -213,33 +213,22 @@ function makeWorker(page, tag, parallel) {
       return { suspended: /suspended|unavailable|not available|market closed/i.test(t), acceptChanges: /accept chang/i.test(t) }
     })
     if (liveState.suspended) { log('  ⏭ SUSPENDED leg — skipping'); return { result: 'suspended', code } }
-    if (liveState.acceptChanges) {
-      await page.evaluate(() => { const b = [...document.querySelectorAll('span,div,button,a')].find(e => /accept chang/i.test((e.textContent || '').trim()) && (e.offsetWidth || e.offsetHeight)); if (b) b.click() })
-      await sleep(1500)
-    }
+    // NOTE: "Accept Changes" is NOT a separate blocker — it's the SAME primary green button relabelled
+    // when odds move. Clicking it accepts the new price and relabels back to "Place Bet". So the place/
+    // confirm clickers below just target that button by EITHER label; clicking it repeatedly walks
+    // Accept Changes → Place Bet → About-to-pay even if the price keeps shifting.
 
-    // Odds can shift right at submit time → the betslip shows "Accept Changes" instead of "Place Bet".
-    // Accept the new odds first (every attempt, not just once up front), then place. We accept because
-    // the slip is still the same games/sides — only the price moved; SportyBet recomputes the payout.
-    const acceptChangesIfAny = async () => {
-      return page.evaluate(() => {
-        const b = [...document.querySelectorAll('span,div,button,a')].find(e => e.children.length === 0 && /accept chang/i.test((e.textContent || '').trim()) && (e.offsetWidth || e.offsetHeight))
-        if (b) { b.click(); return true } return false
-      })
-    }
     const clickPlace = async (useLeaf) => {
-      if (await acceptChangesIfAny()) await sleep(700)   // clear an odds-change prompt before placing
-      if (useLeaf) return clickLeaf('^place bet$')
-      const btn = page.locator('.m-btn-wrapper, button.af-button', { hasText: /place bet/i }).first()
+      if (useLeaf) return clickLeaf('^(place bet|accept changes)$')
+      const btn = page.locator('.m-btn-wrapper, button.af-button', { hasText: /place bet|accept chang/i }).first()
       if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
-      return clickLeaf('^place bet$')
+      return clickLeaf('^(place bet|accept changes)$')
     }
     const clickConfirm = async (useLeaf) => {
-      if (await acceptChangesIfAny()) await sleep(600)   // odds can also shift on the About-to-pay dialog
-      if (useLeaf) return clickLeaf('^confirm$')
-      const btn = page.locator('.es-dialog-btn, [class*=dialog-btn], .m-btn-wrapper', { hasText: /^confirm$/i }).first()
+      if (useLeaf) return clickLeaf('^(confirm|accept changes)$')
+      const btn = page.locator('.es-dialog-btn, [class*=dialog-btn], .m-btn-wrapper', { hasText: /^confirm$|accept chang/i }).first()
       if (await btn.count()) { await btn.click({ force: true, timeout: 4000 }).catch(() => {}); return true }
-      return clickLeaf('^confirm$')
+      return clickLeaf('^(confirm|accept changes)$')
     }
 
     // ── serialize the actual submission so concurrent workers never collide ──
