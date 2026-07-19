@@ -28,6 +28,7 @@ const LIMIT = flag('--limit', 0)   // place only the first N slips (0 = all) —
 const STAKE_OVERRIDE = args.includes('--stake') ? flag('--stake', NaN) : null
 const REPORT = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))
 let stopRequested = false   // set when the session's Stop is hit (read from the report response)
+let wrongSlipStreak = 0     // consecutive "wrong slip" failures → a game was suspended mid-run (circuit breaker)
 async function report(slipId, status, extra = {}) {
   if (!REPORT || slipId == null) return
   try {
@@ -296,13 +297,18 @@ async function runWorker(worker, queue) {
     const sid = slip.slipId
     try {
       const { result: r, code } = await worker.placeOne(slip, idx)
-      if (r === 'placed') { results.placed++; if (!DRY) await report(sid, 'placed', { bookingCode: code }) }
-      else if (r === 'skip') { results.skip++; if (!DRY && code) await report(sid, 'placed', { bookingCode: code }) } // already placed → ensure code persisted
+      if (r === 'placed') { results.placed++; wrongSlipStreak = 0; if (!DRY) await report(sid, 'placed', { bookingCode: code }) }
+      else if (r === 'skip') { results.skip++; wrongSlipStreak = 0; if (!DRY && code) await report(sid, 'placed', { bookingCode: code }) } // already placed → ensure code persisted
       else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
       else results.dry++
     } catch (e) {
       results.failed++; console.log(`  slip ${idx}: FAILED — ${e.message}`)
       if (!DRY) await report(sid, 'failed', { failureReason: e.message.slice(0, 200) })
+      // CIRCUIT BREAKER: a run of "wrong slip: N legs vs M" means a pool game got suspended mid-run —
+      // every remaining slip will fail the same way. Halt cleanly (rebuild + place fresh) instead of
+      // churning hundreds of failures.
+      if (/wrong slip/i.test(e.message)) { if (++wrongSlipStreak >= 5) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive "wrong slip" failures — a pool game was SUSPENDED. Halting. Rebuild the session (drops the dead game) and place the remaining budget fresh.\n`) } }
+      else wrongSlipStreak = 0
     }
     if (k < queue.length - 1) await sleep(rand(MIN, MAX) * 1000)
   }
