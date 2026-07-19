@@ -13,7 +13,7 @@ import { useParams } from 'next/navigation'
 import { ArrowLeft, Copy, Play, StopIcon, Spinner, Loading, Dot, Check, Layers, Download, XMark, Refresh } from '@/components/Icons'
 import { TotalsChart } from '@/components/TotalsChart'
 
-interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null }
+interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null; reconciled?: { legCount: number; combinedOdds: number; payout: number } | null }
 interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
 interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean } | null }
 interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
@@ -442,9 +442,15 @@ export default function SessionPage() {
             {slips.map(s => (
               <tr key={s.id} onClick={() => openSlip(s.slipId)} className="cursor-pointer border-t border-zinc-100 hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/40">
                 <td className="px-3 py-1.5 font-medium text-blue-600 dark:text-blue-400">{s.slipId}</td>
-                <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">{s.legCount}</td>
-                <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">{s.combinedOdds?.toFixed?.(1) ?? '—'}</td>
-                <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">{naira(s.potentialPayout)}</td>
+                <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">
+                  {s.reconciled ? <><span className="text-zinc-400 line-through">{s.legCount}</span> <span className="font-medium text-amber-600 dark:text-amber-400">{s.reconciled.legCount}</span></> : s.legCount}
+                </td>
+                <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">
+                  {s.reconciled ? <><span className="text-zinc-400 line-through">{s.combinedOdds?.toFixed?.(1) ?? '—'}</span> <span className="font-medium text-amber-600 dark:text-amber-400">{s.reconciled.combinedOdds.toFixed(1)}</span></> : (s.combinedOdds?.toFixed?.(1) ?? '—')}
+                </td>
+                <td className="px-3 py-1.5 text-zinc-700 dark:text-zinc-300">
+                  {s.reconciled ? <><span className="text-zinc-400 line-through">{naira(s.potentialPayout)}</span> <span className="font-medium text-amber-600 dark:text-amber-400">{naira(s.reconciled.payout)}</span></> : naira(s.potentialPayout)}
+                </td>
                 <td className="px-3 py-1.5">
                   <span className="inline-flex items-center gap-1.5"><Dot tone={statusTone[s.status] ?? 'zinc'} /><span className="capitalize">{s.status}</span></span>
                   {s.failureReason && s.status === 'failed' && <span className="ml-1 text-xs text-red-500">· {s.failureReason.slice(0, 40)}</span>}
