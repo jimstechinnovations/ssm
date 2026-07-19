@@ -235,6 +235,13 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     partialDepth: book.partialDepth,
     partialCovered: book.partialCovered,
     lockedCount: book.lockedCount,
+    // build-time survival-curve exposure (realizer): where the pool is most exposed BEFORE placing.
+    cutRisk: book.cutRisk ? {
+      worst: book.cutRisk.worstByRisk,
+      maxSingleCutFrac: book.cutRisk.maxSingleCutFrac,
+      expectedFinalAlive: book.cutRisk.expectedFinalAlive,
+      top: [...book.cutRisk.games].sort((a, b) => b.riskWeight - a.riskWeight).slice(0, 6),
+    } : null,
     note: [book.note, gateNote].filter(Boolean).join(' '),
     advisory: advisoryCoverage(pool),
     ...sourceMeta,

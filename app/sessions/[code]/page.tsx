@@ -15,7 +15,9 @@ import { TotalsChart } from '@/components/TotalsChart'
 
 interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null; reconciled?: { legCount: number; combinedOdds: number; payout: number } | null }
 interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
-interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean } | null }
+interface CutGame { order: number; game: string; overProb: number; overSlips: number; underSlips: number; ifOverCut: number; riskWeight: number; coverageGap: number }
+interface CutRisk { worst: CutGame; maxSingleCutFrac: number; expectedFinalAlive: number; top: CutGame[] }
+interface Session { code: string; status: string; budget: number; targetWin: number; minStake: number; legCount: number | null; slipCount: number | null; poolSize: number | null; bookIds: string[]; updatedAt: string; dateTo: string; meta?: { pAnyWin?: number; windowMin?: number; stopRequested?: boolean; bookMetas?: Record<string, { cutRisk?: CutRisk | null }> } | null }
 interface BrowserState { up: boolean; loggedIn?: boolean; balance?: number | null; mode?: string }
 interface Game { fixtureId: number; game: string; league: string; kickoff: string; line: number; underOdds: number; history: { date: string; total: number }[]; overRate: number | null; source?: string; outcome?: { finished: boolean; total: number | null; over: boolean | null } | null }
 interface SurvGame { order: number; game: string; underOdds: number; bucket: string; overSlips: number; finished: boolean; total: number | null; over: boolean | null; cut: number; aliveAfter: number }
@@ -39,6 +41,7 @@ export default function SessionPage() {
   const [browser, setBrowser] = useState<BrowserState | null>(null)
   const [games, setGames] = useState<Game[] | null>(null)
   const [showGames, setShowGames] = useState(false)
+  const [showCutRisk, setShowCutRisk] = useState(false)
   const [msg, setMsg] = useState<{ text: string; tone: 'ok' | 'warn' | 'info' } | null>(null)
   const [busy, setBusy] = useState<null | 'dry' | 'live' | 'stop' | 'clone'>(null)
   const [copied, setCopied] = useState<string | null>(null)
@@ -182,6 +185,7 @@ export default function SessionPage() {
   if (!session) return <Loading label={`Loading ${code}…`} />
 
   const pAny = session.meta?.pAnyWin
+  const cutRisk = session.meta?.bookMetas ? (Object.values(session.meta.bookMetas).find(m => m.cutRisk)?.cutRisk ?? null) : null
   const liveReady = browser?.up && browser.loggedIn && browser.mode !== 'SIM'
   const runLabel = done ? 'complete' : running ? 'placing' : stopping ? 'stopping' : stalled ? 'stalled' : session.status
   const runTone = done ? 'green' : running ? 'amber' : stalled ? 'red' : 'zinc'
@@ -222,6 +226,36 @@ export default function SessionPage() {
         <Stat label="Pool games" value={String(session.poolSize ?? '—')} onClick={openGames} action />
         <Stat label="P(≥1 win)" value={pAny != null ? (100 * pAny).toFixed(1) + '%' : '—'} highlight />
       </div>
+
+      {/* Cut-risk (build-time exposure) — WHERE the pool is exposed BEFORE placing. Visibility, not a fix:
+          a game's Over cut = (1−overProb)·K, the calibrated floor. Watch the near-50/50 games. */}
+      {cutRisk && (
+        <section className="mb-5 rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+          <button onClick={() => setShowCutRisk(v => !v)} className="flex w-full flex-wrap items-center gap-2 text-left text-sm font-semibold text-zinc-800 dark:text-zinc-200">
+            <Layers className="h-4 w-4" /> Cut-risk profile
+            <span className="text-xs font-normal text-zinc-500">
+              worst: {cutRisk.worst.game} ({Math.round(cutRisk.worst.overProb * 100)}% Over → cuts {cutRisk.worst.ifOverCut}) · E[alive at end] {cutRisk.expectedFinalAlive.toFixed(2)}
+            </span>
+            <span className="ml-auto text-zinc-400">{showCutRisk ? '▲' : '▼'}</span>
+          </button>
+          {showCutRisk && (
+            <>
+              <p className="mt-2 text-xs text-zinc-400">If a game goes Over it cuts every slip that called it Under = (1−P<sub>Over</sub>)·K — the calibrated floor, unavoidable. The bigger a game&apos;s <em>risk</em> (P<sub>Over</sub>×slips-exposed), the more it threatens the pool. To cut fewer you&apos;d shorten slips (drop games), which lowers payout — same coin.</p>
+              <div className="mt-2 space-y-0.5 text-xs">
+                {cutRisk.top.map(g => (
+                  <div key={g.order} className="flex items-center gap-3 text-zinc-600 dark:text-zinc-400">
+                    <span className="w-6 text-right text-zinc-400">#{g.order}</span>
+                    <span className={`w-12 ${g.overProb > 0.2 ? 'text-red-500' : 'text-zinc-500'}`}>{Math.round(g.overProb * 100)}% O</span>
+                    <span className="w-28 text-zinc-500">if Over → cut <strong className="text-zinc-700 dark:text-zinc-300">{g.ifOverCut}</strong></span>
+                    <span className="w-20 text-zinc-400">risk {g.riskWeight.toFixed(0)}</span>
+                    <span className="flex-1 truncate text-zinc-700 dark:text-zinc-300">{g.game}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
+        </section>
+      )}
 
       {/* Games (collapsible) */}
       {showGames && (
