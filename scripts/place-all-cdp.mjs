@@ -236,12 +236,17 @@ function makeWorker(page, tag, parallel) {
     let placed = false, how = ''
     try {
       await page.bringToFront().catch(() => {})   // active tab paints reliably for the Place/Confirm clicks
+      const betLegs = async () => page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? (p.innerText.match(/Over\/Under/g) || []).length : 0 })
       let dialog = false
       for (let a = 1; a <= 6 && !dialog; a++) {
-        await clickPlace(a % 2 === 1)
+        await clickPlace(a % 2 === 1)   // clicks Accept-Changes or Place Bet (same green button)
         for (let p = 0; p < 10 && !dialog; p++) { await sleep(300); dialog = await bodyHas(/about to pay/) }
+        // Accept-Changes can REMOVE unavailable legs; if it emptied the slip, there's nothing to place —
+        // skip it fast (no retry) instead of reloading and looping.
+        if (!dialog && (await betLegs()) === 0) throw new Error('SKIP: betslip emptied by odds/leg changes — nothing left to place')
       }
-      if (!dialog) throw new Error('Place Bet (CDP) did not open the About-to-pay dialog')
+      // Odds too volatile to settle (never opened the pay dialog): skip fast, don't retry/loop.
+      if (!dialog) throw new Error('SKIP: odds unstable — pay dialog never opened after retries')
 
       for (let a = 1; a <= 5 && !placed; a++) {
         await clickConfirm(a % 2 === 1)
@@ -310,6 +315,14 @@ async function runWorker(worker, queue) {
       else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
       else results.dry++
     } catch (e) {
+      // SKIP (no retry): the slip can't settle (odds too volatile / emptied by leg removals). Retrying
+      // just reloads and loops, so mark it skipped and move on fast.
+      if (/^SKIP:/.test(e.message)) {
+        results.skip++; wrongSlipStreak = 0; console.log(`  slip ${idx}: ⏭ ${e.message}`)
+        if (!DRY) await report(sid, 'skipped', { failureReason: e.message.slice(0, 200) })
+        if (queue.length) await sleep(rand(MIN, MAX) * 1000)
+        continue
+      }
       // AUTO-RETRY: transient failures (odds change, click timeout, betslip not loaded) usually clear on a
       // retry. Re-queue the slip (idempotency skips it if it actually placed) up to MAX_TRIES before giving
       // up — so workers self-heal without a manual requeue.
