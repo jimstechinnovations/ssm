@@ -207,12 +207,22 @@ function makeWorker(page, tag, parallel) {
     log(`slip ${idx}: code ${code} · ₦${stake} @ ${slip.combinedOdds?.toFixed?.(2) ?? '?'} · ${slip.legs.length} legs`)
     if (DRY) { log('  [dry] skipping Place/Confirm'); return { result: 'dry', code } }
 
-    const liveState = await page.evaluate(() => {
-      const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]
-      const t = p ? p.innerText : ''
-      return { suspended: /suspended|unavailable|not available|market closed/i.test(t), acceptChanges: /accept chang/i.test(t) }
+    // Try to REMOVE any suspended/unavailable selections still sitting on the betslip so they don't block
+    // the submit — then place whatever remains. (A "suspended" notice must NOT early-skip the whole slip:
+    // place-shorter is the default. loadedLegs above already confirmed ≥1 real leg is present.)
+    const removed = await page.evaluate(() => {
+      let n = 0
+      const rows = [...document.querySelectorAll('[class*=betslip] [class*=item], [class*=betslip] [class*=outcome], [class*=betslip] li, [class*=betslip] [class*=row]')]
+      for (const row of rows) {
+        if (!row.offsetHeight) continue
+        if (!/suspend|unavailable|not available|market closed/i.test(row.textContent || '')) continue
+        const del = [...row.querySelectorAll('[class*=del],[class*=remove],[class*=close],[class*=trash],svg,i,span')]
+          .find(e => (e.offsetWidth || e.offsetHeight) && (/×|✕|✖|remove|delete/i.test(e.textContent || '') || /del|remove|close|trash/i.test(e.className || '')))
+        if (del) { del.click(); n++ }
+      }
+      return n
     })
-    if (liveState.suspended) { log('  ⏭ SUSPENDED leg — skipping'); return { result: 'suspended', code } }
+    if (removed) { log(`  ⏭ removed ${removed} suspended leg(s) from slip — placing the rest`); await page.waitForTimeout(700) }
     // NOTE: "Accept Changes" is NOT a separate blocker — it's the SAME primary green button relabelled
     // when odds move. Clicking it accepts the new price and relabels back to "Place Bet". So the place/
     // confirm clickers below just target that button by EITHER label; clicking it repeatedly walks
