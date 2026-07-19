@@ -547,7 +547,7 @@ export function buildFlipScatter(axes: BinaryAxis[], opts: { target: number; sta
  * single game concentrates a cliff. Ranking uses the BOOK price only (§2 Change A). Same honest
  * ceiling — it shapes the curve and covers optimally; it does not beat the funnel or create EV.
  */
-export function buildRealizer(axes: BinaryAxis[], opts: { target: number; stake: number; K: number; maxPayout: number; boost?: BoostFn; maxFlipFrac?: number; maxRun?: number; beta?: number; trials?: number; seed?: number }): FlipScatter {
+export function buildRealizer(axes: BinaryAxis[], opts: { target: number; stake: number; K: number; maxPayout: number; boost?: BoostFn; maxFlipFrac?: number; maxRun?: number; beta?: number; trials?: number; seed?: number; signalWeight?: number }): FlipScatter {
   const boost = opts.boost ?? boostFor
   const K = opts.K
   const { legs, reached } = chooseBaseLegs(axes, opts.stake, opts.target, boost)
@@ -556,7 +556,17 @@ export function buildRealizer(axes: BinaryAxis[], opts: { target: number; stake:
   const P = opts.maxFlipFrac ?? 0.5
   const E = opts.maxRun ?? 3
   const maxOvers = Math.max(1, Math.floor(P * N))
-  const overP = base.map(a => Math.min(0.98, Math.max(0.02, a.overProb)))   // BOOK-only marginals (Change A)
+  // WEIGHTED SIGNAL (all signals build together): the marginal that shapes WHICH realistic days we cover
+  // is a blend of the book's de-vigged P(Over) and the history-informed p̂ (form × H2H, via advisory).
+  //   signalWeight 0 = book-only (Change A default); 1 = fully history-informed; between = weighted.
+  // Only the COVERAGE choice uses the blend — the honest P(win) (simulateFlipScatter) always re-derives
+  // from the BOOK marginal, so history never inflates the reported chance (pedlas-no-model-edge).
+  const w = Math.min(1, Math.max(0, opts.signalWeight ?? 0))
+  const clampP = (p: number) => Math.min(0.98, Math.max(0.02, p))
+  const overP = base.map(a => {
+    const hist = a.advisory?.pHat
+    return clampP(w > 0 && hist != null ? (1 - w) * a.overProb + w * hist : a.overProb)
+  })
   const beta = opts.beta ?? calibrateBeta(base)
   const aI = recentredIntercepts(overP, beta)
   const logitOf = (i: number) => Math.log(overP[i] / (1 - overP[i]))
@@ -608,6 +618,73 @@ export function buildRealizer(axes: BinaryAxis[], opts: { target: number; stake:
   }
 }
 
+// ── cut-risk profile: WHERE the survival curve is exposed (honest visibility, not prevention) ──
+
+export interface GameCutRisk {
+  order: number            // kickoff order (1-based)
+  game: string
+  overProb: number         // book de-vigged P(Over 4.5)
+  overSlips: number        // # slips that call this game Over (survive if it goes Over)
+  underSlips: number       // # slips that call it Under (cut if it goes Over)
+  ifOverCut: number        // slips eliminated if this game alone goes Over = underSlips
+  riskWeight: number       // underSlips × overProb — the honest expected exposure to this game
+  coverageGap: number      // overSlips − round(overProb·K): >0 over-covered, <0 UNDER-covered vs calibration
+}
+
+export interface CutRiskReport {
+  K: number
+  games: GameCutRisk[]      // kickoff order
+  worstByRisk: GameCutRisk  // the game whose Over would cost the most (risk-weighted) — watch this one
+  maxSingleCutFrac: number  // largest ifOverCut / K across games weighted only where overProb is material
+  calibrationMaxGap: number // worst |coverageGap| — how far any game drifts from calibrated Over-share
+  expectedFinalAlive: number// E[# slips still alive at the end] under the correlated model (≈ pAnyWin·K-ish)
+}
+
+/**
+ * For a built family, report per-game where the survival curve is exposed: how many slips each game's
+ * Over result would cut, risk-weighted by the book's Over-prob, and whether the Over-share drifts from
+ * the calibrated target (overProb·K). This is visibility, not prevention — the cut on a game that goes
+ * Over is unavoidable; the report shows which games carry the most variance (the near-50/50 ones) and
+ * flags any mis-calibration (a game covered far from its Over-prob), which IS actionable.
+ */
+export function cutRiskProfile(scatter: FlipScatter, opts: { beta?: number; trials?: number; seed?: number } = {}): CutRiskReport {
+  const { base, vectors, N } = scatter
+  const K = vectors.length
+  const overProb = base.map(a => cutProb(a))
+  const overSlips = new Array(N).fill(0)
+  for (const v of vectors) for (let i = 0; i < N; i++) if (v[i] === 1) overSlips[i]++
+
+  const games: GameCutRisk[] = base.map((a, i) => {
+    const under = K - overSlips[i]
+    return {
+      order: i + 1, game: a.game, overProb: overProb[i],
+      overSlips: overSlips[i], underSlips: under, ifOverCut: under,
+      riskWeight: under * overProb[i],
+      coverageGap: overSlips[i] - Math.round(overProb[i] * K),
+    }
+  })
+  const worstByRisk = games.reduce((m, g) => g.riskWeight > m.riskWeight ? g : m, games[0])
+  const calibrationMaxGap = games.reduce((m, g) => Math.max(m, Math.abs(g.coverageGap)), 0)
+  // material single-cut = the biggest ifOverCut among games with a non-trivial Over-prob (≥5%)
+  const maxSingleCutFrac = games.filter(g => g.overProb >= 0.05).reduce((m, g) => Math.max(m, g.ifOverCut / K), 0)
+
+  // E[final alive] under the correlated law (how many distinct slips survive all N games).
+  const beta = opts.beta ?? 0
+  const trials = opts.trials ?? 2000
+  const rng = mulberry32(opts.seed ?? 0x5A71)
+  const a = recentredIntercepts(overProb, beta)
+  const outcome = new Array<number>(N)
+  let sumAlive = 0
+  for (let t = 0; t < trials; t++) {
+    const z = gaussian(rng)
+    for (let i = 0; i < N; i++) outcome[i] = rng() < sigmoid(a[i] + beta * z) ? 1 : 0
+    let alive = 0
+    for (const v of vectors) { let ok = true; for (let i = 0; i < N; i++) if (v[i] !== outcome[i]) { ok = false; break } if (ok) alive++ }
+    sumAlive += alive
+  }
+  return { K, games, worstByRisk, maxSingleCutFrac, calibrationMaxGap, expectedFinalAlive: sumAlive / trials }
+}
+
 /** P(≥1 flip-slip wins) = P(the real U/O outcome exactly matches one of our vectors), correlated. */
 export function simulateFlipScatter(scatter: FlipScatter, opts: { trials?: number; beta?: number; seed?: number } = {}): number {
   const trials = opts.trials ?? 3000
@@ -639,6 +716,7 @@ export interface CoverageBookOptions {
   maxFlipFrac?: number      // if set, SCATTER flips across depths up to this fraction of eligible legs
   maxRun?: number           // in scatter mode: reject slips with ≥ this many consecutive Overs (default 3)
   realizer?: boolean        // use the correlated SIMULATION engine (optimum-plan §10) instead of scatter
+  signalWeight?: number     // realizer only: blend history p̂ into the coverage marginal (0=book, 1=history)
   beta?: number
   trials?: number
   seed?: number
@@ -663,6 +741,7 @@ export interface CoverageBook {
   partialDepth: number      // next layer, partially covered
   partialCovered: number    // patterns covered in that partial layer
   lockedCount: number       // games locked Under in every slip
+  cutRisk?: CutRiskReport   // per-game survival-curve exposure (realizer builds)
 }
 
 /**
@@ -683,9 +762,10 @@ export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions)
   // and layered paths are legacy, reached only by explicitly passing realizer:false.
   const useRealizer = opts.realizer !== false
   const scatter = useRealizer
-    ? buildRealizer(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun, beta })
+    ? buildRealizer(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun, beta, signalWeight: opts.signalWeight })
     : buildFlipScatter(pool, { target, stake: opts.stake, K, maxPayout: opts.maxPayout, boost, overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun })
   const pAnyWin = simulateFlipScatter(scatter, { beta, trials: opts.trials ?? 3000 })
+  const cutRisk = useRealizer ? cutRiskProfile(scatter, { beta, trials: 2000 }) : undefined
 
   const distinct = new Set(scatter.vectors.map(v => v.join(''))).size
   const guarantee = useRealizer
@@ -706,5 +786,6 @@ export function buildCoverageBook(pool: BinaryAxis[], opts: CoverageBookOptions)
     net: 0, note,
     eligibleCount: scatter.eligible.length, completeDepth: scatter.completeDepth,
     partialDepth: scatter.partialDepth, partialCovered: scatter.partialCovered, lockedCount: scatter.lockedCount,
+    cutRisk,
   }
 }

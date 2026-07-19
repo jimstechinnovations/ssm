@@ -41,6 +41,9 @@ const CreateSchema = z.object({
   max_run: z.number().int().min(2).max(10).optional(),
   /** Use the correlated SIMULATION engine (realizer, optimum-plan §10). */
   realizer: z.boolean().optional(),
+  /** Realizer: blend history p̂ into the coverage marginal (0=book default, 1=history). >0 lowers the
+   *  book-honest P(win) unless history beats the book — which it doesn't (pedlas-no-model-edge). */
+  signal_weight: z.number().min(0).max(1).optional(),
   /** Drop games whose league matches any of these substrings (e.g. ["friendl"] to skip friendlies). */
   exclude_leagues: z.array(z.string()).optional(),
 }).refine(d => {
@@ -90,7 +93,7 @@ export async function POST(request: Request): Promise<Response> {
     const built = await buildCoverageForAdapter(getBook(id), {
       dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake,
       targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost,
-      requireHistory: req.require_history, overThreshold: req.over_threshold, maxFlipFrac: req.max_flip_frac, maxRun: req.max_run, realizer: req.realizer, excludeLeagues: req.exclude_leagues,
+      requireHistory: req.require_history, overThreshold: req.over_threshold, maxFlipFrac: req.max_flip_frac, maxRun: req.max_run, realizer: req.realizer, signalWeight: req.signal_weight, excludeLeagues: req.exclude_leagues,
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
     if (built.usedDateTo && built.usedDateTo > usedDateTo) usedDateTo = built.usedDateTo

@@ -123,6 +123,9 @@ export interface CoverageAdapterOptions {
   maxRun?: number
   /** Use the correlated SIMULATION engine (realizer, optimum-plan §10) instead of the scatter. */
   realizer?: boolean
+  /** Realizer: blend history p̂ into the coverage marginal (0=book-only default, 1=history). The honest
+   *  P(win) is always book-measured, so >0 only helps IF history beats the book (backtest: it doesn't). */
+  signalWeight?: number
   /** Drop games whose league matches any of these substrings (e.g. ["friendl"]) — the cutter leagues. */
   excludeLeagues?: string[]
 }
@@ -212,6 +215,7 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     budget: opts.budget, stake, maxPayout: Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
     boost: opts.boost ?? adapter.boostFor, legPref: opts.legPref, targetWin: opts.targetWin,
     overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun, realizer: opts.realizer,
+    signalWeight: opts.signalWeight,
   })
   const meta = {
     scanned: fixtures.length,
