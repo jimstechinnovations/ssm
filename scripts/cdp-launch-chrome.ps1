@@ -49,12 +49,13 @@ if ($Mode -eq 'default') {
   ) + $antiThrottle + @("https://www.sportybet.com/ng/")
 }
 
-& $chrome @args | Out-Null
-Start-Sleep -Seconds 4
-try {
-  $v = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 5
-  Write-Output "OK ($Mode): debug port up -> $($v.Browser)"
-  if ($Mode -eq 'dedicated') { Write-Output "Log into SportyBet in the new window (once), then tell the bot to verify." }
-} catch {
-  Write-Output "WARN: debug port not responding yet; give Chrome a few seconds."
+# Launch DETACHED (Start-Process, not "& chrome | Out-Null"): the call operator blocks and Chrome dies
+# when the launcher exits/times out — which is why the UI "Prepare browser" never brought the port up.
+# Start-Process returns immediately and Chrome keeps running independently.
+Start-Process -FilePath $chrome -ArgumentList $args
+for ($i = 0; $i -lt 15; $i++) {
+  Start-Sleep -Seconds 2
+  try { $v = Invoke-RestMethod -Uri "http://127.0.0.1:9222/json/version" -TimeoutSec 2; Write-Output "OK ($Mode): debug port up -> $($v.Browser)"; break }
+  catch { }
 }
+if ($Mode -eq 'dedicated') { Write-Output "Log into SportyBet in the new window (once), then tell the bot to verify." }
