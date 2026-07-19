@@ -148,20 +148,20 @@ function daysBetween(a: string, b: string): number {
  */
 export async function buildCoverageForAdapter(adapter: BookAdapter, opts: CoverageAdapterOptions): Promise<CoverageResult> {
   const stake = Math.max(opts.stake, adapter.minStake)
-  const scanLimit = opts.scanLimit ?? 120  // grab a big pool so slips can scatter
+  const scanLimit = opts.scanLimit ?? 250  // grab a big pool so slips can scatter (bigger for exclude-league builds)
   const boost = opts.boost ?? adapter.boostFor
   const target = opts.targetWin ?? stake * 1000
 
   // Legs needed to reach the target on the day's median Under odds (with real boost) — the pool must
   // hold at least this many qualifying games or the base parlay can't reach ₦target.
-  const legsNeeded = (medOdds: number) => { let l = 3; for (; l <= 60; l++) if (stake * Math.pow(Math.max(1.05, medOdds), l) * (1 + boost(l)) >= target) return l; return 60 }
+  const legsNeeded = (medOdds: number) => { let l = 3; for (; l <= 90; l++) if (stake * Math.pow(Math.max(1.05, medOdds), l) * (1 + boost(l)) >= target) return l; return 90 }
 
   // AUTO-EXTEND the window +1 day at a time until the pool can reach the target (nothing hardcoded).
   let axesAll: ReturnType<typeof selectAxes> = []
   let fixtures: Fixture[] = []
   let usedDateTo = opts.dateTo
   const sourceMeta: Record<string, unknown> = {}
-  for (let extra = 0; extra <= 6; extra++) {
+  for (let extra = 0; extra <= 30; extra++) {   // keep adding days until the pool can reach the target
     const dt = new Date(`${opts.dateFrom}T00:00:00Z`); dt.setUTCDate(dt.getUTCDate() + Math.max(0, daysBetween(opts.dateFrom, opts.dateTo)) + extra)
     usedDateTo = dt.toISOString().slice(0, 10)
     try {
