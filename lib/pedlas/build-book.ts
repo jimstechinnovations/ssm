@@ -130,6 +130,9 @@ export interface CoverageAdapterOptions {
   /** Anchor market policy. 'under_4.5' (default) = Under-4.5 anchors only. 'multi_line' = per game pick
    *  the most reliable dominant anchor across all total lines (Over 1.5 for goals-games, Under 3.5, …). */
   marketPolicy?: 'under_4.5' | 'multi_line'
+  /** Cap the auto-extend: never select games more than this many days past date_from (default 30). Set
+   *  to 1 or 2 to keep the whole session inside one/two days so it settles fast. */
+  maxWindowDays?: number
   /** Drop games whose league matches any of these substrings (e.g. ["friendl"]) — the cutter leagues. */
   excludeLeagues?: string[]
 }
@@ -163,12 +166,15 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
   // hold at least this many qualifying games or the base parlay can't reach ₦target.
   const legsNeeded = (medOdds: number) => { let l = 3; for (; l <= 90; l++) if (stake * Math.pow(Math.max(1.05, medOdds), l) * (1 + boost(l)) >= target) return l; return 90 }
 
-  // AUTO-EXTEND the window +1 day at a time until the pool can reach the target (nothing hardcoded).
+  // AUTO-EXTEND the window +1 day at a time until the pool can reach the target — but never past
+  // maxWindowDays from date_from (so "keep it to 1–2 days" is honoured; default 30). Fewer games in a
+  // tight window just means shorter slips, which the sampled-mix/boost handle fine.
   let axesAll: ReturnType<typeof selectAxes> = []
   let fixtures: Fixture[] = []
   let usedDateTo = opts.dateTo
   const sourceMeta: Record<string, unknown> = {}
-  for (let extra = 0; extra <= 30; extra++) {   // keep adding days until the pool can reach the target
+  const maxExtra = Math.max(0, (opts.maxWindowDays ?? 30) - daysBetween(opts.dateFrom, opts.dateTo))
+  for (let extra = 0; extra <= Math.min(30, maxExtra); extra++) {   // extend within the window cap
     const dt = new Date(`${opts.dateFrom}T00:00:00Z`); dt.setUTCDate(dt.getUTCDate() + Math.max(0, daysBetween(opts.dateFrom, opts.dateTo)) + extra)
     usedDateTo = dt.toISOString().slice(0, 10)
     try {
