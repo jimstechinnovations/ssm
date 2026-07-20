@@ -65,6 +65,16 @@ function mulberry32(seed: number) { let s = seed >>> 0; return () => { s |= 0; s
 function gauss(rng: () => number) { let u = 0, v = 0; while (!u) u = rng(); while (!v) v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) }
 function probit(p: number): number { const a=[-3.969683028665376e+01,2.209460984245205e+02,-2.759285104469687e+02,1.383577518672690e+02,-3.066479806614716e+01,2.506628277459239e+00],b=[-5.447609879822406e+01,1.615858368580409e+02,-1.556989798598866e+02,6.680131188771972e+01,-1.328068155288572e+01],c=[-7.784894002430293e-03,-3.223964580411365e-01,-2.400758277161838e+00,-2.549732539343734e+00,4.374664141464968e+00,2.938163982698783e+00],dd=[7.784695709041462e-03,3.224671290700398e-01,2.445134137142996e+00,3.754408661907416e+00],pl=0.02425; if(p<pl){const q=Math.sqrt(-2*Math.log(p));return(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((dd[0]*q+dd[1])*q+dd[2])*q+dd[3])*q+1)} if(p>1-pl){const q=Math.sqrt(-2*Math.log(1-p));return-(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((dd[0]*q+dd[1])*q+dd[2])*q+dd[3])*q+1)} const q=p-0.5,r=q*q;return(((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q/(((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1) }
 
+// n-choose-k + bounded k-subsets of `items` (only combine the top-T likeliest, so deep layers stay cheap)
+function nCk(n: number, k: number): number { if (k < 0 || k > n) return 0; k = Math.min(k, n - k); let r = 1; for (let i = 0; i < k; i++) r = (r * (n - i)) / (i + 1); return Math.round(r) }
+function kSubsets(items: number[], k: number, cap = Infinity): number[][] {
+  const out: number[][] = []; const n = items.length
+  if (k < 0 || k > n) return out; if (k === 0) return [[]]
+  const idx = Array.from({ length: k }, (_, i) => i)
+  for (;;) { out.push(idx.map(i => items[i])); if (out.length >= cap) break; let p = k - 1; while (p >= 0 && idx[p] === n - k + p) p--; if (p < 0) break; idx[p]++; for (let j = p + 1; j < k; j++) idx[j] = idx[j - 1] + 1 }
+  return out
+}
+
 export interface MultiSlip { markets: Market[]; games: number[]; legs: number; combinedOdds: number; payout: number; keep: number }
 export interface MultiBook {
   slips: MultiSlip[]
@@ -88,23 +98,42 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
   const boost = opts.boost ?? boostFor
   const rho = opts.rho ?? 0.15
   const K = Math.max(1, Math.floor(budget / stake))
-  // base games: fewest highest-Under-4.5-odds to reach target on the all-Under-4.5 parlay
+  // base games: fewest highest-Under-4.5-odds to reach target; then STABLE order (kickoff, then game
+  // name) so the game list — and therefore the coverage tree — is deterministic run to run.
   const sorted = [...axes].sort((a, b) => b.odds.U45 - a.odds.U45)
   let N = 3, prod = 1
   for (N = 1; N <= Math.min(45, sorted.length); N++) { prod *= sorted[N - 1].odds.U45; if (stake * prod * (1 + boost(N)) >= target) break }
   N = Math.min(Math.max(N, 6), sorted.length, 45)
-  const G = sorted.slice(0, N)
+  const G = sorted.slice(0, N).sort((a, b) => a.kickoff.localeCompare(b.kickoff) || a.game.localeCompare(b.game))
 
   const tH = G.map(g => probit(1 - Math.min(0.98, Math.max(0.02, g.pHIGH))))
   const tL = G.map(g => probit(Math.min(0.98, Math.max(0.02, g.pLOW))))
   const rng = mulberry32(opts.seed ?? 0xC0FFEE)
   const drawDay = () => { const z = gauss(rng); const o = new Array<Band>(N); for (let i = 0; i < N; i++) { const x = Math.sqrt(rho) * z + Math.sqrt(1 - rho) * gauss(rng); o[i] = (x > tH[i] ? 2 : x <= tL[i] ? 0 : 1) as Band } return o }
 
-  // tally most-frequent HIGH-sets (the decisive O25 games); MID free, LOW → U45
-  const trials = opts.trials ?? 60000
-  const cnt = new Map<string, number>(); const hset = new Map<string, number[]>()
-  for (let t = 0; t < trials; t++) { const o = drawDay(); const H: number[] = []; for (let i = 0; i < N; i++) if (o[i] === 2) H.push(i); const k = H.join(','); cnt.set(k, (cnt.get(k) || 0) + 1); if (!hset.has(k)) hset.set(k, H) }
-  const topH = [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, K).map(([k]) => hset.get(k)!)
+  // ── DIVERSE LAYERED COVERAGE (the survival tree, not a frequency heap) ──────────────────────────
+  // A game landing MID (3–4) is free (both U45 & O25 win); only a game going HIGH (5+) is decisive and
+  // needs O25. So we cover COMBINATIONS of "which games go HIGH": layer 0 = base (all U45), layer 1 =
+  // each single game flipped to O25 (survive if that one game is the cutter), layer 2 = every pair, …
+  // filling the budget. Eligible flip-games = those with a real HIGH chance, most-likely-HIGH first, so
+  // deep layers only combine plausible cutters. This gives genuinely diverse slips — each survives a
+  // different branch of "who cuts" — instead of a pile of all-Under.
+  const rankedByHigh = G.map((_, i) => i).sort((a, b) => G[b].pHIGH - G[a].pHIGH)
+  let E = rankedByHigh.filter(i => G[i].pHIGH >= 0.08)
+  if (E.length < 3) E = rankedByHigh.slice(0, Math.min(8, N))
+  const logitH = (i: number) => { const p = Math.min(0.95, Math.max(0.02, G[i].pHIGH)); return Math.log(p / (1 - p)) }
+  const topH: number[][] = [[]]
+  let completeDepth = 0
+  for (let d = 1; d <= E.length && topH.length < K; d++) {
+    const total = nCk(E.length, d)
+    const remaining = K - topH.length
+    // bound: only combine the top (d+12) likeliest cutters at this depth, most-probable combos first
+    const T = Math.min(E.length, d + 12)
+    const subs = kSubsets(E.slice(0, T), d, Math.max(remaining * 3, 400))
+    subs.sort((a, b) => b.reduce((s, i) => s + logitH(i), 0) - a.reduce((s, i) => s + logitH(i), 0))
+    for (const s of subs) { if (topH.length >= K) break; topH.push(s) }
+    if (total <= remaining) completeDepth = d
+  }
 
   // honest per-slip keep under INDEPENDENCE: keep = (1+boost(L))·∏(deVigP_side · odds_side)
   const bandProbOf = bandProb
@@ -136,16 +165,20 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
   // family measurement: honest EV (independence) + P(≥1 win) (correlated). To be safe against the
   // correlation-fakes-profit trap, EV is the mean of per-slip independent keeps — never the sim.
   const keepRate = slips.reduce((s, x) => s + x.keep, 0) / slips.length
-  const winSlip = (sl: MultiSlip, o: Band[]) => sl.games.every((fid, j) => { const gi = G.findIndex(g => g.fixtureId === fid); return coversBand(sl.markets[j], o[gi]) })
-  let hits = 0; const T = Math.min(30000, opts.trials ?? 30000)
-  for (let t = 0; t < T; t++) { const o = drawDay(); if (slips.some(sl => winSlip(sl, o))) hits++ }
+  // precompute each slip as (G-index, coverset) pairs so the win-check is O(legs), not O(legs·N)
+  const gi = new Map(G.map((g, i) => [g.fixtureId, i]))
+  const compiled = slips.map(sl => sl.games.map((fid, j) => ({ i: gi.get(fid)!, cover: COVERS[sl.markets[j]] })))
+  const winC = (c: { i: number; cover: Band[] }[], o: Band[]) => { for (const { i, cover } of c) if (!cover.includes(o[i])) return false; return true }
+  let hits = 0; const T = Math.min(20000, opts.trials ?? 20000)
+  for (let t = 0; t < T; t++) { const o = drawDay(); for (const c of compiled) if (winC(c, o)) { hits++; break } }
   const pAnyWin = hits / T
   const pays = slips.map(s => s.payout).sort((a, b) => a - b)
+  const flipStats = slips.map(s => s.markets.filter(m => m[0] === 'O').length)
   return {
     slips, N, K, pAnyWin, keepRate: +keepRate.toFixed(4),
     expectedNet: Math.round((keepRate - 1) * budget),
     medianPayout: pays[Math.floor(pays.length / 2)] || 0,
-    note: `multi-market (U2.5/U4.5/O2.5/O4.5), ${N}-game base, variable legs to ₦${target}. HONEST keep=${keepRate.toFixed(3)} (<1 = −vig, computed under book independence, not the sim).`,
+    note: `multi-market diverse layered coverage: ${N}-game base, ${E.length} flip-eligible, complete depth ${completeDepth} (survives ANY ≤${completeDepth} games going Over-4.5), flips 0..${Math.max(...flipStats)} Over-2.5 per slip, variable legs to ₦${target}. HONEST keep=${keepRate.toFixed(3)} (<1 = −vig, independence-priced).`,
   }
 }
 
