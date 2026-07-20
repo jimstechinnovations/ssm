@@ -12,6 +12,7 @@ import { enrichAxes, enrichSignals, advisoryCoverage } from './enrich'
 import { selectByQuality } from './quality'
 import { buildPedlasBook } from './build'
 import { buildCoverageBook, type CoverageBook } from './coverage'
+import { buildMultiAxes, buildMultiBook, toPedlasSlips } from './multi-market'
 import type { PedlasSlip } from './types'
 
 export interface BuildBookOptions {
@@ -218,9 +219,37 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     pool = withHistory
   }
 
+  const capPay = Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout)
+  const boostFn = opts.boost ?? adapter.boostFor
+
+  // ── DEFAULT: multi-market 3-band coverage (Under 2.5 / Under 4.5 / Over 2.5) + variable-leg trimming ──
+  // Each game is LOW(0-2)/MID(3-4)/HIGH(5+); slips mix the markets, MID is the free overlap, legs are
+  // trimmed to fit the target. Keep-rate is computed HONESTLY under book independence (still −vig). The
+  // legacy Under-4.5/Over-4.5 realizer is reachable with market_policy:'under_4.5'.
+  if (opts.marketPolicy !== 'under_4.5') {
+    const mAxes = opts.excludeLeagues?.length
+      ? buildMultiAxes(fixtures).filter(a => !new RegExp(opts.excludeLeagues!.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i').test(a.league))
+      : buildMultiAxes(fixtures)
+    if (mAxes.length >= 6) {
+      const mm = buildMultiBook(mAxes, { budget: opts.budget, stake, target, maxPayout: capPay, boost: boostFn })
+      const slips = toPedlasSlips(mm, mAxes, stake, capPay, boostFn)
+      const legCounts = slips.map(s => s.legCount)
+      const meta = {
+        scanned: fixtures.length, qualifyingAxes: mAxes.length, withHistory: withHistory.length,
+        poolSize: mAxes.length, legs: mm.N, slips: mm.K, pAnyWin: mm.pAnyWin,
+        medianPayout: mm.medianPayout, keepRate: mm.keepRate, expectedNet: mm.expectedNet,
+        marketBasis: 'multi (U2.5/U4.5/O2.5)', variableLegs: { min: Math.min(...legCounts), max: Math.max(...legCounts) },
+        note: [mm.note, gateNote, `HONEST keep ${mm.keepRate.toFixed(3)} (<1 = −vig); coverage real, vig untouched.`].filter(Boolean).join(' '),
+        ...sourceMeta,
+      }
+      const bookShim = { L: mm.N, K: mm.K, poolSize: mAxes.length, pAnyWin: mm.pAnyWin, medianPayout: mm.medianPayout, medianOdds: 0, slips, note: mm.note } as unknown as CoverageBook
+      return { book: bookShim, slips, meta, usedDateTo }
+    }
+  }
+
   const book = buildCoverageBook(pool, {
-    budget: opts.budget, stake, maxPayout: Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
-    boost: opts.boost ?? adapter.boostFor, legPref: opts.legPref, targetWin: opts.targetWin,
+    budget: opts.budget, stake, maxPayout: capPay,
+    boost: boostFn, legPref: opts.legPref, targetWin: opts.targetWin,
     overThreshold: opts.overThreshold, maxFlipFrac: opts.maxFlipFrac, maxRun: opts.maxRun, realizer: opts.realizer,
     signalWeight: opts.signalWeight,
   })

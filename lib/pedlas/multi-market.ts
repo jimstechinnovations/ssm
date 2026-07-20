@@ -15,13 +15,19 @@
 // correlated sim only shapes P(≥1 win); it never touches the EV. No market mix removes the vig.
 
 import 'server-only'
-import type { Fixture, OddsValue } from './types'
+import type { Fixture, OddsValue, PedlasSlip, PedlasLeg } from './types'
 import { boostFor, type BoostFn } from './boost'
 
 export type Band = 0 | 1 | 2                     // 0=LOW 1=MID 2=HIGH
 export type Market = 'U25' | 'U45' | 'O25' | 'O45'
 const COVERS: Record<Market, Band[]> = { U25: [0], U45: [0, 1], O25: [1, 2], O45: [2] }
 const coversBand = (m: Market, b: Band) => COVERS[m].includes(b)
+/** Which total-goals line + side each market bets (so it maps onto the standard leg + booking code). */
+const MK: Record<Market, { line: number; side: 'Under' | 'Over' }> = {
+  U25: { line: 2.5, side: 'Under' }, U45: { line: 4.5, side: 'Under' }, O25: { line: 2.5, side: 'Over' }, O45: { line: 4.5, side: 'Over' },
+}
+/** P(this market wins for a game) under the book's independent marginals. */
+export function bandProb(a: MultiAxis, m: Market): number { let s = 0; for (const b of COVERS[m]) s += b === 0 ? a.pLOW : b === 1 ? a.pMID : a.pHIGH; return s }
 
 export interface MultiAxis {
   fixtureId: number; game: string; league: string; kickoff: string
@@ -101,7 +107,7 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
   const topH = [...cnt.entries()].sort((a, b) => b[1] - a[1]).slice(0, K).map(([k]) => hset.get(k)!)
 
   // honest per-slip keep under INDEPENDENCE: keep = (1+boost(L))·∏(deVigP_side · odds_side)
-  const bandProbOf = (g: MultiAxis, m: Market) => { let s = 0; for (const band of COVERS[m]) s += band === 0 ? g.pLOW : band === 1 ? g.pMID : g.pHIGH; return s }
+  const bandProbOf = bandProb
   const buildSlip = (H: Set<number>): MultiSlip => {
     // start with all N games: O25 on H, U45 elsewhere
     let games = G.map((_, i) => i)
@@ -141,4 +147,24 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
     medianPayout: pays[Math.floor(pays.length / 2)] || 0,
     note: `multi-market (U2.5/U4.5/O2.5/O4.5), ${N}-game base, variable legs to ₦${target}. HONEST keep=${keepRate.toFixed(3)} (<1 = −vig, computed under book independence, not the sim).`,
   }
+}
+
+/** Convert a MultiBook into standard PedlasSlips (legs carry the right line/side, so settlement,
+ *  booking codes and the UI all work unchanged). trueProb/keep computed under independence (honest). */
+export function toPedlasSlips(book: MultiBook, axes: MultiAxis[], stake: number, maxPayout: number, boost: BoostFn): PedlasSlip[] {
+  const byId = new Map(axes.map(a => [a.fixtureId, a]))
+  return book.slips.map((s, k) => {
+    const legs: PedlasLeg[] = s.games.map((fid, j) => {
+      const a = byId.get(fid)!; const m = s.markets[j]; const { line, side } = MK[m]
+      return { fixtureId: fid, game: a.game, league: a.league, kickoff: a.kickoff, line, side, market: `OVER_UNDER_${line}`, outcome: `${side} ${line}`, odds: a.odds[m] }
+    })
+    let trueProb = 1
+    for (let j = 0; j < s.games.length; j++) trueProb *= bandProb(byId.get(s.games[j])!, s.markets[j])
+    const uncapped = stake * s.combinedOdds * (1 + boost(s.legs))
+    return {
+      slipId: k + 1, vector: s.markets.map(m => (m[0] === 'O' ? 1 : 0)) as (0 | 1)[], legs, legCount: s.legs,
+      combinedOdds: s.combinedOdds, trueProb, boostPct: boost(s.legs) * 100, stake,
+      payout: s.payout, uncappedPayout: uncapped, capped: uncapped > s.payout, evMultiple: s.keep, rankScore: 0,
+    }
+  })
 }
