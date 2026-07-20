@@ -137,20 +137,25 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
 
   // honest per-slip keep under INDEPENDENCE: keep = (1+boost(L))·∏(deVigP_side · odds_side)
   const bandProbOf = bandProb
-  const buildSlip = (H: Set<number>): MultiSlip => {
-    // start with all N games: O25 on H, U45 elsewhere
+  // Market picker across ALL FOUR: a HIGH-flip game uses Over 2.5 (wide, survives MID+HIGH) or, on a
+  // TIGHT slip, Over 4.5 (only HIGH, higher odds). A non-flip game uses Under 4.5 (wide, LOW+MID) or, on
+  // a tight slip where the game is strongly low-scoring, Under 2.5 (only LOW, higher odds). So tight
+  // slips pay more but cover a narrower scoreline → fewer legs to the target → shorter variable slips.
+  const pickMarket = (i: number, inH: boolean, tight: boolean): Market =>
+    inH ? (tight ? 'O45' : 'O25') : (tight && G[i].pLOW >= 0.45 ? 'U25' : 'U45')
+  const buildSlip = (H: Set<number>, tight: boolean): MultiSlip => {
     let games = G.map((_, i) => i)
-    let markets: Market[] = games.map(i => (H.has(i) ? 'O25' : 'U45'))
+    let markets: Market[] = games.map(i => pickMarket(i, H.has(i), tight))
     // variable legs — drop the lowest-odds games while payout still clears target (the trim idea)
     const oddsOf = (i: number, m: Market) => G[i].odds[m]
     let odds = games.reduce((p, i, j) => p * oddsOf(i, markets[j]), 1)
     let pay = Math.min(stake * odds * (1 + boost(games.length)), maxPayout)
-    // drop candidates: lowest-odds legs first, keep dropping while still ≥ target
-    const order = [...games].sort((x, y) => oddsOf(x, H.has(x) ? 'O25' : 'U45') - oddsOf(y, H.has(y) ? 'O25' : 'U45'))
+    // drop candidates: keep flips (H) — drop the lowest-odds NON-flip legs first, while still ≥ target
+    const order = [...games].sort((x, y) => oddsOf(x, pickMarket(x, H.has(x), tight)) - oddsOf(y, pickMarket(y, H.has(y), tight)))
     for (const dropIdx of order) {
-      if (games.length <= 4) break
+      if (games.length <= 4 || H.has(dropIdx)) continue     // never drop a flip (it carries the branch)
       const test = games.filter(i => i !== dropIdx)
-      const testMk = test.map(i => (H.has(i) ? 'O25' : 'U45') as Market)
+      const testMk = test.map(i => pickMarket(i, H.has(i), tight))
       const tOdds = test.reduce((p, i, j) => p * oddsOf(i, testMk[j]), 1)
       const tPay = Math.min(stake * tOdds * (1 + boost(test.length)), maxPayout)
       if (tPay >= target) { games = test; markets = testMk; odds = tOdds; pay = tPay } else break
@@ -160,7 +165,9 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
     for (let j = 0; j < games.length; j++) keep *= bandProbOf(G[games[j]], markets[j]) * oddsOf(games[j], markets[j])
     return { markets, games: games.map(i => G[i].fixtureId), legs: games.length, combinedOdds: odds, payout: Math.round(pay), keep }
   }
-  const slips = topH.map(H => buildSlip(new Set(H)))
+  // ~1 in 3 slips uses the TIGHT markets (Under 2.5 / Over 4.5) → higher payout, shorter, so the family
+  // genuinely spans all four markets and variable leg lengths (the rest stay wide for survival).
+  const slips = topH.map((H, k) => buildSlip(new Set(H), k % 3 === 1))
 
   // family measurement: honest EV (independence) + P(≥1 win) (correlated). To be safe against the
   // correlation-fakes-profit trap, EV is the mean of per-slip independent keeps — never the sim.
