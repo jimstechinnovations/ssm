@@ -27,6 +27,13 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
   let body: unknown
   try { body = await request.json() } catch { return Response.json({ error: 'Invalid JSON' }, { status: 400 }) }
+  const stopReq = Boolean((session.meta as Record<string, unknown> | null)?.stopRequested)
+  // Heartbeat-only ping: the placer sends this every ~10s so a live-but-busy run (retrying/respawning
+  // between slips) isn't misread as "stalled". Just touch the session + return the stop flag.
+  if (body && typeof body === 'object' && (body as { heartbeat?: unknown }).heartbeat) {
+    await touchSession(session.id)
+    return Response.json({ updated: true, stop: stopReq, heartbeat: true })
+  }
   const parsed = Schema.safeParse(body)
   if (!parsed.success) return Response.json({ error: 'Validation failed', issues: parsed.error.issues.map(i => i.message) }, { status: 400 })
   const ok = await updateSessionSlipStatus(session.id, parsed.data.slipId, parsed.data)

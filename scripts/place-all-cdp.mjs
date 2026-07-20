@@ -37,6 +37,12 @@ async function report(slipId, status, extra = {}) {
     if (j?.stop) stopRequested = true
   } catch { /* best-effort */ }
 }
+// HEARTBEAT: touch the session every ~10s so the UI sees a live-but-busy run (colliding/retrying/
+// respawning between slips) as "running", not "stalled" — and so a Resume click can't start a 2nd placer.
+async function heartbeat() {
+  if (!REPORT || DRY) return
+  try { const r = await fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ heartbeat: true, live: !DRY }) }); const j = await r.json().catch(() => ({})); if (j?.stop) stopRequested = true } catch { /* best-effort */ }
+}
 if (!bookPath || !existsSync(bookPath)) { console.error('usage: node scripts/place-all-cdp.mjs <book.json> [--workers N --stake N --min S --max S --dry --report URL]'); process.exit(1) }
 
 const raw = JSON.parse(readFileSync(bookPath, 'utf8'))
@@ -414,7 +420,9 @@ async function supervise(wi) {
   }
 }
 
-await Promise.all(workersArr.map((_, wi) => supervise(wi)))
+await heartbeat()                                   // immediate, so the UI flips to "running" at once
+const hbTimer = setInterval(heartbeat, 10000)       // keep the run marked alive every 10s
+try { await Promise.all(workersArr.map((_, wi) => supervise(wi))) } finally { clearInterval(hbTimer) }
 const secs = ((Date.now() - t0) / 1000).toFixed(1)
 console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, retried ${results.retried}, failed ${results.failed}, respawns ${results.respawns}${DRY ? `, dry ${results.dry}` : ''}`)
 if (queue.length) console.log(`  ${queue.length} slip(s) left unplaced (stopped/retired) — click Resume to finish; already-placed are skipped.`)
