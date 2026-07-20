@@ -111,63 +111,49 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
   const rng = mulberry32(opts.seed ?? 0xC0FFEE)
   const drawDay = () => { const z = gauss(rng); const o = new Array<Band>(N); for (let i = 0; i < N; i++) { const x = Math.sqrt(rho) * z + Math.sqrt(1 - rho) * gauss(rng); o[i] = (x > tH[i] ? 2 : x <= tL[i] ? 0 : 1) as Band } return o }
 
-  // ── DIVERSE LAYERED COVERAGE (the survival tree, not a frequency heap) ──────────────────────────
-  // A game landing MID (3–4) is free (both U45 & O25 win); only a game going HIGH (5+) is decisive and
-  // needs O25. So we cover COMBINATIONS of "which games go HIGH": layer 0 = base (all U45), layer 1 =
-  // each single game flipped to O25 (survive if that one game is the cutter), layer 2 = every pair, …
-  // filling the budget. Eligible flip-games = those with a real HIGH chance, most-likely-HIGH first, so
-  // deep layers only combine plausible cutters. This gives genuinely diverse slips — each survives a
-  // different branch of "who cuts" — instead of a pile of all-Under.
-  const rankedByHigh = G.map((_, i) => i).sort((a, b) => G[b].pHIGH - G[a].pHIGH)
-  let E = rankedByHigh.filter(i => G[i].pHIGH >= 0.08)
-  if (E.length < 3) E = rankedByHigh.slice(0, Math.min(8, N))
-  const logitH = (i: number) => { const p = Math.min(0.95, Math.max(0.02, G[i].pHIGH)); return Math.log(p / (1 - p)) }
-  const topH: number[][] = [[]]
-  let completeDepth = 0
-  for (let d = 1; d <= E.length && topH.length < K; d++) {
-    const total = nCk(E.length, d)
-    const remaining = K - topH.length
-    // bound: only combine the top (d+12) likeliest cutters at this depth, most-probable combos first
-    const T = Math.min(E.length, d + 12)
-    const subs = kSubsets(E.slice(0, T), d, Math.max(remaining * 3, 400))
-    subs.sort((a, b) => b.reduce((s, i) => s + logitH(i), 0) - a.reduce((s, i) => s + logitH(i), 0))
-    for (const s of subs) { if (topH.length >= K) break; topH.push(s) }
-    if (total <= remaining) completeDepth = d
-  }
-
-  // honest per-slip keep under INDEPENDENCE: keep = (1+boost(L))·∏(deVigP_side · odds_side)
+  // ── ODDS-WEIGHTED SAMPLED MIX (every slip a different, intelligent blend of all four markets) ──────
+  // Not a base + flips. Each slip is a distinct plausible day: draw a correlated outcome, then bet each
+  // game the market that FITS its sampled band, chosen from that game's OWN prices —
+  //   HIGH (5+)  → Over 4.5 (tight) or Over 2.5 (wide)
+  //   LOW  (0-2) → Under 2.5 (tight) or Under 4.5 (wide)
+  //   MID  (3-4) → the game's likelier wide side (Under 4.5 if it leans low, Over 2.5 if it leans high)
+  // Sampled, so no two slips are the same and the family spans the real scoreline distribution. Never
+  // blind — every leg follows the game's odds. Honest keep (independence) is still < 1 (−vig).
   const bandProbOf = bandProb
-  // Market picker across ALL FOUR: a HIGH-flip game uses Over 2.5 (wide, survives MID+HIGH) or, on a
-  // TIGHT slip, Over 4.5 (only HIGH, higher odds). A non-flip game uses Under 4.5 (wide, LOW+MID) or, on
-  // a tight slip where the game is strongly low-scoring, Under 2.5 (only LOW, higher odds). So tight
-  // slips pay more but cover a narrower scoreline → fewer legs to the target → shorter variable slips.
-  const pickMarket = (i: number, inH: boolean, tight: boolean): Market =>
-    inH ? (tight ? 'O45' : 'O25') : (tight && G[i].pLOW >= 0.45 ? 'U25' : 'U45')
-  const buildSlip = (H: Set<number>, tight: boolean): MultiSlip => {
+  const oddsOf = (i: number, m: Market) => G[i].odds[m]
+  const fit = (i: number, b: Band, tight: boolean): Market =>
+    b === 2 ? (tight ? 'O45' : 'O25')
+      : b === 0 ? (tight && G[i].pLOW >= 0.4 ? 'U25' : 'U45')
+        : (G[i].pLOW >= G[i].pHIGH ? 'U45' : 'O25')
+  const buildSampled = (bands: Band[], tight: boolean): MultiSlip => {
     let games = G.map((_, i) => i)
-    let markets: Market[] = games.map(i => pickMarket(i, H.has(i), tight))
-    // variable legs — drop the lowest-odds games while payout still clears target (the trim idea)
-    const oddsOf = (i: number, m: Market) => G[i].odds[m]
-    let odds = games.reduce((p, i, j) => p * oddsOf(i, markets[j]), 1)
+    const mk = new Map<number, Market>(games.map(i => [i, fit(i, bands[i], tight)]))
+    let odds = games.reduce((p, i) => p * oddsOf(i, mk.get(i)!), 1)
     let pay = Math.min(stake * odds * (1 + boost(games.length)), maxPayout)
-    // drop candidates: keep flips (H) — drop the lowest-odds NON-flip legs first, while still ≥ target
-    const order = [...games].sort((x, y) => oddsOf(x, pickMarket(x, H.has(x), tight)) - oddsOf(y, pickMarket(y, H.has(y), tight)))
-    for (const dropIdx of order) {
-      if (games.length <= 4 || H.has(dropIdx)) continue     // never drop a flip (it carries the branch)
-      const test = games.filter(i => i !== dropIdx)
-      const testMk = test.map(i => pickMarket(i, H.has(i), tight))
-      const tOdds = test.reduce((p, i, j) => p * oddsOf(i, testMk[j]), 1)
+    // variable legs — drop the lowest-odds legs while payout still clears target
+    const byOdds = [...games].sort((a, b) => oddsOf(a, mk.get(a)!) - oddsOf(b, mk.get(b)!))
+    for (const drop of byOdds) {
+      if (games.length <= 4) break
+      const test = games.filter(i => i !== drop)
+      const tOdds = test.reduce((p, i) => p * oddsOf(i, mk.get(i)!), 1)
       const tPay = Math.min(stake * tOdds * (1 + boost(test.length)), maxPayout)
-      if (tPay >= target) { games = test; markets = testMk; odds = tOdds; pay = tPay } else break
+      if (tPay >= target) { games = test; odds = tOdds; pay = tPay } else break
     }
-    // honest keep (independence)
+    const markets = games.map(i => mk.get(i)!)
     let keep = 1 + boost(games.length)
-    for (let j = 0; j < games.length; j++) keep *= bandProbOf(G[games[j]], markets[j]) * oddsOf(games[j], markets[j])
+    for (const i of games) keep *= bandProbOf(G[i], mk.get(i)!) * oddsOf(i, mk.get(i)!)
     return { markets, games: games.map(i => G[i].fixtureId), legs: games.length, combinedOdds: odds, payout: Math.round(pay), keep }
   }
-  // ~1 in 3 slips uses the TIGHT markets (Under 2.5 / Over 4.5) → higher payout, shorter, so the family
-  // genuinely spans all four markets and variable leg lengths (the rest stay wide for survival).
-  const slips = topH.map((H, k) => buildSlip(new Set(H), k % 3 === 1))
+  // K DISTINCT sampled slips (each a different plausible day). ~1 in 3 uses the tight markets.
+  const slips: MultiSlip[] = []
+  const seen = new Set<string>()
+  for (let guard = 0; slips.length < K && guard < K * 8; guard++) {
+    const sl = buildSampled(drawDay(), slips.length % 3 === 1)
+    const key = sl.games.map((g, j) => g + sl.markets[j]).join('|')
+    if (seen.has(key)) continue
+    seen.add(key); slips.push(sl)
+  }
+  const completeDepth = 0
 
   // family measurement: honest EV (independence) + P(≥1 win) (correlated). To be safe against the
   // correlation-fakes-profit trap, EV is the mean of per-slip independent keeps — never the sim.
@@ -180,12 +166,15 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
   for (let t = 0; t < T; t++) { const o = drawDay(); for (const c of compiled) if (winC(c, o)) { hits++; break } }
   const pAnyWin = hits / T
   const pays = slips.map(s => s.payout).sort((a, b) => a - b)
-  const flipStats = slips.map(s => s.markets.filter(m => m[0] === 'O').length)
+  const mix: Record<Market, number> = { U25: 0, U45: 0, O25: 0, O45: 0 }
+  for (const s of slips) for (const m of s.markets) mix[m]++
+  const legs = slips.map(s => s.legs)
+  void completeDepth
   return {
     slips, N, K, pAnyWin, keepRate: +keepRate.toFixed(4),
     expectedNet: Math.round((keepRate - 1) * budget),
     medianPayout: pays[Math.floor(pays.length / 2)] || 0,
-    note: `multi-market diverse layered coverage: ${N}-game base, ${E.length} flip-eligible, complete depth ${completeDepth} (survives ANY ≤${completeDepth} games going Over-4.5), flips 0..${Math.max(...flipStats)} Over-2.5 per slip, variable legs to ₦${target}. HONEST keep=${keepRate.toFixed(3)} (<1 = −vig, independence-priced).`,
+    note: `multi-market odds-weighted sampled mix: every slip a distinct plausible day, all four markets by game's own prices. legs ${Math.min(...legs)}-${Math.max(...legs)}, market legs U2.5:${mix.U25} U4.5:${mix.U45} O2.5:${mix.O25} O4.5:${mix.O45}. HONEST keep=${keepRate.toFixed(3)} (<1 = −vig, independence-priced).`,
   }
 }
 
