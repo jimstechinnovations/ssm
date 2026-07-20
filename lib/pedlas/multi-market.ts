@@ -125,11 +125,14 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
     b === 2 ? (tight ? 'O45' : 'O25')
       : b === 0 ? (tight && G[i].pLOW >= 0.4 ? 'U25' : 'U45')
         : (G[i].pLOW >= G[i].pHIGH ? 'U45' : 'O25')
-  const buildSampled = (bands: Band[], tight: boolean): MultiSlip => {
+  const buildSampled = (bands: Band[], tight: boolean): MultiSlip | null => {
     let games = G.map((_, i) => i)
     const mk = new Map<number, Market>(games.map(i => [i, fit(i, bands[i], tight)]))
     let odds = games.reduce((p, i) => p * oddsOf(i, mk.get(i)!), 1)
     let pay = Math.min(stake * odds * (1 + boost(games.length)), maxPayout)
+    // GUARANTEE the win clears the goal: if even the full slip can't reach the target, reject it (the
+    // caller re-samples) — so every placed slip pays ≥ target when it hits.
+    if (pay < target) return null
     // variable legs — drop the lowest-odds legs while payout still clears target
     const byOdds = [...games].sort((a, b) => oddsOf(a, mk.get(a)!) - oddsOf(b, mk.get(b)!))
     for (const drop of byOdds) {
@@ -144,11 +147,12 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
     for (const i of games) keep *= bandProbOf(G[i], mk.get(i)!) * oddsOf(i, mk.get(i)!)
     return { markets, games: games.map(i => G[i].fixtureId), legs: games.length, combinedOdds: odds, payout: Math.round(pay), keep }
   }
-  // K DISTINCT sampled slips (each a different plausible day). ~1 in 3 uses the tight markets.
+  // K DISTINCT sampled slips (each a different plausible day), every one paying ≥ target. ~1 in 3 tight.
   const slips: MultiSlip[] = []
   const seen = new Set<string>()
-  for (let guard = 0; slips.length < K && guard < K * 8; guard++) {
+  for (let guard = 0; slips.length < K && guard < K * 20; guard++) {
     const sl = buildSampled(drawDay(), slips.length % 3 === 1)
+    if (!sl) continue
     const key = sl.games.map((g, j) => g + sl.markets[j]).join('|')
     if (seen.has(key)) continue
     seen.add(key); slips.push(sl)

@@ -174,7 +174,7 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
   let usedDateTo = opts.dateTo
   const sourceMeta: Record<string, unknown> = {}
   const maxExtra = Math.max(0, (opts.maxWindowDays ?? 30) - daysBetween(opts.dateFrom, opts.dateTo))
-  for (let extra = 0; extra <= Math.min(30, maxExtra); extra++) {   // extend within the window cap
+  for (let extra = 0; extra <= 30; extra++) {   // hard max 30; prefer to stop within maxExtra (see below)
     const dt = new Date(`${opts.dateFrom}T00:00:00Z`); dt.setUTCDate(dt.getUTCDate() + Math.max(0, daysBetween(opts.dateFrom, opts.dateTo)) + extra)
     usedDateTo = dt.toISOString().slice(0, 10)
     try {
@@ -197,8 +197,11 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
     }
     if (axesAll.length >= 4) {
       const medOdds = [...axesAll.map(a => a.underOdds)].sort((x, y) => x - y)[Math.floor(axesAll.length / 2)]
-      if (axesAll.length >= legsNeeded(medOdds)) break   // enough games to reach target
+      if (axesAll.length >= legsNeeded(medOdds)) break   // reached target — stop (tight window)
+      if (extra >= maxExtra) break                        // hit the preferred window with a buildable pool
+      // — accept the shorter book (sampled-mix + boost handle fewer games); don't over-extend.
     }
+    // else (<4 games): keep extending PAST the preferred window — the dead-end auto-adjust.
   }
   sourceMeta.usedDateTo = usedDateTo
   if (axesAll.length < 4) {
