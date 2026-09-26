@@ -25,8 +25,9 @@
 import { chromium } from 'playwright'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
 import { hostname } from 'node:os'
-import { openSync, closeSync, unlinkSync } from 'node:fs'
+import { openSync, closeSync, unlinkSync, mkdirSync } from 'node:fs'
 import { createHash, randomBytes } from 'node:crypto'
+import { execFileSync } from 'node:child_process'
 
 if (existsSync('.env')) for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
   const m = /^([A-Z_]+)\s*=\s*(.*)$/.exec(line.trim()); if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
@@ -47,6 +48,9 @@ const STAKE_OVERRIDE = args.includes('--stake') ? flag('--stake', NaN) : null
 const QUEUE = args.includes('--queue')
 const BASE = (i => i >= 0 ? args[i + 1] : 'http://localhost:3000')(args.indexOf('--base'))
 const LEASE_SEC = flag('--lease', 180)
+// Which placement Chrome this placer drives. One PC can run several (9222, 9223, …), each with its own
+// profile and therefore its own betslip — one placer per port, all sharing the DB queue.
+const PORT = flag('--port', 9222)
 // Never stake a slip whose payout ON THE SITE (odds moved / bonus differs) is below the session's target.
 const MIN_PAYOUT = flag('--min-payout', 0)
 const REPORT_ARG = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))
@@ -57,7 +61,7 @@ const SESSION = (i => i >= 0 ? args[i + 1] : 'adhoc')(args.indexOf('--session'))
 const REPORT = REPORT_ARG ?? (QUEUE ? `${BASE}/api/sessions/${encodeURIComponent(SESSION)}/slip-status` : null)
 // Queue identity: one id per tab-worker (host:pid:rand:wN) and a stable, non-reversible key per
 // SportyBet ACCOUNT for the cross-PC submit lock (the number itself is never sent anywhere).
-const WORKER_BASE = `${hostname()}:${process.pid}:${randomBytes(2).toString('hex')}`
+const WORKER_BASE = `${hostname()}:${PORT}:${process.pid}:${randomBytes(2).toString('hex')}`
 const ACCOUNT = `sportybet:${createHash('sha256').update(String(process.env.SPORTY_NUMBER || 'unknown')).digest('hex').slice(0, 12)}`
 const ACCOUNT_LABEL = `…${String(process.env.SPORTY_NUMBER || '????').slice(-4)}`
 const QURL = `${BASE}/api/sessions/${encodeURIComponent(SESSION)}/queue`
@@ -120,6 +124,10 @@ const savePlaced = () => { saveChain = saveChain.then(() => { try { writeFileSyn
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
+// --trace: time each step of a slip (where the seconds go) — for tuning speed
+const TRACE = process.argv.includes('--trace')
+/** Poll fn every 100ms until truthy or ms elapse (replaces fixed sleeps: move on the moment the page is ready). */
+const until = async (fn, ms) => { const end = Date.now() + ms; for (;;) { if (await fn().catch(() => false)) return true; if (Date.now() > end) return false; await sleep(100) } }
 const rand = (a, b) => Math.round(a + Math.random() * (b - a))
 
 // Submit mutex: SportyBet rejects two orders submitted at the same instant ("Submission Failed").
@@ -132,16 +140,39 @@ async function bookingCode(legs) {
   const selections = legs.map(l => l.marketId
     ? { eventId: `sr:match:${l.fixtureId}`, marketId: String(l.marketId), specifier: l.specifier || '', outcomeId: String(l.outcomeId) }
     : { eventId: `sr:match:${l.fixtureId}`, marketId: '18', specifier: `total=${l.line}`, outcomeId: l.side === 'Under' ? '13' : '12' })
-  const r = await fetch('https://www.sportybet.com/api/ng/orders/share', { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': UA, platform: 'web' }, body: JSON.stringify({ selections, shareType: 1 }) })
-  const j = await r.json()
-  if (j.bizCode !== 10000 || !j.data?.shareCode) throw new Error(`booking code failed (bizCode ${j.bizCode})`)
-  return j.data.shareCode
+  // 10s timeout + retries: a network blip ("fetch failed") used to fail the slip, and a hung request with no
+  // timeout sat until the 150s slip watchdog killed the worker (seen with 3 windows at once, 2026-09-26).
+  let last
+  for (let a = 1; a <= 4; a++) {
+    try {
+      const r = await fetch('https://www.sportybet.com/api/ng/orders/share', { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': UA, platform: 'web' }, body: JSON.stringify({ selections, shareType: 1 }), signal: AbortSignal.timeout(10_000) })
+      const j = await r.json()
+      if (j.bizCode === 10000 && j.data?.shareCode) return j.data.shareCode
+      last = new Error(`booking code failed (bizCode ${j.bizCode})`)
+      if (j.bizCode === 19000) throw last   // the selections themselves are rejected — retrying won't help
+    } catch (e) { last = e; if (/bizCode 19000/.test(e.message)) throw e }
+    await sleep(700 * a)
+  }
+  throw last
 }
 
 /** All page-bound placement logic, bound to ONE tab. `parallel` disables the racy balance-drop confirm. */
 function makeWorker(page, tag, parallel) {
   const log = (s) => console.log(`${tag}${s}`)
-  const balNum = async () => { const m = (await page.evaluate(() => document.body.innerText)).match(/NGN\s*([\d,.]+)/); return m ? parseFloat(m[1].replace(/,/g, '')) : NaN }
+  // A screenshot of the betslip the moment a slip finally FAILS (not every retry — that would spam disk on
+  // a bad run). This is how the "1010PAXEBFPAXEBF" / "The code is invalid." bug was actually found — by the
+  // operator happening to be looking at the window — so future edge cases like it show up in logs/ instead.
+  const shotOnFail = async (idx, reason) => {
+    try {
+      mkdirSync('logs', { recursive: true })
+      const box = page.locator('[class*=betslip]').first()
+      await box.screenshot({ path: `logs/fail-${SESSION}-slip${idx}-${Date.now()}.png`, timeout: 4000 })
+      log(`  📸 saved a betslip screenshot for slip ${idx} (${reason.slice(0, 60)})`)
+    } catch { /* best effort — never let a screenshot failure mask the real error */ }
+  }
+  // The HEADER balance only (#j_balance). Never "the first NGN on the page": in a narrow window the header
+  // balance isn't rendered and that picked up a big-wins widget (₦100,703) → a false "SIM" (2026-09-26).
+  const balNum = async () => { const t = await page.evaluate(() => document.querySelector('#j_balance, .m-balance')?.textContent ?? '').catch(() => ''); const m = t.match(/NGN\s*([\d,.]+)/); return m ? parseFloat(m[1].replace(/,/g, '')) : NaN }
   const readBalance = async () => { for (let i = 0; i < 10; i++) { const b = await balNum(); if (!Number.isNaN(b)) return b; await sleep(1200) } return NaN }
   const bodyHas = re => page.evaluate(rs => new RegExp(rs, 'i').test(document.body.innerText), re.source)
   // Fixture ids currently on the betslip, read from SportyBet's own betslip storage. null if unreadable
@@ -208,6 +239,7 @@ function makeWorker(page, tag, parallel) {
   const ensureRealView = async () => {
     const sim = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight > 50).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return /virtually simulated/i.test(p?.innerText || '') })
     if (!sim) return
+    console.log(`${tag}⚠ betslip says "virtually simulated" — clicking the REAL side of the toggle`)
     await page.evaluate(() => { const el = document.querySelector('[data-op=switch-box-left]'); if (el) ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => el.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window }))) })
     await page.waitForTimeout(1800)
   }
@@ -229,6 +261,17 @@ function makeWorker(page, tag, parallel) {
   }).catch(() => 0)
 
   const clearSlip = async () => {
+    // FAST PATH (the normal case between slips): Remove All → OK → the code box is back. The full sweep
+    // below scans the whole page text several times per pass (~1s each on SportyBet) — only if this fails.
+    if (!(await codeBoxVisible())) {
+      const ra0 = page.locator('[data-cms-key=remove_all]:visible').first()
+      if (await ra0.count()) {
+        await ra0.click({ force: true }).catch(() => {})
+        const ok = page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap]:visible [class*=dialog-btn]', { hasText: /^OK$/i }).first()
+        if (await until(async () => (await ok.count()) > 0 || await codeBoxVisible(), 1000) && await ok.count()) await ok.click({ force: true }).catch(() => {})
+        await until(codeBoxVisible, 1000)
+      }
+    }
     for (let i = 0; i < 9; i++) {
       if (await codeBoxVisible()) return
       await dismissBlockers()                                  // clear stray popups/consent/error modals first
@@ -242,9 +285,9 @@ function makeWorker(page, tag, parallel) {
       }
       if (await bodyHas(/about to pay/)) { await clickLeaf('^cancel$'); await page.waitForTimeout(800); continue }
       const removeConfirm = await page.evaluate(() => { const w = [...document.querySelectorAll('.es-dialog-wrap,[class*=dialog-wrap]')].find(e => e.offsetWidth || e.offsetHeight); return w ? /remove betslip|remove all items/i.test(w.innerText) : false })
-      if (removeConfirm) { await page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap] [class*=dialog-btn]', { hasText: /^OK$/i }).first().click({ force: true }).catch(() => {}); await page.waitForTimeout(800); continue }
+      if (removeConfirm) { await page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap] [class*=dialog-btn]', { hasText: /^OK$/i }).first().click({ force: true }).catch(() => {}); await until(codeBoxVisible, 800); continue }
       const ra = page.locator('[data-cms-key=remove_all]:visible').first()
-      if (await ra.count()) { await ra.click({ force: true }).catch(() => {}); await page.waitForTimeout(800); continue }
+      if (await ra.count()) { await ra.click({ force: true }).catch(() => {}); await until(async () => (await codeBoxVisible()) || (await page.locator('.es-dialog-wrap:visible, [class*=dialog-wrap]:visible').count()) > 0, 800); continue }
       const del = page.locator('[class*=betslip] [class*=icon-delete]:visible').first()
       if (await del.count()) { await del.click({ force: true }).catch(() => {}); await page.waitForTimeout(600); continue }
       // NUCLEAR RESET (last resort): if the buttons can't clear it (e.g. a betslip full of "Unavailable"
@@ -271,43 +314,80 @@ function makeWorker(page, tag, parallel) {
     const idem = `${SESSION}|sportybet|${stake}|${legSig}`
     if (placedLog[idem]?.placed) { const e = placedLog[idem]; log(`slip ${idx}: SKIP (already placed in this session, ${e.code})`); return { result: 'skip', code: e.code, droppedFixtures: e.droppedFixtures, placedLegs: e.placedLegs, receipt: e.receipt } }
 
+    // hidden page (window minimized/closed) → 'detached' = worker crash → respawn restores a visible window
+    await assertVisible(page)
     if (!(await ensureLoggedIn())) throw new Error('not logged in (keepalive failed)')
     const before = await readBalance()
     if (Number.isNaN(before)) throw new Error('balance unreadable (logged out?)')
     if (before < stake) { if (!DRY) throw new Error(`insufficient balance ₦${before} < ₦${stake}`); log(`  (dry run: balance ₦${before} < stake ₦${stake} — fine, nothing is staked)`) }
     if (before > SIM_BALANCE) throw new Error(`balance ₦${before} looks like SIM play-money (> ₦${SIM_BALANCE}; set PLACEMENT_SIM_BALANCE if this is real) — check REAL/SIM toggle`)
 
-    await clearSlip()
+    let tt = Date.now(); const tr = label => { if (TRACE) { console.log(`      ⏱ ${label} ${((Date.now() - tt) / 1000).toFixed(1)}s`); tt = Date.now() } }
+    await clearSlip(); tr('clear betslip')
     const ci = page.locator('input[placeholder="Booking Code"]').first()
-    await ci.waitFor({ timeout: 15000 }); await ci.click(); await ci.type(code, { delay: 60 }); await page.waitForTimeout(700)
+    await ci.waitFor({ timeout: 15000 })
+    // The box is NOT guaranteed empty here (a previous attempt's leftover text, a stray stake digit blown
+    // in by focus, a paste) — click+type alone APPENDS to whatever is already there, e.g. a real incident:
+    // "1010PAXEBFPAXEBF" (stake "1010" + the code typed twice) → SportyBet: "The code is invalid." Every
+    // retry after that then appended AGAIN, compounding it. Force-clear and VERIFY empty before typing,
+    // then verify the typed value is exactly the code before clicking Load.
+    let typed = false
+    for (let a = 1; a <= 4 && !typed; a++) {
+      await ci.click({ clickCount: 3 }).catch(() => {})           // select-all by triple-click
+      await ci.press('Control+A').catch(() => {})                  // belt-and-braces select-all
+      await ci.press('Delete').catch(() => {})
+      if (!(await until(async () => (await ci.inputValue().catch(() => 'x')) === '', 800))) {
+        await ci.fill('').catch(() => {})                          // last resort: force the DOM value
+      }
+      await ci.type(code, { delay: 20 })
+      if ((await ci.inputValue().catch(() => '')) === code) typed = true
+      else await page.waitForTimeout(200)
+    }
+    if (!typed) throw new Error(`could not get the booking code box to read exactly "${code}" — NOT loading`)
+    tr('type code')
     await page.locator('[class*=betslip] >> text=/^Load$/i').first().click()
-    await page.locator('[class*=betslip] >> text=/Over\\/Under/i').first().waitFor({ timeout: 12000 }).catch(() => {})
-    await page.waitForTimeout(1200)
+    // Wait until the betslip's own storage holds this slip's games — not for "Over/Under" text: Decision
+    // Bot slips often have no Over/Under leg, and every such slip used to sit out the full 12s timeout.
+    // Stop early if the count holds still for ~1.5s (suspended legs load a shorter slip), or immediately
+    // if the site rejects the code outright (no point waiting out the full 12s for games that won't come).
+    const codeRejected = () => page.evaluate(() => /the code is invalid|code has expired|code not found/i.test(document.body.innerText)).catch(() => false)
+    for (let t = 0, last = -1, still = 0; t < 48; t++) {
+      const f = await betslipFixtures(); const n = f ? f.size : 0
+      if (n >= slip.legs.length) break
+      still = n > 0 && n === last ? still + 1 : 0; last = n
+      if (still >= 6) break
+      if (t >= 4 && await codeRejected()) { await shotOnFail(idx, 'code rejected'); throw new Error(`SportyBet rejected the booking code "${code}" ("The code is invalid.") — retrying with a freshly-cleared box`) }
+      await sleep(250)
+    }
+    await page.waitForTimeout(500); tr('load games')
 
     // System tab caps at 15 selections → "Note" dialog blocks everything. Dismiss + force Multiple.
     await page.evaluate(() => {
       const vis = e => e && (e.offsetWidth || e.offsetHeight)
       const note = [...document.querySelectorAll('[class*=dialog],[class*=modal]')].find(d => vis(d) && /cannot be over\s*\d+\s*selections under System/i.test(d.innerText))
       if (note) { const ok = [...note.querySelectorAll('button,span,div')].find(b => b.children.length === 0 && /^OK$/i.test((b.textContent || '').trim())); if (ok) ok.click() }
-    })
-    await page.waitForTimeout(500)
+      return !!note
+    }).then(hadNote => hadNote && page.waitForTimeout(500))
     await page.evaluate(() => {
       const vis = e => e && (e.offsetWidth || e.offsetHeight)
       const mult = [...document.querySelectorAll('[class*=betslip] span,[class*=betslip] div')].find(e => e.children.length === 0 && /^Multiple$/i.test((e.textContent || '').trim()) && vis(e))
       if (mult) ['pointerdown', 'mousedown', 'pointerup', 'mouseup', 'click'].forEach(t => mult.dispatchEvent(new MouseEvent(t, { bubbles: true, cancelable: true, view: window })))
     })
-    await page.waitForTimeout(800)
+    await page.waitForTimeout(300)
 
     const readStake = () => page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? (p.innerText.match(/Total Stake\s+([\d,.]+)/i)?.[1] || '') : '' })
-    let stakeOk = false
+    tr('dialogs/multiple'); let stakeOk = false
+    const stakeIs = async () => parseFloat((await readStake() || '0').replace(/,/g, '')) === stake
+    stakeOk = await until(stakeIs, 400)   // the betslip usually keeps the last stake → nothing to type
     for (let a = 1; a <= 5 && !stakeOk; a++) {
       const sb = page.locator('input[placeholder^="min."]').first()
       await sb.waitFor({ timeout: 5000 }).catch(() => {})
-      await sb.click({ clickCount: 3 }).catch(() => {}); await sb.press('Delete').catch(() => {}); await page.waitForTimeout(150)
-      await sb.type(String(stake), { delay: 60 }); await page.waitForTimeout(600)
-      if (parseFloat((await readStake() || '0').replace(/,/g, '')) === stake) stakeOk = true
+      await sb.click({ clickCount: 3 }).catch(() => {}); await sb.press('Delete').catch(() => {}); await page.waitForTimeout(100)
+      await sb.type(String(stake), { delay: 20 })
+      stakeOk = await until(stakeIs, 1000)
     }
     if (!stakeOk) throw new Error(`could not set stake to ${stake}`)
+    tr('set stake')
 
     const betslipText = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? p.innerText : '' })
     let loadedLegs = (betslipText.match(/Over\/Under/g) || []).length
@@ -332,7 +412,7 @@ function makeWorker(page, tag, parallel) {
     if (!anyTeam) throw new Error(`stale/empty betslip (none of this slip's teams present) — NOT placing`)
 
     log(`slip ${idx}: code ${code} · ₦${stake} @ ${slip.combinedOdds?.toFixed?.(2) ?? '?'} · ${slip.legs.length} legs`)
-    if (DRY) {
+    tr('verify games'); if (DRY) {
       // prove the receipt capture on the real betslip: the numbers the site would stake at Confirm
       const r = await readReceipt()
       const guard = MIN_PAYOUT && r?.sitePayout != null ? (r.sitePayout >= MIN_PAYOUT ? ' · ≥ target ✓' : ' · BELOW target — a live run would skip it') : ''
@@ -442,7 +522,10 @@ function makeWorker(page, tag, parallel) {
           // explicit rejections: the site refused the order, so nothing was placed — safe to retry
           if (await bodyHas(/submission failed|something went wrong/)) throw Object.assign(new Error('SportyBet rejected the submit (Submission Failed) — retry later'), { rejected: true })
           if (/insufficient|not enough|balance is/i.test(await page.evaluate(() => document.body.innerText))) throw Object.assign(new Error('SportyBet: balance insufficient'), { rejected: true, fatal: true })
-          if (!parallel) { const after = await balNum(); if (Math.abs((before - after) - stake) <= 0.5) { placed = true; how = 'balance-drop'; break } }
+          // balance-drop only when nothing else can spend on this account: in QUEUE mode another window or PC on the
+          // same account may have just placed a slip with the same stake → a false "placed". There, only the site's
+          // own success counts; anything unclear goes to verify (bet-history check).
+          if (!parallel && !QUEUE) { const after = await balNum(); if (Math.abs((before - after) - stake) <= 0.5) { placed = true; how = 'balance-drop'; break } }
         }
         if (!placed && !(await bodyHas(/about to pay/))) break
       }
@@ -459,11 +542,34 @@ function makeWorker(page, tag, parallel) {
     throw Object.assign(new Error('not confirmed (no success signal) — needs a bet-history check'), { uncertain: begun })
   }
 
-  return { placeOne, ensureLoggedIn, ensureRealView, dismissBlockers, page, prep: async () => { await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {}); await page.waitForTimeout(3000); await ensureLoggedIn(); await ensureRealView() } }
+  return { placeOne, ensureLoggedIn, ensureRealView, dismissBlockers, shotOnFail, page, prep: async () => {
+    // Already on SportyBet with the header balance showing → logged in and usable: skip the ~20s reload.
+    if (/sportybet\.com/.test(page.url()) && !Number.isNaN(await balNum())) { await ensureRealView(); return }
+    await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {}); await page.waitForTimeout(3000); await ensureLoggedIn(); await ensureRealView()
+  } }
+}
+
+// A page whose window is minimized is FROZEN: evaluate never returns → always race it against a timeout.
+const pageVisibility = page => Promise.race([page.evaluate(() => document.visibilityState), sleep(4000).then(() => 'timeout')]).catch(() => 'gone')
+const isVisible = async page => (await pageVisibility(page)) === 'visible'
+/** Before each slip: a minimized window freezes the page. Restore it through Windows; only a page that is
+ *  still hidden/gone afterwards counts as a dead worker. A merely SLOW answer ('timeout') is not "hidden"
+ *  — treating it so cost ~45s per false respawn. */
+async function assertVisible(page) {
+  const v = await pageVisibility(page)
+  if (v === 'visible') return
+  const r = restoreOsWindow(); if (/restored [1-9]/.test(r)) console.log(`  (${r})`)
+  await sleep(1200)
+  const v2 = await pageVisibility(page)
+  if (v2 === 'hidden' || v2 === 'gone') throw new Error(`placement window ${v2} (minimized/closed) — detached; respawning`)
+}
+function restoreOsWindow() {
+  if (process.platform !== 'win32') return ''
+  try { return execFileSync('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/restore-chrome-window.ps1', '-Port', String(PORT)], { encoding: 'utf8', timeout: 20000, windowsHide: true }).trim() } catch { return '' }
 }
 
 // ── robust worker rig: SHARED queue, per-slip watchdog, crash-respawn supervisor ──
-const CHROME_LOCK = '.placer-cdp-9222.lock'
+const CHROME_LOCK = `.placer-cdp-${PORT}.lock`
 function takeChromeLock() {
   for (let a = 0; a < 2; a++) {
     try { const fd = openSync(CHROME_LOCK, 'wx'); writeFileSync(fd, String(process.pid)); closeSync(fd); return true }
@@ -476,21 +582,64 @@ function takeChromeLock() {
   }
   return false
 }
-if (!takeChromeLock()) { console.error('⛔ another placer is already driving this Chrome (:9222). One placer per Chrome — its tabs share one betslip. Use another PC/Chrome to place in parallel.'); process.exit(3) }
+if (!takeChromeLock()) { console.error(`⛔ another placer is already driving this Chrome (:${PORT}). One placer per Chrome — its tabs share one betslip. Use another window (--port) or PC to place in parallel.`); process.exit(3) }
 process.on('exit', () => { try { if (Number(readFileSync(CHROME_LOCK, 'utf8')) === process.pid) unlinkSync(CHROME_LOCK) } catch { /* gone */ } })
-const browser = await chromium.connectOverCDP('http://127.0.0.1:9222')
+const browser = await chromium.connectOverCDP(`http://127.0.0.1:${PORT}`)
 const ctx = browser.contexts()[0]
 const parallel = WORKERS > 1
 const SPORTY = 'https://www.sportybet.com/ng/'
+// Where a placer keeps its tab: one league page. It has the header balance and the full betslip, but not the
+// home page's live-odds stream, which kept each window busy at ~0.7 of a CPU core even when idle (measured
+// 2026-09-26: 0.43 here). On a 4-core PC with several windows, that CPU is the placing speed.
+const PARK = 'https://www.sportybet.com/ng/sport/football/sr:category:1/sr:tournament:17'
 const MAX_TRIES = flag('--retries', 3)     // auto-retry a failed slip in-run before giving up
 const SLIP_TIMEOUT_MS = flag('--slip-timeout', 150) * 1000   // watchdog: a wedged slip is retried, not hung
 
 // Spawn one worker on its own tab (serial reuses the existing SportyBet tab; parallel opens fresh tabs
 // so each has a clean betslip). Returns a prepped worker or throws.
+// A minimized or closed window stops painting, and clicks then hang until they time out (seen live: a window
+// with no browser window left behind a "hidden" page). Restore the window; if there is none, open a new one.
+async function visiblePage(page) {
+  if (await isVisible(page)) { await ensureWide(page); return page }
+  // minimized (the usual cause) → un-minimize through Windows; CDP can't see a minimized window
+  const r = restoreOsWindow()
+  if (r) console.log(`  (${r})`)
+  await sleep(1500)
+  if (await isVisible(page)) { await ensureWide(page); return page }
+  try {
+    const s = await ctx.newCDPSession(page)
+    const { windowId } = await s.send('Browser.getWindowForTarget')
+    await s.send('Browser.setWindowBounds', { windowId, bounds: { windowState: 'normal' } })
+    await s.detach().catch(() => {})
+    await sleep(800)
+    if (await isVisible(page)) { console.log('  (restored a minimized placement window)'); await ensureWide(page); return page }
+  } catch { /* no window for this page */ }
+  const fresh = await ctx.newPage()
+  await fresh.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {})
+  await page.close().catch(() => {})
+  console.log('  (placement window was closed/hidden — opened a fresh one)')
+  await ensureWide(fresh)
+  return fresh
+}
+// SportyBet's narrow layout drops the header balance (and can hide the REAL/SIM toggle) → widen the window.
+async function ensureWide(page) {
+  try {
+    const s = await ctx.newCDPSession(page)
+    const { windowId, bounds } = await s.send('Browser.getWindowForTarget')
+    if (bounds.windowState === 'normal' && bounds.width < 1280) {
+      await s.send('Browser.setWindowBounds', { windowId, bounds: { width: 1300, height: Math.max(bounds.height, 850) } })
+      console.log(`  (widened the placement window ${bounds.width}px → 1300px so the header balance shows)`)
+      await sleep(800)
+    }
+    await s.detach().catch(() => {})
+  } catch { /* best effort */ }
+}
 async function spawn(wi, reuseBase) {
   let page
   if (reuseBase) { page = ctx.pages().find(p => /sportybet\.com/.test(p.url())); if (!page) { page = await ctx.newPage(); await page.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {}) } }
   else { page = await ctx.newPage(); await page.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {}) }
+  page = await visiblePage(page)
+  if (!/\/sport\/football\/sr:/.test(page.url())) await page.goto(PARK, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {}).then(() => page.waitForFunction(() => !!document.querySelector('#j_balance'), null, { timeout: 20_000 })).catch(() => {})
   const w = makeWorker(page, parallel ? `  [w${wi}] ` : '  ', parallel)
   await w.prep()
   return w
@@ -602,6 +751,7 @@ async function runWorker(wi) {
         console.log(`  slip ${idx}: retry ${tries + 1}/${MAX_TRIES - 1} — ${msg.slice(0, 80)}`)
       } else {
         results.failed++; console.log(`  slip ${idx}: FAILED (after ${tries + 1} tries) — ${e.message}`)
+        await workersArr[wi]?.shotOnFail?.(idx, msg)
         if (!DRY) await report(sid, 'failed', { failureReason: msg }, worker)
       }
       if (/empty\/invalid|stale|leg mismatch/i.test(e.message)) { if (++wrongSlipStreak >= 8) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive empty/stale betslips — betslip not loading (browser wedged?) or all games died. Halting.\n`) } }
@@ -695,5 +845,7 @@ const secs = ((Date.now() - t0) / 1000).toFixed(1)
 console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, retried ${results.retried}, failed ${results.failed}, to-verify ${results.verify}, lease-lost ${results.lost}, respawns ${results.respawns}${DRY ? `, dry ${results.dry}` : ''}`)
 if (!QUEUE && fileQueue.length) console.log(`  ${fileQueue.length} slip(s) left unplaced (stopped/retired).`)
 if (QUEUE && stopRequested) console.log('  stopped — unsubmitted slips are back in the shared queue; any PC can continue.')
-await browser.close()
-
+// Exit promptly. Something (a CDP handle) kept the process — and its Chrome lock — alive ~130s after DONE
+// (measured 2026-09-26), so the next run on this window couldn't start. Nothing is pending by now.
+await Promise.race([browser.close().catch(() => {}), sleep(3000)])
+process.exit(0)

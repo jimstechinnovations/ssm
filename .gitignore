@@ -49,6 +49,7 @@ placement.config.json
 
 # dedicated CDP Chrome profile for the placement bot
 .chrome-bot/
+.chrome-bot-*/
 
 # batch placement idempotency log (local)
 .placed-log.json

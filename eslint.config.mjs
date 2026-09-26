@@ -22,6 +22,7 @@ const eslintConfig = defineConfig([
     "archive/**",
     // Local browser profiles (Chrome extension bundles), generated graphs and screenshots — not our code.
     ".chrome-bot/**",
+    ".chrome-bot-*/**",
     ".browser-profiles/**",
     "graphify-out/**",
     "engine-screenshots/**",

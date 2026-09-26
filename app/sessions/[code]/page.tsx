@@ -53,6 +53,7 @@ export default function SessionPage() {
   const [slipView, setSlipView] = useState<null | { slipId: number; loading: boolean; data?: SlipDetail }>(null)
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
+  const [windows, setWindows] = useState<'auto' | number>('auto')   // placement windows on this PC
   const [workersSeen, setWorkersSeen] = useState<Worker[]>([])
   const [filter, setFilterRaw] = useState('all')
   const [query, setQueryRaw] = useState('')
@@ -113,8 +114,11 @@ export default function SessionPage() {
     setBusy(live ? 'live' : 'dry'); setMsg(null)
     try {
       if (join && !confirm(`Add THIS PC to the running placement?\n\nBoth PCs take slips from the same shared queue — no slip can be placed twice. Make sure this PC's browser is logged in (same or another account) and in REAL mode.`)) { setBusy(null); return }
-      const j = await post('place', { live, join })
-      setMsg(j.error ? { text: j.error, tone: 'error' } : join ? { text: `This PC joined the run — ${j.pending} slip(s) left in the shared queue. Log: ${j.logFile}`, tone: 'info' } : { text: live ? `Placing ${j.pending} slip(s) for real — progress updates below.` : `Dry-run started for ${j.pending} slip(s): nothing is staked; watch the placer window to verify each slip loads correctly.`, tone: live ? 'info' : 'ok' })
+      const j = await post('place', { live, join, browsers: windows })
+      type Win = { port: number; ok: boolean; note: string }
+      const left = ((j.windows ?? []) as Win[]).filter(w => !w.ok)
+      const wins = live ? ` in ${j.browsers} window${j.browsers === 1 ? '' : 's'}${left.length ? ` (left out: ${left.map(w => `:${w.port} ${w.note}`).join(', ')})` : ''}` : ''
+      setMsg(j.error ? { text: j.error, tone: 'error' } : join ? { text: `This PC joined the run${wins} — ${j.pending} slip(s) left in the shared queue.`, tone: 'info' } : { text: live ? `Placing ${j.pending} slip(s) for real${wins} — progress updates below.` : `Dry-run started for ${j.pending} slip(s): nothing is staked; watch the placer window to verify each slip loads correctly.`, tone: live ? 'info' : left.length ? 'warn' : 'ok' })
       await load()
     } catch { setMsg({ text: 'Network error starting placement.', tone: 'error' }) }
     finally { setBusy(null) }
@@ -212,6 +216,7 @@ export default function SessionPage() {
               <div className="flex flex-wrap items-center gap-3">
                 <span className="inline-flex items-center gap-2 text-sm font-medium text-zinc-800 dark:text-zinc-200"><Spinner /> {stopping ? 'Stopping after the current slip…' : `Placing — ${pending} to go`}</span>
                 <div className="ml-auto flex gap-2">
+                  {!stopping && <WindowsPicker value={windows} onChange={setWindows} pending={pending} />}
                   {!stopping && <Button onClick={() => place(true, true)} loading={busy === 'live'} disabled={busy != null || !liveReady} title={liveReady ? 'Place from this PC too — the shared queue prevents double placing' : 'Prepare this PC\'s browser first'}>Add this PC</Button>}
                   <Button variant="danger" onClick={stop} loading={busy === 'stop'} disabled={stopping} icon={<StopIcon className="h-3.5 w-3.5" />}>Stop (all PCs)</Button>
                 </div>
@@ -225,14 +230,16 @@ export default function SessionPage() {
                     Opens the placement Chrome and logs in to SportyBet. Then check it shows <strong>REAL</strong> mode in that window (the app never switches it for you).
                   </Banner>
                 )}
+                {liveReady && <ModeShots />}
                 <div className="flex flex-wrap items-center gap-2">
                   <Button onClick={() => place(false)} loading={busy === 'dry'} disabled={busy != null}>Dry run</Button>
+                  <WindowsPicker value={windows} onChange={setWindows} pending={pending} />
                   <Button variant="go" size="lg" className="ml-auto" onClick={() => place(true)} loading={busy === 'live'} disabled={busy != null || !liveReady}
                     title={liveReady ? '' : 'Prepare the browser first'} icon={<Play className="h-3.5 w-3.5" />}>
                     {placed > 0 ? 'Resume' : 'Place'} {pending} slip{pending === 1 ? '' : 's'} · {naira(pending * session.minStake)}
                   </Button>
                 </div>
-                <p className="text-xs text-zinc-500">Every slip is checked on the betslip before Confirm and recorded with the site&apos;s own numbers. To place faster, open this app on another PC (same or another SportyBet account) and press <strong>Add this PC</strong> — the shared queue makes sure no slip is placed twice.</p>
+                <p className="text-xs text-zinc-500">Every slip is checked on the betslip before Confirm and recorded with the site&apos;s own numbers. <strong>Windows</strong> places in parallel on this PC (each window has its own betslip; about 12s per slip per window). One account submits one slip at a time, so about 4 windows is the most that helps per account — for more speed, add a PC with another SportyBet account and press <strong>Add this PC</strong>. The shared queue makes sure no slip is placed twice.</p>
               </div>
             ) : placed > 0 ? (
               <div className="flex flex-wrap items-center gap-2">
@@ -611,6 +618,51 @@ function VerifyPanel({ code, onDone }: { code: string; onDone: () => void }) {
   )
 }
 
+// ── REAL/SIM check: a screenshot of each open window's toggle (the page's markup can't be trusted) ──
+function ModeShots() {
+  const [ports, setPorts] = useState<number[]>([])
+  const [nonce, setNonce] = useState(() => Date.now())
+  useEffect(() => {
+    let off = false
+    fetch('/api/browser?windows=1').then(r => r.json()).then(j => { if (!off) setPorts((j.windows ?? []).filter((w: { up: boolean }) => w.up).map((w: { port: number }) => w.port)) }).catch(() => {})
+    return () => { off = true }
+  }, [nonce])
+  if (!ports.length) return null
+  return (
+    <div className="rounded-xl border border-zinc-200 px-3 py-2 text-xs dark:border-zinc-800">
+      <div className="mb-1.5 flex items-center gap-2 text-zinc-600 dark:text-zinc-400">
+        <span className="font-medium text-zinc-700 dark:text-zinc-300">REAL / SIM check</span>
+        <span>each window&apos;s toggle as it looks right now — REAL must be the highlighted side</span>
+        <button className="ml-auto text-sky-600 hover:underline" onClick={() => setNonce(Date.now())}>Refresh</button>
+      </div>
+      <div className="flex flex-wrap gap-3">
+        {ports.map(p => (
+          <figure key={p} className="flex items-center gap-2">
+            {/* eslint-disable-next-line @next/next/no-img-element -- a live local screenshot, not a static asset */}
+            <img src={`/api/browser?shot=${p}&fresh=1&t=${nonce}`} alt={`REAL/SIM toggle of window :${p}`} className="h-7 rounded border border-zinc-200 dark:border-zinc-700" />
+            <figcaption className="text-zinc-500">:{p}{p === 9222 ? ' main' : ''}</figcaption>
+          </figure>
+        ))}
+      </div>
+    </div>
+  )
+}
+
+// ── how many placement windows to use on this PC ───────────────────────────────
+function WindowsPicker({ value, onChange, pending }: { value: 'auto' | number; onChange: (v: 'auto' | number) => void; pending: number }) {
+  const auto = Math.min(4, Math.max(1, Math.ceil(pending / 50)))
+  return (
+    <label className="inline-flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400" title="Parallel placement windows on this PC — each has its own betslip; all share the queue">
+      Windows
+      <select value={String(value)} onChange={e => onChange(e.target.value === 'auto' ? 'auto' : Number(e.target.value))}
+        className="rounded-md border border-zinc-300 bg-white px-1.5 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+        <option value="auto">Auto ({auto})</option>
+        {[1, 2, 3, 4].map(n => <option key={n} value={n}>{n}</option>)}
+      </select>
+    </label>
+  )
+}
+
 // ── which PCs are placing this session right now (shared queue) ─────────────────
 function WorkersRoster({ workers }: { workers: Worker[] }) {
   const alive = workers.filter(w => w.lastSeenAgoMs < 30_000 && w.state === 'running')
@@ -626,7 +678,7 @@ function WorkersRoster({ workers }: { workers: Worker[] }) {
             <div key={host} className="flex flex-wrap items-center gap-x-3 gap-y-1 text-zinc-600 dark:text-zinc-400">
               <Badge tone={live ? 'green' : 'zinc'} dot>{live ? 'active' : ws[0].state}</Badge>
               <span className="font-medium text-zinc-800 dark:text-zinc-200">{host}</span>
-              <span>{ws.length} tab{ws.length === 1 ? '' : 's'} · account {ws[0].account ?? '—'}</span>
+              <span>{ws.length} window{ws.length === 1 ? '' : 's'} · account {ws[0].account ?? '—'}</span>
               <span>placed {ws.reduce((s, w) => s + w.placed, 0)} · returned to queue {ws.reduce((s, w) => s + w.failed, 0)}</span>
               {ws.some(w => w.currentSlip != null) && <span>on slip #{ws.filter(w => w.currentSlip != null).map(w => w.currentSlip).join(', #')}</span>}
               {!live && <span className="text-zinc-400">last seen {Math.round(Math.min(...ws.map(w => w.lastSeenAgoMs)) / 1000)}s ago</span>}
