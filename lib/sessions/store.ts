@@ -412,6 +412,27 @@ export async function settleSessionSlip(sessionId: string, slipId: number, won: 
   } catch { return false }
 }
 
+/**
+ * Return 'skipped' and/or 'failed' slips to the pending queue so they get another live attempt — e.g.
+ * "skipped" because the site's odds had drifted below target at the time (safe: nothing was staked), or
+ * "failed" after exhausting retries. Resets attempts to 0 and clears every claim/lease field, so a slip
+ * that hit the 3-attempt cap gets a fresh budget rather than being claimed and instantly re-failed.
+ * Never touches 'placed'/'won'/'lost'/'verify' slips. Returns how many rows were reset.
+ */
+export async function requeueSession(sessionId: string, statuses: ('skipped' | 'failed')[] = ['skipped', 'failed']): Promise<number> {
+  try {
+    const supabase = createServerClient()
+    // Count BEFORE the update, not via .update().select() — that combination returned an empty/null `data`
+    // here despite the update itself succeeding (an RLS representation-return quirk, 2026-09-26), which
+    // silently under-reported a real requeue as 0. A plain count avoids relying on the update's own return.
+    const { count } = await (supabase.from('pedla_placements') as any)
+      .select('id', { count: 'exact', head: true }).eq('session_id', sessionId).in('status', statuses)
+    const row = { status: 'pending', claimed_by: null, claim_expires_at: null, submit_started_at: null, attempts: 0, last_error: null, updated_at: new Date().toISOString() }
+    const { error } = await ((supabase.from('pedla_placements') as any).update(row).eq('session_id', sessionId).in('status', statuses)) as { error: unknown }
+    return error ? 0 : (count ?? 0)
+  } catch { return 0 }
+}
+
 /** Roll a session's slips up into a scoreboard for the dashboard / detail view. */
 export interface SessionSummary {
   slips: number
