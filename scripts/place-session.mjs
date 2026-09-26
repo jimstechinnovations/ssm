@@ -91,15 +91,19 @@ if (status.size) {
 console.log(`session ${session.code}: ${slips.length} slip(s) to place · pending ${summary.pending} · staked-so-far ₦${summary.staked}`)
 const reportUrl = `${BASE}/api/sessions/${encodeURIComponent(session.code)}/slip-status`
 let placerArgs
+// The floor a drifted payout must still clear (see place-all-cdp.mjs): the session's own budget is always
+// the absolute floor (never place for less than what was risked to build the pool); --floor-pct (passed
+// through from the caller, default 100 = old exact-target behaviour) sets the target-relative side of it.
+const floorArgs = ['--budget-floor', String(session.budget)]
 if (LIVE) {
   // LIVE → the shared database queue: any number of PCs can run this same command for the same session.
   console.log('Placing 🔴 LIVE (real money) from the shared queue — safe to run on several PCs at once, or to continue on another PC.')
-  placerArgs = ['scripts/place-all-cdp.mjs', '--queue', '--session', session.code, '--base', BASE, '--min-payout', String(session.targetWin), ...passthrough]
+  placerArgs = ['scripts/place-all-cdp.mjs', '--queue', '--session', session.code, '--base', BASE, '--min-payout', String(session.targetWin), ...floorArgs, ...passthrough]
 } else {
   const bookFile = `session-${session.code}.json`
   writeFileSync(bookFile, JSON.stringify({ book: { slips: slips.map(s => ({ legs: s.legs, stake: s.stake, slipId: s.slipId, combinedOdds: s.combinedOdds, payout: s.potentialPayout })), stakePerSlip: slips[0].stake } }, null, 2))
   console.log(`wrote ${bookFile}. 🟢 DRY-RUN via place-all-cdp (loads every slip on the betslip, never clicks Confirm, changes nothing in the queue)…`)
-  placerArgs = ['scripts/place-all-cdp.mjs', bookFile, '--report', reportUrl, '--session', session.code, '--dry', '--min-payout', String(session.targetWin), ...passthrough]
+  placerArgs = ['scripts/place-all-cdp.mjs', bookFile, '--report', reportUrl, '--session', session.code, '--dry', '--min-payout', String(session.targetWin), ...floorArgs, ...passthrough]
 }
 const p = spawn(process.execPath, placerArgs, { stdio: 'inherit' })   // no shell: keeps our stdout (the run log) attached
 p.on('close', c => process.exit(c ?? 0))

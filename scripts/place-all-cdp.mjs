@@ -51,8 +51,16 @@ const LEASE_SEC = flag('--lease', 180)
 // Which placement Chrome this placer drives. One PC can run several (9222, 9223, …), each with its own
 // profile and therefore its own betslip — one placer per port, all sharing the DB queue.
 const PORT = flag('--port', 9222)
-// Never stake a slip whose payout ON THE SITE (odds moved / bonus differs) is below the session's target.
+// Never stake a slip whose payout ON THE SITE (odds moved / bonus differs) is below the session's target —
+// UNLESS a floor is configured (--floor-pct), in which case a payout that has drifted but is still well
+// worth taking is placed instead of skipped outright. The floor is the HIGHER of: --floor-pct% of the
+// target, and the session's own budget (never place for less than the budget risked to build the pool).
+// floor-pct=100 (the default) reproduces the old all-or-nothing behaviour exactly.
 const MIN_PAYOUT = flag('--min-payout', 0)
+const FLOOR_PCT = flag('--floor-pct', 100)
+const BUDGET_FLOOR = flag('--budget-floor', 0)
+const EFFECTIVE_FLOOR = MIN_PAYOUT ? Math.max(BUDGET_FLOOR, MIN_PAYOUT * (FLOOR_PCT / 100)) : 0
+const floorNote = FLOOR_PCT < 100 ? ` (floor: ${FLOOR_PCT}% of target = ₦${(MIN_PAYOUT * FLOOR_PCT / 100).toLocaleString()}, or budget ₦${BUDGET_FLOOR.toLocaleString()}, whichever is higher)` : ''
 const REPORT_ARG = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))
 // Idempotency is scoped to the SESSION: a cloned/rebuilt session with an identical slip must place its
 // own bet, never be "skipped as already placed" with another session's booking code (that reported
@@ -415,7 +423,7 @@ function makeWorker(page, tag, parallel) {
     tr('verify games'); if (DRY) {
       // prove the receipt capture on the real betslip: the numbers the site would stake at Confirm
       const r = await readReceipt()
-      const guard = MIN_PAYOUT && r?.sitePayout != null ? (r.sitePayout >= MIN_PAYOUT ? ' · ≥ target ✓' : ' · BELOW target — a live run would skip it') : ''
+      const guard = MIN_PAYOUT && r?.sitePayout != null ? (r.sitePayout >= EFFECTIVE_FLOOR ? ' · ≥ floor ✓' : ' · BELOW floor — a live run would skip it') : ''
       log(`  [dry] betslip shows odds ${r?.siteOdds ?? '?'} · stake ₦${r?.siteStake ?? '?'} · potential win ₦${r?.sitePayout ?? '?'} (built ₦${slip.payout ?? '?'})${guard} — skipping Place/Confirm`)
       return { result: 'dry', code, receipt: r }
     }
@@ -472,7 +480,7 @@ function makeWorker(page, tag, parallel) {
 
     // ── payout guard: what the SITE will pay must still reach the target ──
     const pre = await readReceipt()
-    if (MIN_PAYOUT && pre?.sitePayout != null && pre.sitePayout < MIN_PAYOUT) throw new Error(`SKIP: payout on the site is ₦${pre.sitePayout.toLocaleString()} — below the ₦${MIN_PAYOUT.toLocaleString()} target (odds moved since the build)`)
+    if (MIN_PAYOUT && pre?.sitePayout != null && pre.sitePayout < EFFECTIVE_FLOOR) throw new Error(`SKIP: payout on the site is ₦${pre.sitePayout.toLocaleString()} — below the ₦${EFFECTIVE_FLOOR.toLocaleString()} floor${floorNote} (odds moved since the build)`)
 
     // ── serialize the actual submission so concurrent workers never collide ──
     const release = await acquireSubmit()
@@ -512,7 +520,7 @@ function makeWorker(page, tag, parallel) {
             if (foreign.length || missing.length) throw Object.assign(new Error(`betslip changed before Confirm (${foreign.length} foreign, ${missing.length} missing) — NOT submitting`), { rejected: true })
           }
         }
-        if (!begun && MIN_PAYOUT && receipt?.sitePayout != null && receipt.sitePayout < MIN_PAYOUT) throw Object.assign(new Error(`SKIP: after odds changes the site pays ₦${receipt.sitePayout.toLocaleString()} — below the ₦${MIN_PAYOUT.toLocaleString()} target`), { rejected: true })
+        if (!begun && MIN_PAYOUT && receipt?.sitePayout != null && receipt.sitePayout < EFFECTIVE_FLOOR) throw Object.assign(new Error(`SKIP: after odds changes the site pays ₦${receipt.sitePayout.toLocaleString()} — below the ₦${EFFECTIVE_FLOOR.toLocaleString()} floor${floorNote}`), { rejected: true })
         if (!begun && hooks.beforeConfirm) await hooks.beforeConfirm()
         begun = true
         await clickBtn('^confirm$')

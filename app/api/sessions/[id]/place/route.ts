@@ -1,5 +1,5 @@
 /**
- * POST /api/sessions/[id]/place  { live?: boolean, join?: boolean, browsers?: number | 'auto' }
+ * POST /api/sessions/[id]/place  { live?: boolean, join?: boolean, browsers?: number | 'auto', floorPct?: number }
  * Start a placement run for this session's slips via the CDP placer (scripts/place-session.mjs →
  * place-all-cdp). DRY-RUN by default. A LIVE (real-money) run requires ALL of:
  *   - PLACEMENT_LIVE=1 in the environment
@@ -11,6 +11,11 @@
  * 'auto' (default) = one window per 50 pending slips, capped at 4 — on one account ~4 windows saturate
  * SportyBet's one-submit-at-a-time rule. Extra windows copy the main window's login. A window that isn't
  * ready (not logged in / looks like SIM) is left out; the run goes ahead on the others.
+ *
+ * `floorPct` (1-100, default 100): a payout that has drifted below the exact target since the build is
+ * still placed, not skipped, as long as it's still at or above the HIGHER of floorPct% of the target and
+ * the session's own budget — e.g. floorPct:50 places anything that still clears half the target (never
+ * below budget). 100 (the default) reproduces the exact-target-or-skip behaviour.
  */
 
 import { spawn } from 'node:child_process'
@@ -29,7 +34,12 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
 
   let live = false, join = false
   let requested: number | 'auto' = 'auto'
-  try { const b = await request.json(); live = Boolean(b?.live); join = Boolean(b?.join); if (Number(b?.browsers) > 0) requested = Number(b.browsers) } catch { /* dry */ }
+  let floorPct = 100
+  try {
+    const b = await request.json(); live = Boolean(b?.live); join = Boolean(b?.join)
+    if (Number(b?.browsers) > 0) requested = Number(b.browsers)
+    if (Number.isFinite(Number(b?.floorPct))) floorPct = Math.min(100, Math.max(1, Number(b.floorPct)))
+  } catch { /* dry */ }
   const summary = await sessionSummary(session.id)
   if (summary.pending === 0) return Response.json({ error: 'No pending slips to place' }, { status: 409 })
 
@@ -77,9 +87,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   // hot-reload artifact was seen doing exactly this on 2026-09-26, self-resolved on retry, never recurred
   // across 53 live placements after) is the worst possible failure to miss. This line lets the server log
   // be cross-checked against the placer's own log file if it ever happens again.
-  console.log(`[place] session=${session.code} live=${live} browsers=${ready.length} ports=${ready.map(w => w.port).join(',')}`)
+  console.log(`[place] session=${session.code} live=${live} browsers=${ready.length} ports=${ready.map(w => w.port).join(',')} floorPct=${floorPct}`)
   for (const w of ready) {
-    const args = ['scripts/place-session.mjs', session.code, '--base', origin, '--port', String(w.port), ...(live ? ['--live'] : [])]
+    const args = ['scripts/place-session.mjs', session.code, '--base', origin, '--port', String(w.port), '--floor-pct', String(floorPct), ...(live ? ['--live'] : [])]
     const logFile = joinPath('logs', `placer-${session.code}-${hostname()}-${w.port}-${stamp}.log`)
     const out = openSync(logFile, 'a')
     // Launch node DIRECTLY (no shell): on Windows a detached `cmd` wrapper does not pass the log file handles
@@ -90,5 +100,5 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   }
 
   if (live) await updateSession(session.id, { status: 'placing' })   // only live drives the run-state UI; dry is a rehearsal
-  return Response.json({ started: true, live, join, browsers: ready.length, windows, session: session.code, pending: summary.pending, logFile: logFiles[0], logFiles })
+  return Response.json({ started: true, live, join, browsers: ready.length, windows, floorPct, session: session.code, pending: summary.pending, logFile: logFiles[0], logFiles })
 }

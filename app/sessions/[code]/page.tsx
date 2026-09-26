@@ -54,6 +54,7 @@ export default function SessionPage() {
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
   const [windows, setWindows] = useState<'auto' | number>('auto')   // placement windows on this PC
+  const [floorPct, setFloorPct] = useState(100)   // place a drifted payout down to this % of target (never below budget)
   const [workersSeen, setWorkersSeen] = useState<Worker[]>([])
   const [filter, setFilterRaw] = useState('all')
   const [query, setQueryRaw] = useState('')
@@ -114,7 +115,7 @@ export default function SessionPage() {
     setBusy(live ? 'live' : 'dry'); setMsg(null)
     try {
       if (join && !confirm(`Add THIS PC to the running placement?\n\nBoth PCs take slips from the same shared queue — no slip can be placed twice. Make sure this PC's browser is logged in (same or another account) and in REAL mode.`)) { setBusy(null); return }
-      const j = await post('place', { live, join, browsers: windows })
+      const j = await post('place', { live, join, browsers: windows, floorPct })
       type Win = { port: number; ok: boolean; note: string }
       const left = ((j.windows ?? []) as Win[]).filter(w => !w.ok)
       const wins = live ? ` in ${j.browsers} window${j.browsers === 1 ? '' : 's'}${left.length ? ` (left out: ${left.map(w => `:${w.port} ${w.note}`).join(', ')})` : ''}` : ''
@@ -217,6 +218,7 @@ export default function SessionPage() {
                 <span className="inline-flex items-center gap-2 text-sm font-medium text-zinc-800 dark:text-zinc-200"><Spinner /> {stopping ? 'Stopping after the current slip…' : `Placing — ${pending} to go`}</span>
                 <div className="ml-auto flex gap-2">
                   {!stopping && <WindowsPicker value={windows} onChange={setWindows} pending={pending} />}
+                  {!stopping && <FloorPicker value={floorPct} onChange={setFloorPct} />}
                   {!stopping && <Button onClick={() => place(true, true)} loading={busy === 'live'} disabled={busy != null || !liveReady} title={liveReady ? 'Place from this PC too — the shared queue prevents double placing' : 'Prepare this PC\'s browser first'}>Add this PC</Button>}
                   <Button variant="danger" onClick={stop} loading={busy === 'stop'} disabled={stopping} icon={<StopIcon className="h-3.5 w-3.5" />}>Stop (all PCs)</Button>
                 </div>
@@ -234,12 +236,13 @@ export default function SessionPage() {
                 <div className="flex flex-wrap items-center gap-2">
                   <Button onClick={() => place(false)} loading={busy === 'dry'} disabled={busy != null}>Dry run</Button>
                   <WindowsPicker value={windows} onChange={setWindows} pending={pending} />
+                  <FloorPicker value={floorPct} onChange={setFloorPct} />
                   <Button variant="go" size="lg" className="ml-auto" onClick={() => place(true)} loading={busy === 'live'} disabled={busy != null || !liveReady}
                     title={liveReady ? '' : 'Prepare the browser first'} icon={<Play className="h-3.5 w-3.5" />}>
                     {placed > 0 ? 'Resume' : 'Place'} {pending} slip{pending === 1 ? '' : 's'} · {naira(pending * session.minStake)}
                   </Button>
                 </div>
-                <p className="text-xs text-zinc-500">Every slip is checked on the betslip before Confirm and recorded with the site&apos;s own numbers. <strong>Windows</strong> places in parallel on this PC (each window has its own betslip; about 12s per slip per window). One account submits one slip at a time, so about 4 windows is the most that helps per account — for more speed, add a PC with another SportyBet account and press <strong>Add this PC</strong>. The shared queue makes sure no slip is placed twice.</p>
+                <p className="text-xs text-zinc-500">Every slip is checked on the betslip before Confirm and recorded with the site&apos;s own numbers. <strong>Windows</strong> places in parallel on this PC (each window has its own betslip; about 12s per slip per window). One account submits one slip at a time, so about 4 windows is the most that helps per account — for more speed, add a PC with another SportyBet account and press <strong>Add this PC</strong>. The shared queue makes sure no slip is placed twice. <strong>Floor</strong> controls what happens when the site&apos;s odds have moved since the build: at 100% a slip below target is skipped (nothing staked); below 100%, it&apos;s still placed as long as the payout is at or above that % of target and never below the session budget.</p>
               </div>
             ) : placed > 0 ? (
               <div className="flex flex-wrap items-center gap-2">
@@ -658,6 +661,23 @@ function WindowsPicker({ value, onChange, pending }: { value: 'auto' | number; o
         className="rounded-md border border-zinc-300 bg-white px-1.5 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900">
         <option value="auto">Auto ({auto})</option>
         {[1, 2, 3, 4].map(n => <option key={n} value={n}>{n}</option>)}
+      </select>
+    </label>
+  )
+}
+
+// ── how far a drifted payout may fall below target and still be placed (never below budget) ────
+function FloorPicker({ value, onChange }: { value: number; onChange: (v: number) => void }) {
+  return (
+    <label className="inline-flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400"
+      title="If the site's odds moved since the build, place anyway as long as the payout is still at least this % of target (and never below the session budget). 100% = only place at/above the exact target.">
+      Floor
+      <select value={String(value)} onChange={e => onChange(Number(e.target.value))}
+        className="rounded-md border border-zinc-300 bg-white px-1.5 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900">
+        <option value="100">100% (exact target)</option>
+        <option value="75">75% of target</option>
+        <option value="50">50% of target</option>
+        <option value="25">25% of target</option>
       </select>
     </label>
   )
