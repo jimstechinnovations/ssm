@@ -1,16 +1,17 @@
 // lib/pedlas/results.ts
 // Final scores for SportyBet fixtures, by the SAME id our slips use (sr:match:N). Plain server fetch
 // (the factsCenter event endpoint isn't Cloudflare-gated) — no browser needed. total = home + away.
+// This is the ONE score source for every settlement path (session settle, Reports ledger, grading).
 
 import 'server-only'
 import type { GameResult } from './settle-slips'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36'
-const FINISHED = /end|finish|\bft\b|full.?time|awarded|closed/i
+const FINISHED = /end|finish|\bft\b|full.?time|awarded|closed|\baet\b|\bap\b/i
 
-/** Parse "H#A" / "H:A" / "H-A" → total goals, or null. (productStatus was "0#0" pre-match.) */
-function parseTotal(...vals: (string | undefined)[]): number | null {
-  for (const v of vals) { const m = (v ?? '').match(/(\d+)\s*[#:\-]\s*(\d+)/); if (m) return Number(m[1]) + Number(m[2]) }
+/** Parse "H#A" / "H:A" / "H-A" → [home, away] goals, or null. (productStatus was "0#0" pre-match.) */
+function parseScore(...vals: (string | undefined)[]): [number, number] | null {
+  for (const v of vals) { const m = (v ?? '').match(/(\d+)\s*[#:\-]\s*(\d+)/); if (m) return [Number(m[1]), Number(m[2])] }
   return null
 }
 
@@ -18,12 +19,15 @@ export async function fetchResult(fixtureId: number): Promise<GameResult | null>
   try {
     const r = await fetch(`https://www.sportybet.com/api/ng/factsCenter/event?eventId=sr:match:${fixtureId}&productId=1`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, cache: 'no-store', signal: AbortSignal.timeout(8000) })
     if (!r.ok) return null
-    const d = (await r.json())?.data as Record<string, string> | undefined
+    const d = (await r.json())?.data as (Record<string, string> & { status?: number | string }) | undefined
     if (!d) return null
-    const finished = FINISHED.test(d.matchStatus || d.status || '')
-    const total = parseTotal(d.setScore, d.productStatus, d.gameScore)
-    if (total == null) return { finished, total: 0 }
-    return { finished, total }
+    // Either signal marks the end: the text status ("Ended"/"FT"/"AP"…) or numeric status 3/4.
+    const finished = FINISHED.test(d.matchStatus || '') || (typeof d.status === 'string' && FINISHED.test(d.status)) || Number(d.status) === 3 || Number(d.status) === 4
+    const score = parseScore(d.setScore, d.productStatus, d.gameScore)
+    // A score we cannot read must NEVER settle as 0-0 (that would wrongly win every Under leg) —
+    // treat it as not finished so the slip stays pending until a real score is available.
+    if (score == null) return { finished: false, total: 0 }
+    return { finished, total: score[0] + score[1], home: score[0], away: score[1] }
   } catch { return null }
 }
 

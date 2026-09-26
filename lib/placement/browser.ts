@@ -16,8 +16,11 @@ export async function cdpUp(): Promise<boolean> {
 /** Launch the debug Chrome (cdp-launch-chrome.ps1) if it isn't already up; wait for :9222. */
 export async function launchBrowser(mode: 'dedicated' | 'default' = 'dedicated'): Promise<{ up: boolean; started: boolean }> {
   if (await cdpUp()) return { up: true, started: false }
-  spawn('powershell', ['-ExecutionPolicy', 'Bypass', '-File', 'scripts/cdp-launch-chrome.ps1', '-Mode', mode],
-    { stdio: 'ignore', detached: true }).unref()
+  // NOT detached: on Windows a detached PowerShell gets its own console and the script silently never ran
+  // (verified 2026-09-25). The script's own Start-Process already detaches Chrome, and the script exits by
+  // itself once the port is up, so a plain child is correct.
+  spawn('powershell', ['-NoProfile', '-ExecutionPolicy', 'Bypass', '-File', 'scripts/cdp-launch-chrome.ps1', '-Mode', mode],
+    { stdio: 'ignore', windowsHide: true }).on('error', () => { /* reported via the port check below */ })
   for (let i = 0; i < 20; i++) { await sleep(1500); if (await cdpUp()) return { up: true, started: true } }
   return { up: false, started: true }
 }

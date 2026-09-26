@@ -8,8 +8,12 @@
  */
 
 import { z } from 'zod'
-import { listPlacements, listPlacementsPage, listOpenPlacements, settlePlacement, ledgerSummary } from '@/lib/placement/store'
+import { getPlacement, listPlacementsPage, listOpenPlacements, settlePlacement, ledgerSummary } from '@/lib/placement/store'
 import { gradeSlip } from '@/lib/placement/results'
+import { fetchResults } from '@/lib/pedlas/results'
+import { reconciledPayout, boostFromTable } from '@/lib/pedlas/boost'
+import { getBookConfig, bookBoost } from '@/lib/books/config-store'
+import { getBook } from '@/lib/books/registry'
 
 export const runtime = 'nodejs'
 
@@ -43,7 +47,7 @@ export async function POST(request: Request): Promise<Response> {
   // grade one slip (no write)
   const grade = GradeSchema.safeParse(body)
   if (grade.success) {
-    const row = (await listPlacements({ limit: 200, includeDryRun: true })).find(p => p.id === grade.data.id)
+    const row = await getPlacement(grade.data.id)
     if (!row) return Response.json({ error: 'Unknown placement id' }, { status: 404 })
     return Response.json({ grade: await gradeSlip(row.legs) })
   }
@@ -72,15 +76,31 @@ export async function POST(request: Request): Promise<Response> {
   const open = await listOpenPlacements()
   const settledRows: { id: string; won: boolean; returned: number }[] = []
   const pending: { id: string; finished: number; total: number }[] = []
+  // one results fetch for every distinct game (slips share the pool) — same source as session settle
+  const results = await fetchResults(open.flatMap(r => r.legs.map(l => l.fixtureId)))
+  const payRules = new Map<string, { boost: ReturnType<typeof boostFromTable>; cap: number }>()
+  const rulesFor = async (bookId: string) => {
+    if (!payRules.has(bookId)) {
+      const cfg = await getBookConfig(bookId); const adapter = getBook(bookId)
+      payRules.set(bookId, { boost: await bookBoost(bookId), cap: Math.min(cfg.maxPayout ?? adapter.maxPayout, adapter.maxPayout) })
+    }
+    return payRules.get(bookId)!
+  }
 
   for (const row of open) {
-    const g = await gradeSlip(row.legs)
+    const g = await gradeSlip(row.legs, results)
     if (!g.complete || g.won === null) {
       pending.push({ id: row.id, finished: g.finishedLegs, total: g.totalLegs })
       continue
     }
-    // A won slip returns what the BOOK would pay (the site's potential win we recorded).
-    const returned = g.won ? (row.potentialPayout ?? 0) : 0
+    // A won slip returns what the BOOK pays: the site's Potential Win captured at Confirm; else the
+    // shorter-combo payout if legs were dropped; else the built payout.
+    let returned = 0
+    if (g.won) {
+      if (row.sitePayout != null) returned = row.sitePayout
+      else if (row.legs.some(l => l.suspended)) { const r = await rulesFor(row.bookId); returned = reconciledPayout(row.legs, row.stake, r.boost, r.cap) }
+      else returned = row.potentialPayout ?? 0
+    }
     const ok = await settlePlacement({
       id: row.id, won: g.won, returned, legResults: g.legResults, settledBy: 'auto',
     })

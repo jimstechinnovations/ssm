@@ -140,11 +140,18 @@ export interface PedlasLeg {
   game:      string
   league:    string
   kickoff:   string
-  line:      GoalLine
+  line:      GoalLine       // totals legs; Decision Bot legs on other markets carry `rule` instead (line 0)
   side:      'Under' | 'Over'
   market:    string         // e.g. "OVER_UNDER_4.5"
-  outcome:   string         // "Under 4.5" | "Over 4.5"
+  outcome:   string         // "Under 4.5" | "Over 4.5" | "Home win" | …
   odds:      number
+  // ── Decision Bot legs (any two-sided market) ──
+  rule?:       import('./selections').LegRule   // scoreline rule: prices, settles and explains the leg
+  marketId?:   string        // SportyBet market id    ┐
+  specifier?:  string        // SportyBet specifier    ├ exact booking-code selection
+  outcomeId?:  string        // SportyBet outcome id   ┘
+  why?:        string        // the decision log line for this leg
+  p?:          number        // calibrated probability the leg wins
 }
 
 /** A final, budget-allocated, ranked slip ready to place. */

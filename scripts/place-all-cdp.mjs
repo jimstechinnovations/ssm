@@ -4,7 +4,18 @@
  * /orders/order — so each slip is: load code → stake → click Place → click Confirm.
  *
  *   node scripts/place-all-cdp.mjs <book.json> [--stake N] [--min S --max S] [--dry]
- *                                  [--workers N] [--report URL]
+ *                                  [--workers N] [--report URL]              (file mode — dry runs)
+ *   node scripts/place-all-cdp.mjs --queue --session S-CODE [--base URL] [--workers N]
+ *                                                                              (QUEUE mode — live, multi-PC)
+ *
+ * QUEUE mode pulls slips from the shared database (migration 008) instead of a local file, so a session
+ * can be placed from any PC, moved to another PC mid-run, or placed from several PCs at once:
+ *   • each slip is CLAIMED with a lease (renewed every 10s by the heartbeat); a dead PC's unsubmitted
+ *     slips go back to the pool automatically,
+ *   • right before Confirm the worker takes the per-ACCOUNT submit lock (shared across PCs — SportyBet
+ *     rejects simultaneous submits) and calls begin_submit: only the current lease holder can submit,
+ *   • a slip that dies mid-submit is never re-placed blindly — it goes to 'verify' and is checked against
+ *     the account's bet history (automatically at the next start, or by hand in the UI).
  *
  * --workers N opens N tabs in the SAME logged-in Chrome session and splits the slips round-robin
  * across them (≈N× faster). Prereq: dedicated Chrome on :9222, SportyBet logged in REAL.
@@ -13,6 +24,9 @@
  */
 import { chromium } from 'playwright'
 import { readFileSync, writeFileSync, existsSync } from 'node:fs'
+import { hostname } from 'node:os'
+import { openSync, closeSync, unlinkSync } from 'node:fs'
+import { createHash, randomBytes } from 'node:crypto'
 
 if (existsSync('.env')) for (const line of readFileSync('.env', 'utf8').split(/\r?\n/)) {
   const m = /^([A-Z_]+)\s*=\s*(.*)$/.exec(line.trim()); if (m && !process.env[m[1]]) process.env[m[1]] = m[2].replace(/^["']|["']$/g, '')
@@ -23,19 +37,63 @@ const bookPath = args.find(a => !a.startsWith('--'))
 const flag = (n, d) => { const i = args.indexOf(n); return i >= 0 ? Number(args[i + 1]) : d }
 const DRY = args.includes('--dry')
 const MIN = flag('--min', 1), MAX = flag('--max', 3)
-const WORKERS = Math.max(1, flag('--workers', 1))
+// ONE worker per Chrome. Every tab of a Chrome profile shares ONE betslip (verified), so a second tab could
+// load another booking code while this tab is confirming — the site would take the OTHER slip while we
+// record this one. Parallelism comes from more PCs / Chromes / accounts through the shared queue instead.
+const WORKERS = 1
+if (flag('--workers', 1) > 1) console.log('note: --workers > 1 ignored — tabs of one Chrome share a betslip; add another PC/Chrome to place in parallel')
 const LIMIT = flag('--limit', 0)   // place only the first N slips (0 = all) — for small live tests
 const STAKE_OVERRIDE = args.includes('--stake') ? flag('--stake', NaN) : null
-const REPORT = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))
+const QUEUE = args.includes('--queue')
+const BASE = (i => i >= 0 ? args[i + 1] : 'http://localhost:3000')(args.indexOf('--base'))
+const LEASE_SEC = flag('--lease', 180)
+// Never stake a slip whose payout ON THE SITE (odds moved / bonus differs) is below the session's target.
+const MIN_PAYOUT = flag('--min-payout', 0)
+const REPORT_ARG = (i => i >= 0 ? args[i + 1] : null)(args.indexOf('--report'))
+// Idempotency is scoped to the SESSION: a cloned/rebuilt session with an identical slip must place its
+// own bet, never be "skipped as already placed" with another session's booking code (that reported
+// slips as placed that were never staked in this session).
+const SESSION = (i => i >= 0 ? args[i + 1] : 'adhoc')(args.indexOf('--session'))
+const REPORT = REPORT_ARG ?? (QUEUE ? `${BASE}/api/sessions/${encodeURIComponent(SESSION)}/slip-status` : null)
+// Queue identity: one id per tab-worker (host:pid:rand:wN) and a stable, non-reversible key per
+// SportyBet ACCOUNT for the cross-PC submit lock (the number itself is never sent anywhere).
+const WORKER_BASE = `${hostname()}:${process.pid}:${randomBytes(2).toString('hex')}`
+const ACCOUNT = `sportybet:${createHash('sha256').update(String(process.env.SPORTY_NUMBER || 'unknown')).digest('hex').slice(0, 12)}`
+const ACCOUNT_LABEL = `…${String(process.env.SPORTY_NUMBER || '????').slice(-4)}`
+const QURL = `${BASE}/api/sessions/${encodeURIComponent(SESSION)}/queue`
+/** Queue API call with retries (network blips must not strand a slip). */
+async function qapi(body, tries = 5) {
+  let last
+  for (let a = 1; a <= tries; a++) {
+    try {
+      const r = await fetch(QURL, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
+      const j = await r.json().catch(() => ({}))
+      if (r.ok) return j
+      last = new Error(j.error || `queue HTTP ${r.status}`)
+    } catch (e) { last = e }
+    await sleep(800 * a)
+  }
+  throw last
+}
+// A balance above this is assumed to be SIM play-money (best-effort gate; env-configurable so a real
+// account with a large balance isn't blocked). Ground truth stays the per-slip confirmation.
+const SIM_BALANCE = Number(process.env.PLACEMENT_SIM_BALANCE || 100000)
 let stopRequested = false   // set when the session's Stop is hit (read from the report response)
 let wrongSlipStreak = 0     // consecutive "wrong slip" failures → a game was suspended mid-run (circuit breaker)
-async function report(slipId, status, extra = {}) {
+async function report(slipId, status, extra = {}, worker) {
   if (!REPORT || slipId == null) return
-  try {
-    const r = await fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slipId, status, live: !DRY, ...extra }) })
-    const j = await r.json().catch(() => ({}))
-    if (j?.stop) stopRequested = true
-  } catch { /* best-effort */ }
+  if (worker) extra = { ...extra, worker }   // queue mode: the route only accepts results from the lease holder
+  // Retry: a dropped report leaves the DB saying "pending" for a slip the bookmaker actually took.
+  for (let a = 1; a <= 4; a++) {
+    try {
+      const r = await fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slipId, status, live: !DRY, ...extra }) })
+      const j = await r.json().catch(() => ({}))
+      if (j?.stop) stopRequested = true
+      if (r.ok) return
+    } catch { /* retry */ }
+    await sleep(1500 * a)
+  }
+  console.log(`  ⚠ could not report slip ${slipId} → ${status} to the app after 4 tries (it IS recorded in ${LOG})`)
 }
 // HEARTBEAT: touch the session every ~10s so the UI sees a live-but-busy run (colliding/retrying/
 // respawning between slips) as "running", not "stalled" — and so a Resume click can't start a 2nd placer.
@@ -43,13 +101,17 @@ async function heartbeat() {
   if (!REPORT || DRY) return
   try { const r = await fetch(REPORT, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ heartbeat: true, live: !DRY }) }); const j = await r.json().catch(() => ({})); if (j?.stop) stopRequested = true } catch { /* best-effort */ }
 }
-if (!bookPath || !existsSync(bookPath)) { console.error('usage: node scripts/place-all-cdp.mjs <book.json> [--workers N --stake N --min S --max S --dry --report URL]'); process.exit(1) }
+if (QUEUE && SESSION === 'adhoc') { console.error('queue mode needs --session S-CODE'); process.exit(1) }
+if (!QUEUE && (!bookPath || !existsSync(bookPath))) { console.error('usage: node scripts/place-all-cdp.mjs <book.json> [--workers N --stake N --min S --max S --dry --report URL]\n       node scripts/place-all-cdp.mjs --queue --session S-CODE [--base URL] [--workers N]'); process.exit(1) }
 
-const raw = JSON.parse(readFileSync(bookPath, 'utf8'))
-const book = raw.results ? raw.results.find(r => r.book)?.book : (raw.book ?? raw)
-let slips = book?.slips ?? []
-if (!slips.length) { console.error('no slips in book'); process.exit(1) }
-if (LIMIT > 0) slips = slips.slice(0, LIMIT)
+let slips = []
+if (!QUEUE) {
+  const raw = JSON.parse(readFileSync(bookPath, 'utf8'))
+  const book = raw.results ? raw.results.find(r => r.book)?.book : (raw.book ?? raw)
+  slips = book?.slips ?? []
+  if (!slips.length) { console.error('no slips in book'); process.exit(1) }
+  if (LIMIT > 0) slips = slips.slice(0, LIMIT)
+}
 
 const LOG = '.placed-log.json'
 const placedLog = existsSync(LOG) ? JSON.parse(readFileSync(LOG, 'utf8')) : {}
@@ -67,7 +129,9 @@ let submitLock = Promise.resolve()
 async function acquireSubmit() { const prev = submitLock; let rel; submitLock = new Promise(r => (rel = r)); await prev; return rel }
 
 async function bookingCode(legs) {
-  const selections = legs.map(l => ({ eventId: `sr:match:${l.fixtureId}`, marketId: '18', specifier: `total=${l.line}`, outcomeId: l.side === 'Under' ? '13' : '12' }))
+  const selections = legs.map(l => l.marketId
+    ? { eventId: `sr:match:${l.fixtureId}`, marketId: String(l.marketId), specifier: l.specifier || '', outcomeId: String(l.outcomeId) }
+    : { eventId: `sr:match:${l.fixtureId}`, marketId: '18', specifier: `total=${l.line}`, outcomeId: l.side === 'Under' ? '13' : '12' })
   const r = await fetch('https://www.sportybet.com/api/ng/orders/share', { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': UA, platform: 'web' }, body: JSON.stringify({ selections, shareType: 1 }) })
   const j = await r.json()
   if (j.bizCode !== 10000 || !j.data?.shareCode) throw new Error(`booking code failed (bizCode ${j.bizCode})`)
@@ -80,6 +144,24 @@ function makeWorker(page, tag, parallel) {
   const balNum = async () => { const m = (await page.evaluate(() => document.body.innerText)).match(/NGN\s*([\d,.]+)/); return m ? parseFloat(m[1].replace(/,/g, '')) : NaN }
   const readBalance = async () => { for (let i = 0; i < 10; i++) { const b = await balNum(); if (!Number.isNaN(b)) return b; await sleep(1200) } return NaN }
   const bodyHas = re => page.evaluate(rs => new RegExp(rs, 'i').test(document.body.innerText), re.source)
+  // Fixture ids currently on the betslip, read from SportyBet's own betslip storage. null if unreadable
+  // (callers then fall back to page text).
+  const betslipFixtures = () => page.evaluate(() => {
+    try {
+      let raw = ''
+      for (const k of Object.keys(localStorage)) if (/^(betslips|betslipsSelections)$/i.test(k)) raw += localStorage.getItem(k) || ''
+      if (!raw) return null
+      return [...new Set([...raw.matchAll(/sr:match:(\d+)/g)].map(m => Number(m[1])))]
+    } catch { return null }
+  }).then(a => a ? new Set(a) : null).catch(() => null)
+  // The site's own Odds / Total Stake / Potential Win from the visible betslip (what will really be staked).
+  const readReceipt = () => page.evaluate(() => {
+    const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]
+    const t = p ? p.innerText : ''
+    const num = (re) => { const m = t.match(re); const v = m ? parseFloat(m[1].replace(/,/g, '')) : NaN; return Number.isFinite(v) && v > 0 ? v : null }
+    const r = { siteOdds: num(/\bOdds\s+([\d,.]+)/i), siteStake: num(/Total Stake\s+([\d,.]+)/i), sitePayout: num(/Potential Win\s*\n?\s*([\d,.]+)/i) }
+    return r.siteOdds || r.siteStake || r.sitePayout ? r : null
+  }).catch(() => null)
   const codeBoxVisible = () => page.locator('input[placeholder="Booking Code"]:visible').count().then(n => n > 0)
 
   const clickLeaf = (reSource) => page.evaluate((rs) => {
@@ -180,18 +262,20 @@ function makeWorker(page, tag, parallel) {
     if (!(await codeBoxVisible())) throw new Error('could not reset betslip to the Booking Code box')
   }
 
-  async function placeOne(slip, idx) {
+  async function placeOne(slip, idx, hooks = {}) {
+    // Only Over/Under legs print "Over/Under" on the betslip; for other markets the betslip storage is the count.
+    const allTotals = slip.legs.every(l => !l.rule || l.rule.kind === 'total')
     const stake = STAKE_OVERRIDE ?? slip.stake
     const code = await bookingCode(slip.legs)
     const legSig = slip.legs.map(l => `${l.fixtureId}:${l.outcome}`).sort().join('|')
-    const idem = `sportybet|${stake}|${legSig}`
-    if (placedLog[idem]?.placed) { log(`slip ${idx}: SKIP (already placed ${placedLog[idem].code})`); return { result: 'skip', code: placedLog[idem].code } }
+    const idem = `${SESSION}|sportybet|${stake}|${legSig}`
+    if (placedLog[idem]?.placed) { const e = placedLog[idem]; log(`slip ${idx}: SKIP (already placed in this session, ${e.code})`); return { result: 'skip', code: e.code, droppedFixtures: e.droppedFixtures, placedLegs: e.placedLegs, receipt: e.receipt } }
 
     if (!(await ensureLoggedIn())) throw new Error('not logged in (keepalive failed)')
     const before = await readBalance()
     if (Number.isNaN(before)) throw new Error('balance unreadable (logged out?)')
-    if (before < stake) throw new Error(`insufficient balance ₦${before} < ₦${stake}`)
-    if (before > 100000) throw new Error(`balance ₦${before} looks like SIM play-money — check REAL/SIM toggle`)
+    if (before < stake) { if (!DRY) throw new Error(`insufficient balance ₦${before} < ₦${stake}`); log(`  (dry run: balance ₦${before} < stake ₦${stake} — fine, nothing is staked)`) }
+    if (before > SIM_BALANCE) throw new Error(`balance ₦${before} looks like SIM play-money (> ₦${SIM_BALANCE}; set PLACEMENT_SIM_BALANCE if this is real) — check REAL/SIM toggle`)
 
     await clearSlip()
     const ci = page.locator('input[placeholder="Booking Code"]').first()
@@ -226,7 +310,16 @@ function makeWorker(page, tag, parallel) {
     if (!stakeOk) throw new Error(`could not set stake to ${stake}`)
 
     const betslipText = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? p.innerText : '' })
-    const loadedLegs = (betslipText.match(/Over\/Under/g) || []).length
+    let loadedLegs = (betslipText.match(/Over\/Under/g) || []).length
+    // EXACT games on the betslip, from the site's own betslip storage (not page text). Any game that is
+    // NOT one of this slip's legs means the betslip holds something else — never place it.
+    const slipFix = new Set(slip.legs.map(l => Number(l.fixtureId)))
+    const onSlip = await betslipFixtures()
+    if (onSlip) {
+      const foreign = [...onSlip].filter(id => !slipFix.has(id))
+      if (foreign.length) throw new Error(`stale betslip: ${foreign.length} game(s) not in this slip (${foreign.slice(0, 3).join(', ')}) — NOT placing`)
+      loadedLegs = onSlip.size
+    } else if (!allTotals) loadedLegs = slip.legs.length   // can't count non-Over/Under legs from text; the storage check above is the guard
     // The booking code IS this slip. If it loads SHORTER than built, some legs were suspended mid-run —
     // the combo is still valid, so PLACE whatever games remain (default going forward). Reject ONLY when
     // the slip is fully empty (0 legs — every game suspended / betslip didn't load) or somehow LONGER
@@ -239,7 +332,13 @@ function makeWorker(page, tag, parallel) {
     if (!anyTeam) throw new Error(`stale/empty betslip (none of this slip's teams present) — NOT placing`)
 
     log(`slip ${idx}: code ${code} · ₦${stake} @ ${slip.combinedOdds?.toFixed?.(2) ?? '?'} · ${slip.legs.length} legs`)
-    if (DRY) { log('  [dry] skipping Place/Confirm'); return { result: 'dry', code } }
+    if (DRY) {
+      // prove the receipt capture on the real betslip: the numbers the site would stake at Confirm
+      const r = await readReceipt()
+      const guard = MIN_PAYOUT && r?.sitePayout != null ? (r.sitePayout >= MIN_PAYOUT ? ' · ≥ target ✓' : ' · BELOW target — a live run would skip it') : ''
+      log(`  [dry] betslip shows odds ${r?.siteOdds ?? '?'} · stake ₦${r?.siteStake ?? '?'} · potential win ₦${r?.sitePayout ?? '?'} (built ₦${slip.payout ?? '?'})${guard} — skipping Place/Confirm`)
+      return { result: 'dry', code, receipt: r }
+    }
 
     // Try to REMOVE any suspended/unavailable selections still sitting on the betslip so they don't block
     // the submit — then place whatever remains. (A "suspended" notice must NOT early-skip the whole slip:
@@ -261,9 +360,14 @@ function makeWorker(page, tag, parallel) {
     // Record WHICH legs are actually being placed vs dropped, so the DB matches reality (not the built
     // 32-leg record). A leg is "dropped" if its home team is no longer on the (post-removal) betslip.
     const finalText = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? p.innerText : '' })
-    const droppedFixtures = slip.legs
-      .filter(l => { const tm = l.game?.split(' vs ')[0]?.trim(); return tm && !finalText.includes(tm) })
-      .map(l => l.fixtureId)
+    const finalFix = await betslipFixtures()
+    const droppedFixtures = finalFix && finalFix.size > 0
+      ? slip.legs.filter(l => !finalFix.has(Number(l.fixtureId))).map(l => l.fixtureId)
+      : slip.legs.filter(l => { const tm = l.game?.split(' vs ')[0]?.trim(); return tm && !finalText.includes(tm) }).map(l => l.fixtureId)
+    // The betslip's own leg count must agree with what we'll record — else the DB would describe a
+    // different bet than the one staked. Refuse rather than record a wrong slip.
+    const finalLegs = finalFix && finalFix.size > 0 ? finalFix.size : allTotals ? (finalText.match(/Over\/Under/g) || []).length : 0
+    if (finalLegs > 0 && finalLegs !== slip.legs.length - droppedFixtures.length) throw new Error(`leg mismatch: betslip shows ${finalLegs}, record would say ${slip.legs.length - droppedFixtures.length} — NOT placing`)
     if (droppedFixtures.length) log(`  ↳ dropped fixtures ${droppedFixtures.join(', ')} — recording ${slip.legs.length - droppedFixtures.length}-leg combo to DB`)
 
     // NOTE: "Accept Changes" is NOT a separate blocker — it's the SAME primary green button relabelled
@@ -286,12 +390,18 @@ function makeWorker(page, tag, parallel) {
     }, labelSrc)
     const hasBtn = async (labelSrc) => page.evaluate((src) => { const rx = new RegExp(src, 'i'); return [...document.querySelectorAll('span,div,button,a')].some(e => (e.offsetWidth || e.offsetHeight) && rx.test((e.textContent || '').trim()) && (e.textContent || '').trim().length <= 22) }, labelSrc)
 
+    // ── payout guard: what the SITE will pay must still reach the target ──
+    const pre = await readReceipt()
+    if (MIN_PAYOUT && pre?.sitePayout != null && pre.sitePayout < MIN_PAYOUT) throw new Error(`SKIP: payout on the site is ₦${pre.sitePayout.toLocaleString()} — below the ₦${MIN_PAYOUT.toLocaleString()} target (odds moved since the build)`)
+
     // ── serialize the actual submission so concurrent workers never collide ──
     const release = await acquireSubmit()
-    let placed = false, how = ''
+    let placed = false, how = '', receipt = await readReceipt(), begun = false
+    let unlockAccount = null
     try {
+      if (hooks.lock) unlockAccount = await hooks.lock()   // per-ACCOUNT submit lock, shared by every PC
       await page.bringToFront().catch(() => {})   // active tab paints reliably for the Place/Confirm clicks
-      const betLegs = async () => page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? (p.innerText.match(/Over\/Under/g) || []).length : 0 })
+      const betLegs = async () => { const f = await betslipFixtures(); if (f) return f.size; return page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? (p.innerText.match(/Over\/Under/g) || []).length : 0 }) }
       // STEP 1 — reach the "About to pay" dialog. Each pass: if "Accept Changes" is showing, click it and
       // WAIT for it to become "Place Bet" (separate steps, not one button); then click "Place Bet". If
       // accepting emptied the slip, skip fast (no loop).
@@ -310,30 +420,64 @@ function makeWorker(page, tag, parallel) {
       // STEP 2 — confirm. The dialog can also show "Accept Changes"; accept then confirm.
       for (let a = 1; a <= 6 && !placed; a++) {
         if (await hasBtn('^accept changes$')) { await clickBtn('^accept changes$'); await sleep(600) }
+        receipt = (await readReceipt()) ?? receipt   // last read before Confirm = what is being staked
+        // POINT OF NO RETURN: only the current lease holder may submit (atomic in the DB). If another PC
+        // took the slip over (our lease lapsed), stop here — nothing has been submitted.
+        // re-check after any Accept Changes: never confirm below target (nothing submitted yet → a clean skip)
+        if (!begun) {
+          const fin = await betslipFixtures()
+          if (fin) {
+            const want = new Set(slip.legs.map(l => Number(l.fixtureId)).filter(id => !droppedFixtures.includes(id)))
+            const foreign = [...fin].filter(id => !want.has(id)), missing = [...want].filter(id => !fin.has(id))
+            if (foreign.length || missing.length) throw Object.assign(new Error(`betslip changed before Confirm (${foreign.length} foreign, ${missing.length} missing) — NOT submitting`), { rejected: true })
+          }
+        }
+        if (!begun && MIN_PAYOUT && receipt?.sitePayout != null && receipt.sitePayout < MIN_PAYOUT) throw Object.assign(new Error(`SKIP: after odds changes the site pays ₦${receipt.sitePayout.toLocaleString()} — below the ₦${MIN_PAYOUT.toLocaleString()} target`), { rejected: true })
+        if (!begun && hooks.beforeConfirm) await hooks.beforeConfirm()
+        begun = true
         await clickBtn('^confirm$')
         for (let p = 0; p < 12 && !placed; p++) {
           await sleep(400)
           if (await successUp()) { placed = true; how = 'submission-successful'; break }
-          if (await bodyHas(/submission failed|something went wrong/)) throw new Error('SportyBet rejected the submit (Submission Failed) — retry later')
-          if (/insufficient|not enough|balance is/i.test(await page.evaluate(() => document.body.innerText))) throw new Error('SportyBet: balance insufficient')
+          // explicit rejections: the site refused the order, so nothing was placed — safe to retry
+          if (await bodyHas(/submission failed|something went wrong/)) throw Object.assign(new Error('SportyBet rejected the submit (Submission Failed) — retry later'), { rejected: true })
+          if (/insufficient|not enough|balance is/i.test(await page.evaluate(() => document.body.innerText))) throw Object.assign(new Error('SportyBet: balance insufficient'), { rejected: true, fatal: true })
           if (!parallel) { const after = await balNum(); if (Math.abs((before - after) - stake) <= 0.5) { placed = true; how = 'balance-drop'; break } }
         }
         if (!placed && !(await bodyHas(/about to pay/))) break
       }
-    } finally { release() }
+    } finally { release(); if (unlockAccount) await unlockAccount() }
     await dismissSuccess()
     if (placed) {
-      placedLog[idem] = { placed: true, code, how, at: new Date().toISOString(), stake }; savePlaced()
+      const placedLegs = slip.legs.length - droppedFixtures.length
+      placedLog[idem] = { placed: true, code, how, at: new Date().toISOString(), stake, droppedFixtures, placedLegs, receipt }; savePlaced()
+      if (receipt?.siteStake && Math.abs(receipt.siteStake - stake) > 0.5) log(`  ⚠ site stake ₦${receipt.siteStake} ≠ intended ₦${stake} — recorded the SITE value`)
       log(`  ✓ PLACED (${how}) — code ${code}`)
-      return { result: 'placed', code, droppedFixtures, placedLegs: slip.legs.length - droppedFixtures.length }
+      return { result: 'placed', code, droppedFixtures, placedLegs, receipt }
     }
-    throw new Error('not confirmed (no success signal); check Bet History')
+    // Confirm was clicked but no success signal: it MAY be on the account — never guess, verify it.
+    throw Object.assign(new Error('not confirmed (no success signal) — needs a bet-history check'), { uncertain: begun })
   }
 
   return { placeOne, ensureLoggedIn, ensureRealView, dismissBlockers, page, prep: async () => { await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {}); await page.waitForTimeout(3000); await ensureLoggedIn(); await ensureRealView() } }
 }
 
 // ── robust worker rig: SHARED queue, per-slip watchdog, crash-respawn supervisor ──
+const CHROME_LOCK = '.placer-cdp-9222.lock'
+function takeChromeLock() {
+  for (let a = 0; a < 2; a++) {
+    try { const fd = openSync(CHROME_LOCK, 'wx'); writeFileSync(fd, String(process.pid)); closeSync(fd); return true }
+    catch {
+      const pid = Number(readFileSync(CHROME_LOCK, 'utf8'))
+      let alive = false; try { process.kill(pid, 0); alive = true } catch { /* dead */ }
+      if (alive && pid !== process.pid) return false
+      try { unlinkSync(CHROME_LOCK) } catch { /* race */ }
+    }
+  }
+  return false
+}
+if (!takeChromeLock()) { console.error('⛔ another placer is already driving this Chrome (:9222). One placer per Chrome — its tabs share one betslip. Use another PC/Chrome to place in parallel.'); process.exit(3) }
+process.on('exit', () => { try { if (Number(readFileSync(CHROME_LOCK, 'utf8')) === process.pid) unlinkSync(CHROME_LOCK) } catch { /* gone */ } })
 const browser = await chromium.connectOverCDP('http://127.0.0.1:9222')
 const ctx = browser.contexts()[0]
 const parallel = WORKERS > 1
@@ -356,62 +500,124 @@ const workerDead = e => /Target closed|Session closed|browser has been closed|co
 const withTimeout = (p, ms, label) => Promise.race([p, new Promise((_, rej) => setTimeout(() => rej(new Error(`WATCHDOG: ${label} exceeded ${ms / 1000}s`)), ms))])
 
 const workersArr = []
-for (let wi = 0; wi < WORKERS; wi++) workersArr.push(await spawn(wi, WORKERS === 1))
+for (let wi = 0; wi < WORKERS; wi++) {
+  let w = null
+  for (let a = 1; a <= 4 && !w; a++) { try { w = await spawn(wi, true) } catch (e) { console.log(`  startup attempt ${a} failed (${(e.message || '').slice(0, 60)}) — retrying`); await sleep(3000) } }
+  if (!w) { console.error('⛔ could not attach to the SportyBet tab — is Chrome up and logged in?'); process.exit(4) }
+  workersArr.push(w)
+}
 
-// SHARED queue: every worker pulls from one list, so a dying worker's in-flight slip is requeued and any
-// other worker picks up the rest (nothing is stranded on a per-worker queue). .shift/.unshift are atomic
-// in JS's single thread. Failed slips push back here up to MAX_TRIES.
-const queue = slips.map((s, i) => ({ slip: s, idx: i + 1, tries: 0 }))
-console.log(`\nCDP BATCH: ${slips.length} slip(s) · ${WORKERS} worker(s) · pacing ${MIN}-${MAX}s · retries ${MAX_TRIES - 1} · slip-watchdog ${SLIP_TIMEOUT_MS / 1000}s${DRY ? ' · DRY-RUN' : ''}\n`)
-const results = { placed: 0, skip: 0, dry: 0, suspended: 0, failed: 0, retried: 0, respawns: 0 }
+// ── where slips come from ──
+//   file mode  (dry runs): a local list; failed slips are re-queued in memory up to MAX_TRIES.
+//   QUEUE mode (live):     the shared DATABASE queue — claimed with a lease, any PC may take any slip,
+//                          and a failed slip goes back to the shared pool (the DB caps attempts).
+const fileQueue = QUEUE ? [] : slips.map((s, i) => ({ slip: s, idx: i + 1, tries: 0 }))
+const workerIds = Array.from({ length: WORKERS }, (_, wi) => `${WORKER_BASE}:w${wi}`)
+const wstats = workerIds.map(() => ({ placed: 0, failed: 0, current: null }))
+let queueDrained = false
+async function nextItem(wi) {
+  if (!QUEUE) return fileQueue.shift() ?? null
+  if (stopRequested || queueDrained) return null
+  const j = await qapi({ action: 'claim', worker: workerIds[wi], n: 1, leaseSec: LEASE_SEC })
+  if (j.stop) { stopRequested = true; return null }
+  const s = j.slips?.[0]
+  if (!s) { queueDrained = true; return null }
+  return { slip: s, idx: s.slipId, tries: Math.max(0, (s.attempts ?? 1) - 1), claimed: true, submitted: false }
+}
+const remaining = () => QUEUE ? (queueDrained ? 0 : 1) : fileQueue.length
+
+console.log(`\nCDP BATCH: ${QUEUE ? `QUEUE ${SESSION} (shared DB, account ${ACCOUNT_LABEL}, worker ${WORKER_BASE})` : `${slips.length} slip(s)`} · ${WORKERS} worker(s) · pacing ${MIN}-${MAX}s · slip-watchdog ${SLIP_TIMEOUT_MS / 1000}s${DRY ? ' · DRY-RUN' : ''}\n`)
+const results = { placed: 0, skip: 0, dry: 0, suspended: 0, failed: 0, retried: 0, respawns: 0, verify: 0, lost: 0 }
 const t0 = Date.now()
+const placedFixturesOf = (slip, dropped) => { const d = new Set(dropped ?? []); return slip.legs.map(l => l.fixtureId).filter(id => !d.has(id)) }
 
-// One worker's loop. On a WORKER crash it throws to the supervisor (which respawns + re-runs); on a SLIP
-// failure it requeues/marks-failed and keeps going.
-async function runWorker(wi) {
-  while (queue.length && !stopRequested) {
-    const item = queue.shift(); if (!item) break
-    const { slip, idx, tries } = item
-    const sid = slip.slipId
-    try {
-      const { result: r, code, droppedFixtures, placedLegs } = await withTimeout(workersArr[wi].placeOne(slip, idx), SLIP_TIMEOUT_MS, `slip ${idx}`)
-      if (r === 'placed') { results.placed++; wrongSlipStreak = 0; if (!DRY) await report(sid, 'placed', { bookingCode: code, droppedFixtures, placedLegs }) }
-      else if (r === 'skip') { results.skip++; wrongSlipStreak = 0; if (!DRY && code) await report(sid, 'placed', { bookingCode: code }) }
-      else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }) }
-      else results.dry++
-    } catch (e) {
-      // WORKER CRASH (page/CDP dead or watchdog): requeue THIS slip at the front, throw to supervisor to respawn.
-      if (workerDead(e)) { queue.unshift(item); throw e }
-      // SKIP (no retry): odds too volatile / emptied — retrying just loops.
-      if (/^SKIP:/.test(e.message)) {
-        results.skip++; wrongSlipStreak = 0; console.log(`  slip ${idx}: ⏭ ${e.message}`)
-        if (!DRY) await report(sid, 'skipped', { failureReason: e.message.slice(0, 200) })
-        if (queue.length) await sleep(rand(MIN, MAX) * 1000); continue
+/** Hooks that make a live submit safe across PCs (queue mode only). */
+function submitHooks(wi, item) {
+  if (!QUEUE || DRY) return {}
+  const worker = workerIds[wi]
+  return {
+    lock: async () => {
+      const deadline = Date.now() + 90_000
+      for (;;) {
+        const j = await qapi({ action: 'lock', worker, account: ACCOUNT, ttlSec: 30 })
+        if (j.ok) break
+        if (Date.now() > deadline) throw new Error('account submit lock busy for 90s (another PC stuck mid-submit?) — will retry')
+        await sleep(400 + Math.random() * 500)
       }
-      // AUTO-RETRY: transient failures clear on a retry; requeue to the SHARED queue (idempotency skips it
-      // if it actually placed) up to MAX_TRIES, so any worker self-heals it.
-      if (tries + 1 < MAX_TRIES && !stopRequested) {
-        results.retried++; queue.push({ slip, idx, tries: tries + 1 })
-        console.log(`  slip ${idx}: retry ${tries + 1}/${MAX_TRIES - 1} — ${e.message.slice(0, 80)}`)
-      } else {
-        results.failed++; console.log(`  slip ${idx}: FAILED (after ${tries + 1} tries) — ${e.message}`)
-        if (!DRY) await report(sid, 'failed', { failureReason: e.message.slice(0, 200) })
-      }
-      if (/empty\/invalid|stale/i.test(e.message)) { if (++wrongSlipStreak >= 8) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive empty/stale betslips — betslip not loading (browser wedged?) or all games died. Halting.\n`) } }
-      else wrongSlipStreak = 0
-    }
-    if (queue.length) await sleep(rand(MIN, MAX) * 1000)
+      return async () => { await qapi({ action: 'unlock', worker, account: ACCOUNT }).catch(() => {}) }
+    },
+    beforeConfirm: async () => {
+      const j = await qapi({ action: 'begin', worker, slipId: item.slip.slipId })
+      if (!j.ok) throw Object.assign(new Error('LEASE_LOST: this slip now belongs to another worker — not submitting'), { leaseLost: true })
+      item.submitted = true
+    },
   }
 }
 
-// Supervisor: runs a worker; if it crashes, respawns a fresh tab (up to a few times) and resumes on the
-// SHARED queue — so one wedged/closed tab never ends the run.
+// One worker's loop. On a WORKER crash it throws to the supervisor (which respawns + re-runs); on a SLIP
+// failure it retries / hands the slip back / marks it failed or for verification, and keeps going.
+async function runWorker(wi) {
+  const worker = QUEUE ? workerIds[wi] : undefined
+  for (;;) {
+    if (stopRequested) break
+    const item = await nextItem(wi); if (!item) break
+    const { slip, idx, tries } = item
+    const sid = slip.slipId
+    wstats[wi].current = sid
+    try {
+      const { result: r, code, droppedFixtures, placedLegs, receipt } = await withTimeout(workersArr[wi].placeOne(slip, idx, submitHooks(wi, item)), SLIP_TIMEOUT_MS, `slip ${idx}`)
+      if (r === 'placed' || r === 'skip') {
+        if (r === 'placed') results.placed++; else results.skip++
+        wstats[wi].placed++; wrongSlipStreak = 0
+        if (!DRY && code) await report(sid, 'placed', { bookingCode: code, droppedFixtures, placedLegs, placedFixtures: placedFixturesOf(slip, droppedFixtures), ...(receipt ?? {}) }, worker)
+      }
+      else if (r === 'suspended') { results.suspended++; if (!DRY) await report(sid, 'skipped', { failureReason: 'suspended leg' }, worker) }
+      else { results.dry++; if (QUEUE) await report(sid, 'retry', { failureReason: 'dry run' }, worker) }   // never leave a dry claim held
+    } catch (e) {
+      const msg = (e?.message || String(e)).slice(0, 200)
+      if (e?.leaseLost) { results.lost++; console.log(`  slip ${idx}: ⚠ ${msg}`); continue }
+      // Submitted but the outcome is unknown (no success signal, watchdog, crash after Confirm) → verify.
+      if (QUEUE && item.submitted && !e?.rejected) {
+        results.verify++; console.log(`  slip ${idx}: ⚠ UNCERTAIN after Confirm — sent to verification (${msg})`)
+        await report(sid, 'verify', { failureReason: `uncertain after Confirm: ${msg}` }, worker)
+        if (workerDead(e)) throw e
+        continue
+      }
+      if (workerDead(e)) {                       // the TAB crashed (not the slip) — hand the slip back, respawn
+        if (QUEUE) await report(sid, 'retry', { failureReason: `worker crashed: ${msg}` }, worker); else fileQueue.unshift(item)
+        throw e
+      }
+      if (/^SKIP:/.test(e.message)) {
+        results.skip++; wrongSlipStreak = 0; console.log(`  slip ${idx}: ⏭ ${e.message}`)
+        if (!DRY) await report(sid, 'skipped', { failureReason: msg }, worker)
+        if (remaining()) await sleep(rand(MIN, MAX) * 1000); continue
+      }
+      if (e?.fatal) { stopRequested = true; console.log(`\n⛔ ${msg} — stopping this PC's workers.\n`) }
+      if (QUEUE) {
+        // back to the SHARED queue — any PC may retry it; the DB turns it 'failed' after its last attempt
+        results.retried++; wstats[wi].failed++; console.log(`  slip ${idx}: returned to the queue (attempt ${tries + 1}) — ${msg.slice(0, 90)}`)
+        await report(sid, 'retry', { failureReason: msg }, worker)
+      } else if (tries + 1 < MAX_TRIES && !stopRequested) {
+        results.retried++; fileQueue.push({ slip, idx, tries: tries + 1 })
+        console.log(`  slip ${idx}: retry ${tries + 1}/${MAX_TRIES - 1} — ${msg.slice(0, 80)}`)
+      } else {
+        results.failed++; console.log(`  slip ${idx}: FAILED (after ${tries + 1} tries) — ${e.message}`)
+        if (!DRY) await report(sid, 'failed', { failureReason: msg }, worker)
+      }
+      if (/empty\/invalid|stale|leg mismatch/i.test(e.message)) { if (++wrongSlipStreak >= 8) { stopRequested = true; console.log(`\n⛔ CIRCUIT BREAKER: ${wrongSlipStreak} consecutive empty/stale betslips — betslip not loading (browser wedged?) or all games died. Halting.\n`) } }
+      else wrongSlipStreak = 0
+    } finally { wstats[wi].current = null }
+    if (remaining()) await sleep(rand(MIN, MAX) * 1000)
+  }
+}
+
+// Supervisor: runs a worker; if it crashes, respawns a fresh tab (up to a few times) and resumes.
 async function supervise(wi) {
-  while (queue.length && !stopRequested) {
+  while (remaining() && !stopRequested) {
     try { await runWorker(wi); return }
     catch (e) {
       results.respawns++
-      console.log(`  [w${wi}] ⚠ worker crashed (${(e.message || '').slice(0, 60)}) — respawning (${queue.length} slip(s) left)`)
+      console.log(`  [w${wi}] ⚠ worker crashed (${(e.message || '').slice(0, 60)}) — respawning`)
       try { if (WORKERS > 1) await workersArr[wi].page?.close().catch(() => {}) } catch { /* ignore */ }
       let ok = false
       for (let a = 0; a < 4 && !ok && !stopRequested; a++) { try { workersArr[wi] = await spawn(wi, WORKERS === 1); ok = true } catch (se) { console.log(`  [w${wi}] respawn attempt ${a + 1} failed: ${(se.message || '').slice(0, 50)}`); await sleep(4000) } }
@@ -420,10 +626,74 @@ async function supervise(wi) {
   }
 }
 
-await heartbeat()                                   // immediate, so the UI flips to "running" at once
-const hbTimer = setInterval(heartbeat, 10000)       // keep the run marked alive every 10s
-try { await Promise.all(workersArr.map((_, wi) => supervise(wi))) } finally { clearInterval(hbTimer) }
+// ── heartbeat: queue mode renews every lease + reports each worker to the roster; stop is shared ──
+async function queueHeartbeat(state = 'running') {
+  await Promise.all(workerIds.map((w, wi) => qapi({ action: 'renew', worker: w, leaseSec: LEASE_SEC, host: hostname(), account: ACCOUNT_LABEL, live: !DRY, currentSlip: wstats[wi].current, placed: wstats[wi].placed, failed: wstats[wi].failed, state }, 2)
+    .then(j => { if (j.stop) stopRequested = true }).catch(() => { /* next beat retries; lease is 3× the beat */ })))
+}
+async function releaseAll(state) {
+  if (!QUEUE) return
+  await Promise.all(workerIds.map(w => qapi({ action: 'release', worker: w, state }, 3).catch(() => {})))
+}
+let released = false
+const onSignal = async (sig) => { if (released) return; released = true; console.log(`\n${sig}: handing this PC's unsubmitted slips back to the queue…`); stopRequested = true; await releaseAll('stopped'); process.exit(130) }
+process.on('SIGINT', onSignal); process.on('SIGTERM', onSignal)
+
+// ── auto-verify: slips whose worker vanished MID-SUBMIT are checked against bet history FIRST ──
+async function verifyFromHistory() {
+  const j = await fetch(`${BASE}/api/sessions/${encodeURIComponent(SESSION)}/verify`).then(r => r.json()).catch(() => null)
+  const pending = j?.slips ?? []
+  if (!pending.length) return
+  console.log(`verification: ${pending.length} slip(s) were mid-submit when their worker vanished — checking bet history…`)
+  const page = await ctx.newPage()
+  const orders = []
+  // Capture every JSON the bet-history page loads and pull out anything that looks like an order: an
+  // object holding a list of selections with sr:match event ids (+ an id and a time when present).
+  const harvest = (node, depth = 0) => {
+    if (!node || typeof node !== 'object' || depth > 8) return
+    if (Array.isArray(node)) { for (const x of node) harvest(x, depth + 1); return }
+    const text = JSON.stringify(node)
+    const events = [...new Set([...text.matchAll(/sr:match:(\d+)/g)].map(m => Number(m[1])))]
+    const idField = node.orderId ?? node.shortId ?? node.betId ?? node.ticketId
+    const time = node.createTime ?? node.createdTime ?? node.betTime ?? node.orderTime
+    if (events.length && (idField || time) && text.length < 60_000) { orders.push({ id: idField ? String(idField) : null, time: typeof time === 'number' ? time : Date.parse(time) || null, events: new Set(events) }); return }
+    for (const v of Object.values(node)) harvest(v, depth + 1)
+  }
+  page.on('response', async res => { if (!/json/.test(res.headers()['content-type'] || '')) return; try { harvest(await res.json()) } catch { /* ignore */ } })
+  try {
+    for (const url of ['https://www.sportybet.com/ng/my_accounts/bet_history/sport_bets?isSettled=10', 'https://www.sportybet.com/ng/my_accounts/bet_history/sport_bets?isSettled=0']) {
+      await page.goto(url, { waitUntil: 'domcontentloaded', timeout: 45_000 }).catch(() => {})
+      await page.waitForTimeout(8000)
+    }
+  } finally { await page.close().catch(() => {}) }
+  const oldest = Math.min(...orders.map(o => o.time ?? Infinity))
+  console.log(`  bet history: ${orders.length} order record(s) read`)
+  for (const v of pending) {
+    const want = new Set((v.legs ?? []).filter(l => !l.suspended).map(l => Number(l.fixtureId)))
+    const hit = orders.find(o => o.events.size === want.size && [...want].every(id => o.events.has(id)))
+    if (hit) {
+      await fetch(`${BASE}/api/sessions/${encodeURIComponent(SESSION)}/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slipId: v.slipId, placed: true, betId: hit.id, note: 'found on bet history' }) }).catch(() => {})
+      console.log(`  slip ${v.slipId}: ✓ found on bet history${hit.id ? ` (${hit.id})` : ''} → recorded as placed`)
+    } else if (orders.length && Number.isFinite(oldest) && v.submitStartedAt && oldest < Date.parse(v.submitStartedAt) - 60_000) {
+      // history reaches back BEFORE the submit started and the slip is not in it → it was not placed
+      await fetch(`${BASE}/api/sessions/${encodeURIComponent(SESSION)}/verify`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ slipId: v.slipId, placed: false, note: 'not on bet history (history covers the submit time)' }) }).catch(() => {})
+      console.log(`  slip ${v.slipId}: ✗ not on bet history → returned to the queue`)
+    } else console.log(`  slip ${v.slipId}: ? could not decide from bet history — left for you to resolve on the session page`)
+  }
+}
+
+if (QUEUE && !DRY) { try { await verifyFromHistory() } catch (e) { console.log(`verification skipped: ${(e.message || '').slice(0, 80)}`) } }
+
+if (QUEUE) await queueHeartbeat(); else await heartbeat()   // immediate, so the UI flips to "running" at once
+const hbTimer = setInterval(() => { if (QUEUE) void queueHeartbeat(); else void heartbeat() }, 10000)
+try { await Promise.all(workersArr.map((_, wi) => supervise(wi))) }
+finally {
+  clearInterval(hbTimer)
+  await releaseAll(stopRequested ? 'stopped' : 'done'); released = true
+}
 const secs = ((Date.now() - t0) / 1000).toFixed(1)
-console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, retried ${results.retried}, failed ${results.failed}, respawns ${results.respawns}${DRY ? `, dry ${results.dry}` : ''}`)
-if (queue.length) console.log(`  ${queue.length} slip(s) left unplaced (stopped/retired) — click Resume to finish; already-placed are skipped.`)
+console.log(`\nDONE in ${secs}s — placed ${results.placed}, skipped ${results.skip}, suspended ${results.suspended}, retried ${results.retried}, failed ${results.failed}, to-verify ${results.verify}, lease-lost ${results.lost}, respawns ${results.respawns}${DRY ? `, dry ${results.dry}` : ''}`)
+if (!QUEUE && fileQueue.length) console.log(`  ${fileQueue.length} slip(s) left unplaced (stopped/retired).`)
+if (QUEUE && stopRequested) console.log('  stopped — unsubmitted slips are back in the shared queue; any PC can continue.')
 await browser.close()
+

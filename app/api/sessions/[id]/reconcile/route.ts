@@ -8,9 +8,9 @@
 
 import { getSession, listPlacedSlipsWithLegs } from '@/lib/sessions/store'
 import { createServerClient } from '@/lib/supabase/server'
-import { getBookConfig } from '@/lib/books/config-store'
+import { getBookConfig, bookBoost } from '@/lib/books/config-store'
 import { getBook } from '@/lib/books/registry'
-import { boostFromTable, reconciledPayout } from '@/lib/pedlas/boost'
+import { reconciledPayout } from '@/lib/pedlas/boost'
 import { fetchResults } from '@/lib/pedlas/results'
 
 // re-exported for callers that import it from this route (e.g. the settle route)
@@ -52,7 +52,7 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
     return ko != null && (now - ko) > VOID_AFTER_MS             // should be over by now, but never resulted
   }))
   const cfg = await getBookConfig(session.bookIds[0]); const adapter = getBook(session.bookIds[0])
-  const boost = cfg.boost ? boostFromTable(cfg.boost) : adapter.boostFor
+  const boost = await bookBoost(session.bookIds[0])
   const cap = Math.min(cfg.maxPayout ?? adapter.maxPayout, adapter.maxPayout)
   const supabase = createServerClient()
 

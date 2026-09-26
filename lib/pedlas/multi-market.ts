@@ -21,7 +21,6 @@ import { boostFor, type BoostFn } from './boost'
 export type Band = 0 | 1 | 2                     // 0=LOW 1=MID 2=HIGH
 export type Market = 'U25' | 'U45' | 'O25' | 'O45'
 const COVERS: Record<Market, Band[]> = { U25: [0], U45: [0, 1], O25: [1, 2], O45: [2] }
-const coversBand = (m: Market, b: Band) => COVERS[m].includes(b)
 /** Which total-goals line + side each market bets (so it maps onto the standard leg + booking code). */
 const MK: Record<Market, { line: number; side: 'Under' | 'Over' }> = {
   U25: { line: 2.5, side: 'Under' }, U45: { line: 4.5, side: 'Under' }, O25: { line: 2.5, side: 'Over' }, O45: { line: 4.5, side: 'Over' },
@@ -65,39 +64,66 @@ function mulberry32(seed: number) { let s = seed >>> 0; return () => { s |= 0; s
 function gauss(rng: () => number) { let u = 0, v = 0; while (!u) u = rng(); while (!v) v = rng(); return Math.sqrt(-2 * Math.log(u)) * Math.cos(2 * Math.PI * v) }
 function probit(p: number): number { const a=[-3.969683028665376e+01,2.209460984245205e+02,-2.759285104469687e+02,1.383577518672690e+02,-3.066479806614716e+01,2.506628277459239e+00],b=[-5.447609879822406e+01,1.615858368580409e+02,-1.556989798598866e+02,6.680131188771972e+01,-1.328068155288572e+01],c=[-7.784894002430293e-03,-3.223964580411365e-01,-2.400758277161838e+00,-2.549732539343734e+00,4.374664141464968e+00,2.938163982698783e+00],dd=[7.784695709041462e-03,3.224671290700398e-01,2.445134137142996e+00,3.754408661907416e+00],pl=0.02425; if(p<pl){const q=Math.sqrt(-2*Math.log(p));return(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((dd[0]*q+dd[1])*q+dd[2])*q+dd[3])*q+1)} if(p>1-pl){const q=Math.sqrt(-2*Math.log(1-p));return-(((((c[0]*q+c[1])*q+c[2])*q+c[3])*q+c[4])*q+c[5])/((((dd[0]*q+dd[1])*q+dd[2])*q+dd[3])*q+1)} const q=p-0.5,r=q*q;return(((((a[0]*r+a[1])*r+a[2])*r+a[3])*r+a[4])*r+a[5])*q/(((((b[0]*r+b[1])*r+b[2])*r+b[3])*r+b[4])*r+1) }
 
-// n-choose-k + bounded k-subsets of `items` (only combine the top-T likeliest, so deep layers stay cheap)
-function nCk(n: number, k: number): number { if (k < 0 || k > n) return 0; k = Math.min(k, n - k); let r = 1; for (let i = 0; i < k; i++) r = (r * (n - i)) / (i + 1); return Math.round(r) }
-function kSubsets(items: number[], k: number, cap = Infinity): number[][] {
-  const out: number[][] = []; const n = items.length
-  if (k < 0 || k > n) return out; if (k === 0) return [[]]
-  const idx = Array.from({ length: k }, (_, i) => i)
-  for (;;) { out.push(idx.map(i => items[i])); if (out.length >= cap) break; let p = k - 1; while (p >= 0 && idx[p] === n - k + p) p--; if (p < 0) break; idx[p]++; for (let j = p + 1; j < k; j++) idx[j] = idx[j - 1] + 1 }
-  return out
-}
-
 export interface MultiSlip { markets: Market[]; games: number[]; legs: number; combinedOdds: number; payout: number; keep: number }
 export interface MultiBook {
   slips: MultiSlip[]
   N: number; K: number
   pAnyWin: number            // P(≥1 slip wins) under the correlated day model
   keepRate: number           // HONEST family EV/₦ under independence (book pricing) — always < 1
+  rho: number                // correlation the slips were chosen + priced under (0 = the book's own independent pricing)
+  /** STRESS figure only: P(≥1 win) if games were as correlated as the backtest suggests (ρ calibrated to
+   *  var/mean≈1.7). Not the headline — taken at face value it implies +EV, which the book's prices contradict. */
+  pAnyWinCorrelated: number
+  rhoStress: number
   expectedNet: number        // (keepRate−1)·budget
   medianPayout: number
   note: string
 }
 
+export interface MultiBookOptions {
+  budget: number; stake: number; target: number; maxPayout: number; boost?: BoostFn
+  /** Correlation used to CHOOSE and PRICE the slips. Default 0 = the bookmaker's own pricing (games
+   *  independent), so the reported P(≥1 win) is consistent with the keep-rate: P(≥1 win)·target ≤ keep·budget.
+   *  A correlated ρ inflates P(win) several-fold (an implied +EV the book's prices don't support), so it is
+   *  reported separately as a stress figure (pAnyWinCorrelated), never as the headline. */
+  rho?: number
+  trials?: number; seed?: number
+  /** 'greedy' (default): pick each slip to win on the most simulated days not already covered — the
+   *  P(≥1 win)-maximising choice. 'sampled': the older one-slip-per-random-day mix (kept for comparison). */
+  select?: 'greedy' | 'sampled'
+}
+
+const popcnt = (x: number) => { x -= (x >>> 1) & 0x55555555; x = (x & 0x33333333) + ((x >>> 2) & 0x33333333); return (((x + (x >>> 4)) & 0x0F0F0F0F) * 0x01010101) >>> 24 }
+
+/** Correlation ρ at which the count of HIGH (5+) games per simulated day has var/mean ≈ `ratio`. */
+export function calibrateRho(pHigh: number[], ratio = 1.7, days = 3000, seed = 0xBADC0DE): number {
+  const tH = pHigh.map(p => probit(1 - Math.min(0.98, Math.max(0.02, p))))
+  const disp = (rho: number) => {
+    const rng = mulberry32(seed); let s = 0, s2 = 0
+    for (let d = 0; d < days; d++) { const z = gauss(rng); let c = 0; for (const t of tH) if (Math.sqrt(rho) * z + Math.sqrt(1 - rho) * gauss(rng) > t) c++; s += c; s2 += c * c }
+    const m = s / days; return m > 0 ? (s2 / days - m * m) / m : 1
+  }
+  let lo = 0, hi = 0.6
+  if (disp(hi) < ratio) return hi
+  if (disp(lo) >= ratio) return lo
+  for (let i = 0; i < 14; i++) { const mid = (lo + hi) / 2; if (disp(mid) < ratio) lo = mid; else hi = mid }
+  return +((lo + hi) / 2).toFixed(3)
+}
+
 /**
  * Build the multi-market coverage book. Base = fewest highest-Under-4.5-odds games to reach `target`.
- * Realizer: simulate correlated 3-band days; a game that lands MID is "free" (both U45 & O25 win), so
- * we cover the most-frequent {which games are LOW vs HIGH} decisive patterns — U45 on non-HIGH, O25 on
- * HIGH. Variable legs: drop the lowest-odds games from a slip while its payout still clears `target`
- * (the operator's "drop to fit ₦target" idea). Every slip's keep is computed under independence (honest).
+ * Candidates: each simulated correlated 3-band day proposes the slip that fits it (every game bet on the
+ * market covering its sampled band — tight or wide), trimmed to the fewest legs that still pay ≥ target.
+ * Selection (greedy, default): repeatedly take the candidate that wins on the MOST simulated days no chosen
+ * slip wins yet (maximum coverage ⇒ P(≥1 win) as high as this candidate set allows). P(≥1 win) is then
+ * measured on a FRESH, independent set of days (out-of-sample — never scored on the days it was fitted to).
+ * Every slip's keep is computed under independence (the book's pricing — honest, always < 1).
  */
-export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake: number; target: number; maxPayout: number; boost?: BoostFn; rho?: number; trials?: number; seed?: number }): MultiBook {
+export function buildMultiBook(axes: MultiAxis[], opts: MultiBookOptions): MultiBook {
   const { budget, stake, target, maxPayout } = opts
   const boost = opts.boost ?? boostFor
-  const rho = opts.rho ?? 0.15
   const K = Math.max(1, Math.floor(budget / stake))
+  const select = opts.select ?? 'greedy'
   // base games: fewest highest-Under-4.5-odds to reach target; then STABLE order (kickoff, then game
   // name) so the game list — and therefore the coverage tree — is deterministic run to run.
   const sorted = [...axes].sort((a, b) => b.odds.U45 - a.odds.U45)
@@ -106,20 +132,16 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
   N = Math.min(Math.max(N, 6), sorted.length, 45)
   const G = sorted.slice(0, N).sort((a, b) => a.kickoff.localeCompare(b.kickoff) || a.game.localeCompare(b.game))
 
+  const rho = opts.rho ?? 0
+  const rhoStress = calibrateRho(G.map(g => g.pHIGH))
   const tH = G.map(g => probit(1 - Math.min(0.98, Math.max(0.02, g.pHIGH))))
   const tL = G.map(g => probit(Math.min(0.98, Math.max(0.02, g.pLOW))))
-  const rng = mulberry32(opts.seed ?? 0xC0FFEE)
-  const drawDay = () => { const z = gauss(rng); const o = new Array<Band>(N); for (let i = 0; i < N; i++) { const x = Math.sqrt(rho) * z + Math.sqrt(1 - rho) * gauss(rng); o[i] = (x > tH[i] ? 2 : x <= tL[i] ? 0 : 1) as Band } return o }
+  const dayDrawer = (seed: number, r = rho) => { const rng = mulberry32(seed); return () => { const z = gauss(rng); const o = new Array<Band>(N); for (let i = 0; i < N; i++) { const x = Math.sqrt(r) * z + Math.sqrt(1 - r) * gauss(rng); o[i] = (x > tH[i] ? 2 : x <= tL[i] ? 0 : 1) as Band } return o } }
+  const drawDay = dayDrawer(opts.seed ?? 0xC0FFEE)
 
-  // ── ODDS-WEIGHTED SAMPLED MIX (every slip a different, intelligent blend of all four markets) ──────
-  // Not a base + flips. Each slip is a distinct plausible day: draw a correlated outcome, then bet each
-  // game the market that FITS its sampled band, chosen from that game's OWN prices —
-  //   HIGH (5+)  → Over 4.5 (tight) or Over 2.5 (wide)
-  //   LOW  (0-2) → Under 2.5 (tight) or Under 4.5 (wide)
-  //   MID  (3-4) → the game's likelier wide side (Under 4.5 if it leans low, Over 2.5 if it leans high)
-  // Sampled, so no two slips are the same and the family spans the real scoreline distribution. Never
-  // blind — every leg follows the game's odds. Honest keep (independence) is still < 1 (−vig).
-  const bandProbOf = bandProb
+  // The market that FITS a game's sampled band, from that game's own prices:
+  //   HIGH (5+) → Over 4.5 (tight) / Over 2.5 (wide) · LOW (0-2) → Under 2.5 (tight) / Under 4.5 (wide)
+  //   MID (3-4) → the game's likelier wide side (Under 4.5 if it leans low, Over 2.5 if it leans high)
   const oddsOf = (i: number, m: Market) => G[i].odds[m]
   const fit = (i: number, b: Band, tight: boolean): Market =>
     b === 2 ? (tight ? 'O45' : 'O25')
@@ -130,9 +152,7 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
     const mk = new Map<number, Market>(games.map(i => [i, fit(i, bands[i], tight)]))
     let odds = games.reduce((p, i) => p * oddsOf(i, mk.get(i)!), 1)
     let pay = Math.min(stake * odds * (1 + boost(games.length)), maxPayout)
-    // GUARANTEE the win clears the goal: if even the full slip can't reach the target, reject it (the
-    // caller re-samples) — so every placed slip pays ≥ target when it hits.
-    if (pay < target) return null
+    if (pay < target) return null   // every slip must pay ≥ target when it wins
     // variable legs — drop the lowest-odds legs while payout still clears target
     const byOdds = [...games].sort((a, b) => oddsOf(a, mk.get(a)!) - oddsOf(b, mk.get(b)!))
     for (const drop of byOdds) {
@@ -144,41 +164,87 @@ export function buildMultiBook(axes: MultiAxis[], opts: { budget: number; stake:
     }
     const markets = games.map(i => mk.get(i)!)
     let keep = 1 + boost(games.length)
-    for (const i of games) keep *= bandProbOf(G[i], mk.get(i)!) * oddsOf(i, mk.get(i)!)
+    for (const i of games) keep *= bandProb(G[i], mk.get(i)!) * oddsOf(i, mk.get(i)!)
     return { markets, games: games.map(i => G[i].fixtureId), legs: games.length, combinedOdds: odds, payout: Math.round(pay), keep }
   }
-  // K DISTINCT sampled slips (each a different plausible day), every one paying ≥ target. ~1 in 3 tight.
-  const slips: MultiSlip[] = []
-  const seen = new Set<string>()
-  for (let guard = 0; slips.length < K && guard < K * 20; guard++) {
-    const sl = buildSampled(drawDay(), slips.length % 3 === 1)
-    if (!sl) continue
-    const key = sl.games.map((g, j) => g + sl.markets[j]).join('|')
-    if (seen.has(key)) continue
-    seen.add(key); slips.push(sl)
-  }
-  const completeDepth = 0
-
-  // family measurement: honest EV (independence) + P(≥1 win) (correlated). To be safe against the
-  // correlation-fakes-profit trap, EV is the mean of per-slip independent keeps — never the sim.
-  const keepRate = slips.reduce((s, x) => s + x.keep, 0) / slips.length
-  // precompute each slip as (G-index, coverset) pairs so the win-check is O(legs), not O(legs·N)
+  const keyOf = (sl: MultiSlip) => sl.games.map((g, j) => g + sl.markets[j]).join('|')
   const gi = new Map(G.map((g, i) => [g.fixtureId, i]))
+
+  const slips: MultiSlip[] = []
+  if (select === 'sampled') {
+    const seen = new Set<string>()
+    for (let guard = 0; slips.length < K && guard < K * 20; guard++) {
+      const sl = buildSampled(drawDay(), slips.length % 3 === 1)
+      if (!sl) continue
+      const key = keyOf(sl); if (seen.has(key)) continue
+      seen.add(key); slips.push(sl)
+    }
+  } else {
+    // ── candidates: tight + wide slip for many sampled days (deduped) ──
+    const cand: MultiSlip[] = []; const seen = new Set<string>()
+    for (let guard = 0; cand.length < K * 4 && guard < K * 40; guard++) {
+      const day = drawDay()
+      for (const tight of [false, true]) { const sl = buildSampled(day, tight); if (!sl) continue; const k = keyOf(sl); if (!seen.has(k)) { seen.add(k); cand.push(sl) } }
+    }
+    // ── training days → per-(game, market) win bitsets → per-candidate win bitsets ──
+    const D = 6144, W = D >>> 5
+    const train = dayDrawer((opts.seed ?? 0xC0FFEE) ^ 0x5EED)
+    const bandBits: Uint32Array[][] = G.map(() => [new Uint32Array(W), new Uint32Array(W), new Uint32Array(W)])
+    for (let d = 0; d < D; d++) { const o = train(); for (let i = 0; i < N; i++) bandBits[i][o[i]][d >>> 5] |= 1 << (d & 31) }
+    const mktBits = (i: number, m: Market) => { const out = new Uint32Array(W); for (const b of COVERS[m]) { const bb = bandBits[i][b]; for (let w = 0; w < W; w++) out[w] |= bb[w] } return out }
+    const cache = new Map<string, Uint32Array>()
+    const bits = cand.map(sl => {
+      const acc = new Uint32Array(W).fill(0xFFFFFFFF)
+      sl.games.forEach((fid, j) => { const i = gi.get(fid)!; const ck = i + sl.markets[j]; let mb = cache.get(ck); if (!mb) { mb = mktBits(i, sl.markets[j]); cache.set(ck, mb) } for (let w = 0; w < W; w++) acc[w] &= mb[w] })
+      return acc
+    })
+    // ── lazy greedy max-coverage (gains only shrink, so a stale upper bound is safe to re-check) ──
+    const covered = new Uint32Array(W)
+    const gain = (c: number) => { let g = 0; const b = bits[c]; for (let w = 0; w < W; w++) g += popcnt(b[w] & ~covered[w]); return g }
+    const ub = bits.map((_, c) => gain(c))
+    const taken = new Uint8Array(cand.length)
+    const order = cand.map((_, c) => c)
+    const better = (a: number, b: number) => ub[a] > ub[b] || (ub[a] === ub[b] && cand[a].keep > cand[b].keep)
+    while (slips.length < K && slips.length < cand.length) {
+      order.sort((a, b) => (ub[b] - ub[a]) || (cand[b].keep - cand[a].keep))
+      // Scan in upper-bound order; once no remaining bound can beat the best FRESH gain, stop — exact argmax.
+      // Ties (incl. once every simulated day is covered) go to the higher-keep slip (loses least).
+      let pick = -1
+      for (const c of order) {
+        if (taken[c]) continue
+        if (pick >= 0 && ub[c] < ub[pick]) break
+        ub[c] = gain(c)
+        if (pick < 0 || better(c, pick)) pick = c
+      }
+      if (pick < 0) break
+      taken[pick] = 1; slips.push(cand[pick])
+      const b = bits[pick]; for (let w = 0; w < W; w++) covered[w] |= b[w]
+    }
+  }
+
+  // family measurement: honest EV (independence) + P(≥1 win) on FRESH days (out-of-sample, correlated).
+  // EV is the mean of per-slip independent keeps — never the sim (the correlation-fakes-profit trap).
+  const keepRate = slips.length ? slips.reduce((s, x) => s + x.keep, 0) / slips.length : 0
   const compiled = slips.map(sl => sl.games.map((fid, j) => ({ i: gi.get(fid)!, cover: COVERS[sl.markets[j]] })))
   const winC = (c: { i: number; cover: Band[] }[], o: Band[]) => { for (const { i, cover } of c) if (!cover.includes(o[i])) return false; return true }
+  const evalDay = dayDrawer((opts.seed ?? 0xC0FFEE) ^ 0xE7A1)
   let hits = 0; const T = Math.min(20000, opts.trials ?? 20000)
-  for (let t = 0; t < T; t++) { const o = drawDay(); for (const c of compiled) if (winC(c, o)) { hits++; break } }
+  for (let t = 0; t < T; t++) { const o = evalDay(); for (const c of compiled) if (winC(c, o)) { hits++; break } }
   const pAnyWin = hits / T
+  // stress: same slips on correlated days (see MultiBook.pAnyWinCorrelated)
+  const stressDay = dayDrawer((opts.seed ?? 0xC0FFEE) ^ 0x57E5, rhoStress)
+  let stressHits = 0; const TS = Math.min(10000, T)
+  for (let t = 0; t < TS; t++) { const o = stressDay(); for (const c of compiled) if (winC(c, o)) { stressHits++; break } }
+  const pAnyWinCorrelated = stressHits / TS
   const pays = slips.map(s => s.payout).sort((a, b) => a - b)
   const mix: Record<Market, number> = { U25: 0, U45: 0, O25: 0, O45: 0 }
   for (const s of slips) for (const m of s.markets) mix[m]++
   const legs = slips.map(s => s.legs)
-  void completeDepth
   return {
-    slips, N, K, pAnyWin, keepRate: +keepRate.toFixed(4),
-    expectedNet: Math.round((keepRate - 1) * budget),
+    slips, N, K, pAnyWin, keepRate: +keepRate.toFixed(4), rho, pAnyWinCorrelated, rhoStress,
+    expectedNet: Math.round((keepRate - 1) * Math.min(budget, slips.length * stake)),
     medianPayout: pays[Math.floor(pays.length / 2)] || 0,
-    note: `multi-market odds-weighted sampled mix: every slip a distinct plausible day, all four markets by game's own prices. legs ${Math.min(...legs)}-${Math.max(...legs)}, market legs U2.5:${mix.U25} U4.5:${mix.U45} O2.5:${mix.O25} O4.5:${mix.O45}. HONEST keep=${keepRate.toFixed(3)} (<1 = −vig, independence-priced).`,
+    note: `multi-market ${select === 'greedy' ? 'max-coverage' : 'sampled'} mix over ${N} games (priced as the book prices: games independent): legs ${Math.min(...legs)}-${Math.max(...legs)}, market legs U2.5:${mix.U25} U4.5:${mix.U45} O2.5:${mix.O25} O4.5:${mix.O45}. HONEST keep=${keepRate.toFixed(3)} (<1 = −vig, independence-priced).`,
   }
 }
 

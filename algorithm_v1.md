@@ -1,0 +1,365 @@
+# algorithm_v1 — the Decision Bot (target-driven, multi-market, logged)
+
+> Status: **BUILT (2026-09-25)** and the default engine; see [§0](#0-what-was-built-and-verified). §1–§8
+> below are the original spec, kept as written, with corrections marked **[corrected]**. The worked
+> example is reproducible: `node scripts/algorithm-v1-example.mjs 10 200 5 7` (read-only; nothing placed).
+
+This document does three things:
+
+1. **§0:** what was built, the decisions taken, and what was verified on the real site.
+2. **§1–§3:** how the algorithm evolved in this codebase, what each version measured, and what the real
+   settled record says.
+3. **§4–§8:** the Decision Bot spec, with worked maths on real odds and an honest EV section.
+
+---
+
+## 0. What was built and verified
+
+**Your decisions.** Payout band **1%** (configurable). Rule **greedy** (configurable: greedy / weighted /
+random / flip). Legs under 1.20 **allowed** (configurable). **History used**: it is the gate (only games
+where both teams have recent form), and every pick's reason cites how that pick did in the two teams' past
+meetings.
+
+| Piece | Where | What it does |
+|---|---|---|
+| Selection catalogue | `lib/pedlas/selections.ts` | 19 two-sided pairs per game (1X2↔Double Chance, totals, team totals, BTTS, odd/even, clean sheets). Each selection is a scoreline **rule**, used to price, explain and settle. Game order: kickoff → shortest name → A–Z. |
+| Calibrated scoreline table | `lib/pedlas/scoreline-table.ts` | Poisson start plus iterative fitting to **every** de-vigged market, so no selection can look better than fair (worst fit on live odds: 1.6pt). |
+| Decision Bot | `lib/pedlas/decision-bot.ts` | Builds slips one by one, walking games in order, closing each slip inside [T, 1.01·T], and logging every pick. |
+| Fingerprint greedy | same | Each slip's fingerprint is the set of score combinations it wins on. Greedy scores candidates by P(win) minus the overlap with earlier slips (exact, from the tables), and prefers **fingerprint-disjoint** slips (pairs that can never both win). Candidates come from three generators: uniform, probability-weighted, and a *separator* that picks selections sharing no scoreline with slips it still overlaps. |
+| SportyBet bonus | `lib/books/sportybet-bonus.ts` | The site's **own** Multi Bet Bonus formula, read from its live plan (below). |
+| Session builder | `lib/pedlas/build-bot.ts` | Feed → history gate → bot → stored legs (booking-code ids, rule, reason, probability). |
+| Rule-aware settlement | `lib/pedlas/settle-slips.ts` | Every market settles from the final score (home–away), with early cut. |
+
+**Measured (live odds, ₦1,000 → ₦100,000, exact live bonus):**
+
+| Rule | legs < 1.20 allowed | only ≥ 1.20 |
+|---|---:|---:|
+| greedy (fingerprint) | **0.60%** · keep 0.60 | **0.64%** · keep 0.65 |
+| random | 0.43% · keep 0.43 | 0.51% · keep 0.52 |
+
+At a lower target, where fingerprint overlap matters (₦1,000 → ₦5,000): greedy **14.95%** vs random
+12.82% vs flip 8.67%. Flip overlaps the most (5.5pt), because slip 3 flips slip 2 back towards slip 1.
+
+**Verified on the real site (dry runs, nothing staked).** Every bot slip's booking code loads on the
+SportyBet betslip with exactly its games, including 1X2, clean-sheet and team-total legs. The built payout
+equals the betslip's Potential Win **to the kobo** (4/4 slips: ₦5,031.39 / ₦5,049.07 / ₦5,031.76 / ₦5,015.34).
+
+### The SportyBet bonus: what we got wrong, and the real rule
+
+SportyBet changed plans on 2026-09-09 (`MBB_1788955181864`). The stored table came from the July plan and
+overstated long slips about 2× (20 legs: stored 92%, real 42%). **[corrected]** §4.2 and §8 said a leg
+under 1.20 "breaks the bonus for the whole slip". **That is false:** such legs simply don't count.
+The real rule, read from the site's own code and live plan (`GET /api/ng/promotion/v2/bonus/plans/valid`):
+
+```
+qualifying legs = odds ≥ 1.20            n = how many;   plan gives a [min, max] range for n
+Q      = Π qualifying odds
+rtp    = Π (odds × p)                    p = SportyBet's own outcome probability (in the feed)
+target = Σ odds²·p / Σ odds              (rounded to 4 dp)
+pct    = floor₂(target / rtp − 1), clamped to [min, max × bonusFactor]   (football bonusFactor 0.6)
+bonus  = stake × Q × pct                 payout = stake × Π all odds + bonus
+```
+
+For every realistic accumulator the clamp binds, so the bonus is **plan max × 0.6**: for example 4 legs
+4.8%, 6 legs 9.6%, 10 legs 19.8%, 20 legs 42%. Builds read the plan live, so a future plan change is
+picked up automatically.
+
+### Placement: multi-PC, no double placing
+
+See `docs/placement-architecture.md`. In short: slips are claimed from a shared database queue with a
+lease. A slip enters "submitting" (the point of no return) only while its lease is live, right before
+Confirm. A slip whose placing PC died mid-submit goes to "verify" and is checked against bet history,
+never re-placed on a guess. Submits are serialised per account across PCs, with **one placer per Chrome**
+(a Chrome's tabs share one betslip). Every slip is re-checked on the betslip, inside the submit lock,
+right before Confirm, and a slip whose site payout is below target is skipped.
+
+---
+
+## 1. The one rule that never changes
+
+A bookmaker prices every selection with a margin. For a two-sided market with odds `a` and `b`:
+
+```
+margin  m = 1/a + 1/b − 1                         (typically 4–7% on SportyBet, see §6)
+keep per leg = P(leg wins) × odds = 1/(1+m)       (≈ 0.93–0.96 with fair probabilities)
+keep of a slip = (1 + bonus(L)) × Π keep_leg      (< 1 for every realistic slip)
+```
+
+So **every slip loses money on average**, and no choice of games, markets or flips changes that.
+Missing one leg out of 100 is still a total loss, because an accumulator pays only when every leg lands.
+What an algorithm *can* change is the **shape** of the outcome: how often you win, how much a win pays,
+and how the slips overlap.
+
+### The identity that drives everything
+
+A slip either pays `payout` or nothing, so its expected return is `P(win) × payout = keep × stake`. Hence:
+
+```
+P(slip wins) = keep × stake / payout
+```
+
+With the payout pinned to a target `T`, **every slip that pays ≈ T wins with probability ≈ keep × stake / T**.
+Picking "smarter" games cannot move that number except through `keep`, which is lower-margin legs plus
+the bonus. And for a family of K slips:
+
+```
+P(≥1 slip wins) ≤ Σ P(slip_i wins) ≈ K × keep × stake / T        (equality when no two slips can win together)
+```
+
+At your example scale (₦1,000 budget, ₦10 stake, ₦100,000 target): `100 × 0.75 × 10 / 100,000 ≈ 0.75%`.
+That is the **ceiling for any algorithm** at that budget and target, however clever. The only ways to
+raise it are to spend more, lower the target, or improve keep.
+
+---
+
+## 2. How the algorithm evolved in the code
+
+| Version (when) | What it built | What we measured | Where |
+|---|---|---|---|
+| **PEDLAS v1–v2** (Jun 14–28) | Pick N fixtures, enumerate Over/Under outcome **vectors**, rank by probability, fill the budget top-down. Goal-prediction models advised which games to use. | Every model **backtested negative** on every market. Kept as advisory only. | `pedlas_v1.md`, `pedlas_v2.md`, `lib/pedlas/predict.ts` |
+| **PEDLA v1** (Jul 16) | **Under 4.5 only**, odds ≥ 1.20 (the bonus gate), quality-picked legs, multi-book adapters. | The simplest honest anchor (Under 4.5 lands ~84% of the time). | `pedla_v1.md`, `lib/pedlas/build-book.ts` |
+| **v3 coverage** (Jul 16) | K = budget ÷ stake slips; safe games in every slip, risky games *dropped* in diversified patterns. First correlated simulator. | Over 4.5 ("cutters") ≈ 19% per game and **correlated** (var/mean ≈ 1.7). Coverage ≠ profit. | `pedlas_v3.md`, `lib/pedlas/coverage.ts` |
+| **Flip-scatter / covering design** (Jul 17) | Base = all-Under slip reaching the target; other slips **flip** legs to Over, layer by layer (all 1-flips, all 2-flips…). Guarantee: if ≤ m eligible games go Over, one slip matches. | Guarantee is conditional on "locked" games holding. | `buildFlipScatter` |
+| **Realizer** (Jul 18) | Simulate 40k correlated days; cover the **K most frequent** realistic outcome patterns. | "Already P(win)-optimal" for its model; history blending *lowered* P(win). | `buildRealizer`, `optimum-plan.md §10–11` |
+| **Multi-line anchors** (Jul 19) | Best dominant anchor per game across all total lines (Over 1.5, Under 3.5…). | **Worse**: the 1.20 gate forces ~72%-reliable anchors. Off by default. | `market_policy: 'multi_line'` |
+| **Real SportyBet bonus** (Jul 19) | Captured the Multi Bet Bonus from live betslips (9 legs +30%, 20 +92%, 35 +231%). | The only change that improved every build (fewer legs to reach the target). | `lib/books/sportybet.ts` |
+| **Multi-market 3-band** (Jul 20) | Each game = LOW (0–2) / MID (3–4) / HIGH (5+). Four markets: U2.5, U4.5, O2.5, O4.5. One slip per sampled "plausible day", legs trimmed to the target. | Became the default. This is the first step toward the scoreline idea in §4. | `lib/pedlas/multi-market.ts` |
+| **Today (Sep 25)** | Greedy max-coverage selection; win chance **priced like the book**; history gate enforced; site-confirmed amounts. | See below. | this change set |
+
+### What today's change set fixed in the maths
+
+- **The reported win chance was inflated.** It came from a correlated simulation (fixed ρ = 0.15) that
+  implicitly assumes the bookmaker underprices accumulators. Checked against the identity in §1:
+
+  | ₦ budget → target | reported before | book-consistent ceiling | now reported |
+  |---|---:|---:|---:|
+  | 1,000 → 100,000 | 3.5% | 0.57% | **0.54%** |
+  | 5,000 → 500,000 | 3.2% | 0.50% | **0.41%** |
+  | 10,000 → 60,000 | 15.6% | 9.3% | **7.5%** |
+
+  A 3.5% chance of winning ≥ ₦100k on ₦1,000 would mean an expected return ≥ ₦3,500, which is +250% EV.
+  The bookmaker's own prices rule that out. The correlated figure is now shown only as a labelled
+  **stress figure** on the session's Risk tab.
+- **Selection:** the old sampler picked one random plausible day per slip. It is replaced by **greedy
+  coverage**: each slip is the candidate that wins on the most days not already covered. Same budget,
+  book-consistent pricing: ₦1k → ₦100k **0.19% → 0.54%**, returns per ₦100 **₦58 → ₦73**.
+- **History gate:** `require_history` was silently ignored by the default engine. It is now enforced.
+  If too few games have history, the build refuses and gives the numbers.
+
+---
+
+## 3. The real record (from the database, 2026-09-25)
+
+| | |
+|---|---|
+| Real slips placed | **2,098** (₦20,980 staked) |
+| Settled | 1,113, all lost; **0 won** |
+| Net on settled slips | **−₦11,130** |
+| Still unsettled | 985 slips, games finished in July. Press **Results → Settle finished games** |
+
+This is consistent with the honest numbers in §2: sessions that each had well under a 10% chance of
+producing any winning slip, and none did. It is not evidence of bad luck beyond what the prices predicted.
+
+---
+
+## 4. The Decision Bot: what you proposed, stated precisely
+
+**Goal.** Given a budget `B`, a stake `s` and a target `T`, build `K = B ÷ s` slips, one after another.
+Each slip pays **between T and 1.01·T** (bonus included) if it wins. Every choice the bot makes is logged
+with its reason. The bot is *predictable*, because the same seed gives the same slips and the same log,
+yet *unpredictable* in what it picks, because choices are random within the rules.
+
+### 4.1 Game order (fixed, used everywhere from build to results)
+
+```
+sort games by: 1) kickoff time   2) length of "Home vs Away" (shortest first)   3) A→Z
+```
+
+Rule 3 is added because two games can kick off together with names of equal length. Without a final
+tie-break the order would not always be identical. Live example (all three are Premier League games on Oct 10):
+
+1. Arsenal vs Leeds United (11:30)
+2. Chelsea vs Bournemouth (14:00, 22 characters)
+3. Ipswich Town vs Fulham (14:00, 22 characters, tie broken A→Z)
+
+### 4.2 The selection catalogue: two-sided markets and their flips
+
+Every selection has exactly one **flip**, which wins on precisely the scorelines where it loses. Using
+only pairs like this makes "flip" well defined, and means the two sides of a pair split the game's
+outcomes between them with nothing left over.
+
+| Pair | Selection ↔ flip | Notes |
+|---|---|---|
+| 1X2 | Home ↔ Draw-or-Away · Away ↔ Home-or-Draw · Draw ↔ Home-or-Away | 3-way market; its flip is the matching Double Chance |
+| Total goals | Over L ↔ Under L, L = 0.5 … 5.5 | half-lines only (whole lines can refund) |
+| Both teams score | Yes ↔ No | |
+| Odd/Even | Odd ↔ Even | |
+| Clean sheet | Home CS Yes ↔ No · Away CS Yes ↔ No | |
+| Team totals | Home Over L ↔ Under L · Away Over L ↔ Under L | |
+
+That gives **38 selections per game** in the live example (19 pairs). Excluded: Draw No Bet and
+whole-line handicaps (can refund). **[corrected, see §0]** A selection **below 1.20** does not count toward the bonus
+(it does not break it for the whole slip, as first written); about 20% of selections, e.g. Over 0.5 @ 1.02.
+**One selection per game per slip**: combining two markets from the same game is a different product
+(Bet Builder) with adjusted odds.
+
+### 4.3 The scoreline table: what each selection covers
+
+A game ends on one scoreline, and each selection is **the set of scorelines it wins on**. Arsenal vs
+Leeds, with the table fitted to the book's prices (expected goals 2.04 vs 0.80):
+
+| score | P | Under 4.5 | Over 1.5 | Both score | Even | Home win |
+|---|---:|:-:|:-:|:-:|:-:|:-:|
+| 2-0 | 12.2% | ✓ | ✓ | · | ✓ | ✓ |
+| 1-0 | 11.9% | ✓ | · | · | · | ✓ |
+| 2-1 | 9.7% | ✓ | ✓ | ✓ | · | ✓ |
+| 1-1 | 9.5% | ✓ | ✓ | ✓ | ✓ | · |
+| 3-0 | 8.3% | ✓ | ✓ | · | · | ✓ |
+| 3-1 | 6.6% | ✓ | ✓ | ✓ | ✓ | ✓ |
+| 0-0 | 5.8% | ✓ | · | · | ✓ | · |
+
+`P(selection) = Σ P(scorelines it covers)`. This is how different markets on the same game are
+compared on one scale, and how the bot knows that "Under 4.5" and "Over 1.5" overlap on 2-0, 2-1, 1-1, 3-0 …
+while "Both score: Yes" and "Home clean sheet: Yes" never do.
+
+### 4.4 Building one slip (target-driven)
+
+```
+payout = s × (1 + bonus(legs)) × Π odds
+for game in ORDER:
+    choose a selection for this game          ← decision rule (§4.5), logged
+    if payout ≥ T: stop                       ← "stop adding games when the amount reaches the target"
+closing step: the last leg is chosen from the options that put payout inside [T, 1.01·T];
+              if none does, re-choose the previous leg (backtrack one step), logged as such.
+```
+
+The band matters: every winning slip pays ≈ T, never a surprise ₦3M. Per the identity in §1, that also
+makes every slip's win chance ≈ `keep × s / T`.
+
+### 4.5 Decision rules (the "brain"), each logged
+
+| Rule | How it picks | Log line (reason) |
+|---|---|---|
+| **random** | seeded uniform among allowed options | `random (u=0.012) among 130 in-band combos` |
+| **flip** | slip 1 random; later slips flip as many of slip 1's picks as the band allows | `flips 1/3 of slip 1's picks, still in band` |
+| **greedy** | the option or slip that adds the most *new* winning scorelines to the family | `adds +4.77% to P(≥1 win)` |
+| weighted-random *(suggested)* | random, weighted by P(selection) | `weighted random (u=…, p=…)` |
+
+Log format, one JSON line per decision, stored with the session:
+
+```json
+{"slip":2,"game":1,"match":"Arsenal vs Leeds United","pick":"Total goals Even","odds":1.90,
+ "alternatives":37,"rule":"greedy","reason":"adds +4.77% to P(≥1 win)","payoutSoFar":19.0,"seed":7}
+```
+
+### 4.6 The search space
+
+38 selections per game means **38ᴺ combinations**: 54,872 for 3 games, but about **3×10²⁰** for the
+~13 games a ₦100k target needs. That cannot be enumerated, which is why the bot builds one leg at a time
+and only searches the last one or two legs to land in the band. For 3 games we *can* enumerate, which is
+the worked example.
+
+---
+
+## 5. Worked example: live odds, 3 games, ₦10 stake, target ₦200
+
+| Step | Count |
+|---|---:|
+| All combinations (38 × 38 × 38) | 54,872 |
+| Every leg ≥ 1.20 (bonus-eligible) | 30,624 |
+| Paying **₦200–₦202** (3-leg bonus 5%) | **130** |
+| Win chance of each of those 130 | 2.9%–5.2% (≈ keep × 10 / 200) |
+
+Five slips (₦50) from those 130, seed 7:
+
+| Rule | P(≥1 of 5 wins) | Expected return on ₦50 | Returns per ₦100 |
+|---|---:|---:|---:|
+| random | 18.4% | ₦41.1 | ₦82 |
+| flip | 18.8% | ₦44.9 | ₦90 |
+| **greedy** | **22.8%** | ₦46.9 | ₦94 |
+
+Greedy's log:
+
+```
+slip 1: G1 Away win @7.39 · G2 Total goals Odd @1.96 · G3 Home or Away @1.32 → ₦200.75, wins 5.15%
+slip 2: G1 Total goals Even @1.90 · G2 Away win @4.00 · G3 Away win @2.53   → ₦201.89, adds +4.77%
+slip 3: G1 Draw @4.89 · G2 Home win @1.82 · G3 Away Over 1.5 @2.15           → ₦200.91, adds +4.61%
+slip 4: G1 Away Under 0.5 @2.05 · G2 Away Under 0.5 @3.40 · G3 Home win @2.76 → ₦201.99, adds +4.20%
+slip 5: G1 Away Over 1.5 @4.90 · G2 Total goals Even @1.86 · G3 Under 2.5 @2.10 → ₦200.96, adds +4.10%
+```
+
+What the example shows:
+
+- **Your band idea works mechanically.** 130 of 54,872 combinations pay exactly ~T, and a seeded bot can
+  pick among them reproducibly, with a readable reason for each pick.
+- **Pure flipping is not the strongest rule.** A strict flip of slip 1 usually leaves the band (the
+  flipped odds differ), so "flip" degrades to "flip one leg". Greedy coverage wins because it chooses slips
+  whose winning scorelines *don't overlap*.
+- **The ceiling is visible.** All 130 in-band slips together (₦1,300) win 88.6% of the time, and every
+  win pays about ₦200. Covering nearly everything guarantees a loss; this is the "variance dial, not a
+  profit dial" from `docs/learnings.md §3`.
+
+**A warning the example exposed.** The simple (independent-Poisson) scoreline table disagrees with the
+book on some markets. It rates "Chelsea vs Bournemouth: Away win @ 4.00" at keep 1.022, which looks like
+an edge but is model error (independent Poisson under-rates draws). Greedy happily chases such errors,
+which is why its 0.94 above is flattered. The real build **must calibrate the table so every selection's
+probability matches the book's de-vigged price** (fit to all markets at once, not just four). Otherwise
+the bot optimises for our modelling mistakes.
+
+---
+
+## 6. Honest EV at your real scale
+
+Margins seen live (two-sided, so keep per leg ≈ 1/(1+m)):
+
+| Market | margin | keep/leg |
+|---|---:|---:|
+| 1X2 / Double Chance | 3.6–7.0% | 0.93–0.97 |
+| Total goals | 5.5–6.5% | ≈ 0.94 |
+| Both score | 4.3–5.2% | ≈ 0.95 |
+| Odd/Even | 4.8–5.0% | ≈ 0.95 |
+| Clean sheet | 6.5–7.3% | ≈ 0.94 |
+| Team totals | 4.6–5.4% | ≈ 0.95 |
+
+₦1,000 budget, ₦10 stake, ₦100,000 target → odds × bonus ≈ 10,000 → about 13 legs at average odds ~1.9:
+
+```
+keep ≈ 0.95^13 × (1 + 0.48 bonus) ≈ 0.51 × 1.48 ≈ 0.76
+P(one slip wins) ≈ 0.76 × 10 / 100,000 ≈ 0.0076%     (about 1 in 13,000)
+P(≥1 of 100 slips) ≤ 0.76%                           (reached only if no two slips can win together)
+expected result ≈ −₦240 per ₦1,000 session
+```
+
+- **What the Decision Bot can do:** exact payout control (every win ≈ T), every decision explained and
+  reproducible, access to lower-margin markets (1X2 favourites and BTTS at 4–5% beat Over/Under at ~6%,
+  which raises keep), and near-zero overlap between slips (pushes P(≥1) toward the ceiling).
+- **What it can't do:** make any slip, or the family, +EV; or beat the ceiling `K × keep × stake / T`.
+- **Where an edge could come from:** only a price sharper than SportyBet's (line-shopping against a sharp
+  book), as recorded in `pedlas-no-model-edge`. Nothing inside SportyBet's own odds creates it.
+
+---
+
+## 7. Proposed build (after we agree §8) — built, see §0
+
+1. **Market catalogue.** Adapter pulls markets 1, 10, 18, 19, 20, 26, 29, 31, 32 and builds the 19 flip
+   pairs per game, applying the ≥ 1.20 filter. Placement: booking codes already support any
+   `marketId/specifier/outcomeId`.
+2. **Calibrated scoreline table** per game. Fit so every selection's P matches its de-vigged price
+   (tolerance ≤ 1pt), with a unit test that no selection shows keep > 1.
+3. **Decision Bot** (`lib/pedlas/decision-bot.ts`): ordering, sequential target-driven build, band
+   closing and backtrack, rules (random / flip / weighted / greedy), seed, JSON decision log.
+4. **Scoring** stays book-consistent: independent games; the correlated figure only as a stress number.
+5. **UI:** a "Decisions" tab on the session showing the log per slip (why each leg was chosen).
+6. **Settlement** works unchanged: legs carry market / specifier / side and settle from final scores.
+   New markets (1X2, BTTS, odd/even, clean sheets, team totals) need their settle rule, which is a
+   predicate on (home, away) as in §4.3.
+
+## 8. Decisions needed from you — answered, see §0
+
+1. **Band width:** 1% (₦100k–₦101k) as you said? A tighter band means fewer candidate slips and more backtracking.
+2. **Default rule:** greedy (best P(≥1)), weighted-random (unpredictable, near-best), or your pure random/flip?
+   The example: greedy 22.8% vs random 18.4% for the same ₦50.
+3. **Markets:** all 19 pairs, or leave out ones you don't trust (e.g. Odd/Even, whose outcome is close to a coin flip)?
+4. **Legs below 1.20:** exclude (keeps the bonus, current rule) or allow (and lose the bonus on that slip)?
+5. **History:** H2H stays a *gate* (only games with history), per your standing rule. Should it also
+   *weight* choices? Past measurements say weighting lowers P(win) (`realizer-already-optimal`).

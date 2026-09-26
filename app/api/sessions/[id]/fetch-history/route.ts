@@ -20,7 +20,9 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
 
   const result = await new Promise<Record<string, unknown>>((resolve) => {
     let out = ''
-    const p = spawn('node', ['scripts/sync-h2h.mjs', session.code, origin, String(limit)], { shell: process.platform === 'win32' })
+    // script path built at runtime so the bundler doesn't try to resolve it as a module import
+    const script = ['scripts', 'sync-h2h.mjs'].join('/')
+    const p = spawn('node', [script, session.code, origin, String(limit)], { shell: process.platform === 'win32' })
     p.stdout.on('data', d => { out += d.toString() })
     p.stderr.on('data', () => {})
     const finish = () => {

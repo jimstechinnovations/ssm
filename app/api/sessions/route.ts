@@ -13,8 +13,11 @@ import { z } from 'zod'
 import { getBook, BOOK_IDS } from '@/lib/books/registry'
 import { getBookConfig } from '@/lib/books/config-store'
 import { buildCoverageForAdapter } from '@/lib/pedlas/build-book'
+import { buildDecisionBotForAdapter } from '@/lib/pedlas/build-bot'
 import { boostFromTable } from '@/lib/pedlas/boost'
+import { fetchSportyBonusPlan, sportyBoostFn } from '@/lib/books/sportybet-bonus'
 import { estimatePlacement } from '@/lib/pedlas/coverage'
+import { ledgerSummary } from '@/lib/placement/store'
 import { createSession, updateSession, saveSessionSlips, listSessions, sessionSummary, scoreboards } from '@/lib/sessions/store'
 
 export const runtime = 'nodejs'
@@ -52,6 +55,16 @@ const CreateSchema = z.object({
   max_window_days: z.number().int().min(1).max(30).optional(),
   /** Drop games whose league matches any of these substrings (e.g. ["friendl"] to skip friendlies). */
   exclude_leagues: z.array(z.string()).optional(),
+  /** Which builder: the Decision Bot (default), the multi-market coverage engine, or the legacy Under-4.5 engine. */
+  engine: z.enum(['decision_bot', 'multi_market', 'under_4.5']).optional(),
+  /** Decision Bot: payout band above the target, in % (default 1 → every slip pays ₦T–₦1.01T). */
+  band_pct: z.number().min(0.1).max(25).optional(),
+  /** Decision Bot: how picks are made (default greedy — max P(≥1 win) with fingerprint-disjoint slips). */
+  rule: z.enum(['greedy', 'weighted', 'random', 'flip']).optional(),
+  /** Decision Bot: allow legs under 1.20 odds (they don't count toward SportyBet's bonus). Default true. */
+  allow_sub_min_legs: z.boolean().optional(),
+  /** Decision Bot: seed — same seed + same odds ⇒ same slips and same decision log. Default: time-based. */
+  seed: z.number().int().min(0).max(2_147_483_647).optional(),
 }).refine(d => {
   const from = new Date(d.date_from), to = new Date(d.date_to)
   const maxTo = new Date(from); maxTo.setDate(maxTo.getDate() + 2)
@@ -84,7 +97,7 @@ export async function POST(request: Request): Promise<Response> {
   })
   if (!session) return Response.json({ error: 'Could not create session (is migration 006 applied?)' }, { status: 500 })
 
-  const bookResults: Array<{ bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; withHistory?: number; note?: string; error?: string; detail?: string }> = []
+  const bookResults: Array<{ bookId: string; slips?: number; legs?: number; pAnyWin?: number; medianPayout?: number; withHistory?: number; keepRate?: number; expectedNet?: number; legRange?: { min: number; max: number }; windowWarning?: string; note?: string; error?: string; detail?: string }> = []
   const bookMetas: Record<string, unknown> = {}
   let totalSlips = 0
   let repL: number | undefined
@@ -93,13 +106,38 @@ export async function POST(request: Request): Promise<Response> {
   let usedDateTo = req.date_to   // may auto-extend if the window lacks enough games
 
   const cfgById = new Map(req.books.map((id, i) => [id, cfgs[i]]))
+  const engine = req.engine ?? 'decision_bot'
+  const seed = req.seed ?? (Date.now() % 1_000_000_007)   // stored with the session, so the build is reproducible
   for (const id of req.books) {
     const cfg = cfgById.get(id)
-    const boost = cfg?.boost ? boostFromTable(cfg.boost) : undefined   // verified table only; else adapter default
+    // SportyBet: the LIVE bonus plan (the site changes it — the stored table went stale on 2026-09-09).
+    // Other books: the verified stored table, else the adapter default.
+    let boost = cfg?.boost ? boostFromTable(cfg.boost) : undefined
+    if (id === 'sportybet') { try { boost = sportyBoostFn(await fetchSportyBonusPlan()) } catch { /* keep the stored/adapter table */ } }
+    const requireHistory = req.require_history ?? true                 // history-informed is the default (never silently blind)
+
+    if (engine === 'decision_bot') {
+      const bot = await buildDecisionBotForAdapter(getBook(id), {
+        dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake, target: req.target_win,
+        minKickoffGapMinutes: windowMin, band: (req.band_pct ?? 1) / 100, rule: req.rule ?? 'greedy',
+        allowSubMinLegs: req.allow_sub_min_legs ?? true, seed, requireHistory, excludeLeagues: req.exclude_leagues, boost,
+      })
+      if (!bot.slips || !bot.result) { bookResults.push({ bookId: id, error: bot.error, detail: bot.detail }); continue }
+      const saved = await saveSessionSlips(session.id, id, bot.slips)
+      totalSlips += saved
+      const m = bot.meta as { variableLegs: { min: number; max: number }; gamesUsed: number; poolSize: number; withHistory: number; note: string }
+      repL ??= m.gamesUsed; repPool ??= m.poolSize; repPAny ??= bot.result.pAnyWin
+      bookMetas[id] = bot.meta
+      bookResults.push({ bookId: id, slips: saved, legs: m.gamesUsed, pAnyWin: bot.result.pAnyWin, withHistory: m.withHistory, keepRate: bot.result.keepRate, expectedNet: bot.result.expectedNet, legRange: m.variableLegs, note: m.note })
+      continue
+    }
+
     const built = await buildCoverageForAdapter(getBook(id), {
       dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake,
-      targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost,
-      requireHistory: req.require_history, overThreshold: req.over_threshold, maxFlipFrac: req.max_flip_frac, maxRun: req.max_run, realizer: req.realizer, signalWeight: req.signal_weight, marketPolicy: req.market_policy, maxWindowDays: req.max_window_days, excludeLeagues: req.exclude_leagues,
+      targetWin: req.target_win, legPref: req.leg_pref, minKickoffGapMinutes: windowMin, boost, requireHistory,
+      overThreshold: req.over_threshold, maxFlipFrac: req.max_flip_frac, maxRun: req.max_run, realizer: req.realizer,
+      signalWeight: req.signal_weight, marketPolicy: engine === 'under_4.5' ? 'under_4.5' : req.market_policy,
+      maxWindowDays: req.max_window_days, excludeLeagues: req.exclude_leagues,
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
     if (built.usedDateTo && built.usedDateTo > usedDateTo) usedDateTo = built.usedDateTo
@@ -107,7 +145,8 @@ export async function POST(request: Request): Promise<Response> {
     totalSlips += saved
     repL ??= built.book.L; repPool ??= built.book.poolSize; repPAny ??= built.book.pAnyWin
     bookMetas[id] = built.meta
-    bookResults.push({ bookId: id, slips: saved, legs: built.book.L, pAnyWin: built.book.pAnyWin, medianPayout: built.book.medianPayout, withHistory: (built.meta as { withHistory?: number })?.withHistory, note: String((built.meta as { note?: string })?.note ?? built.book.note ?? '') })
+    const m = (built.meta ?? {}) as { withHistory?: number; keepRate?: number; expectedNet?: number; variableLegs?: { min: number; max: number }; windowWarning?: string; note?: string }
+    bookResults.push({ bookId: id, slips: saved, legs: built.book.L, pAnyWin: built.book.pAnyWin, medianPayout: built.book.medianPayout, withHistory: m.withHistory, keepRate: m.keepRate, expectedNet: m.expectedNet, legRange: m.variableLegs, windowWarning: m.windowWarning, note: String(m.note ?? built.book.note ?? '') })
   }
 
   const ok = totalSlips > 0
@@ -117,7 +156,7 @@ export async function POST(request: Request): Promise<Response> {
     legCount: repL,
     slipCount: totalSlips,
     poolSize: repPool,
-    meta: { perBookBudget, windowMin, usedDateTo, placement, pAnyWin: repPAny, books: bookResults, bookMetas },
+    meta: { engine, seed, perBookBudget, windowMin, usedDateTo, placement, pAnyWin: repPAny, books: bookResults, bookMetas },
   })
 
   return Response.json({
@@ -130,6 +169,7 @@ export async function POST(request: Request): Promise<Response> {
 
 export async function GET(): Promise<Response> {
   const sessions = await listSessions()
-  const sb = await scoreboards(sessions.map(s => ({ id: s.id, slipCount: s.slipCount })))
-  return Response.json({ sessions: sessions.map(s => ({ ...s, summary: sb[s.id] })) })
+  const [sb, totals] = await Promise.all([scoreboards(sessions.map(s => ({ id: s.id, slipCount: s.slipCount }))), ledgerSummary()])
+  // totals cover EVERY real slip (not just the listed sessions) — the same numbers the Results page shows
+  return Response.json({ sessions: sessions.map(s => ({ ...s, summary: sb[s.id] })), totals })
 }

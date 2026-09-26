@@ -22,13 +22,17 @@ export interface PlacementRecord {
   combinedOdds: number
   potentialPayout: number | null
   legCount: number
-  legs: PedlasLeg[]
+  legs: (PedlasLeg & { suspended?: boolean })[]
   trueProb: number | null
-  status: 'placed' | 'failed' | 'simulated' | 'skipped'
+  /** won/lost = placed AND settled (same statuses the session settler writes). */
+  status: 'placed' | 'won' | 'lost' | 'failed' | 'simulated' | 'skipped' | 'pending' | 'placing'
   confirmedBy: string | null
   bookingCode: string | null
   betId: string | null
   siteOdds: number | null
+  siteStake: number | null      // what the SITE took (007) — null for older rows
+  sitePayout: number | null     // the SITE's Potential Win at Confirm (007)
+  sessionId: string | null
   balanceBefore: number | null
   balanceAfter: number | null
   failureReason: string | null
@@ -103,6 +107,9 @@ function mapRow(r: any): PlacementRecord {
     legCount: r.leg_count, legs: r.legs ?? [], trueProb: r.true_prob,
     status: r.status, confirmedBy: r.confirmed_by, bookingCode: r.booking_code, betId: r.bet_id,
     siteOdds: r.site_odds,
+    siteStake: r.site_stake == null ? null : Number(r.site_stake),
+    sitePayout: r.site_payout == null ? null : Number(r.site_payout),
+    sessionId: r.session_id ?? null,
     balanceBefore: r.balance_before == null ? null : Number(r.balance_before),
     balanceAfter: r.balance_after == null ? null : Number(r.balance_after),
     failureReason: r.failure_reason,
@@ -110,19 +117,6 @@ function mapRow(r: any): PlacementRecord {
     returned: r.returned == null ? null : Number(r.returned),
     legResults: r.leg_results, notes: r.notes,
     placedAt: r.placed_at, createdAt: r.created_at,
-  }
-}
-
-export async function listPlacements(opts: { limit?: number; includeDryRun?: boolean } = {}): Promise<PlacementRecord[]> {
-  try {
-    const supabase = createServerClient()
-    let q = supabase.from('pedla_placements').select('*').order('created_at', { ascending: false }).limit(opts.limit ?? 50)
-    if (!opts.includeDryRun) q = q.eq('dry_run', false)
-    const { data, error } = await (q as any) as { data: any[] | null; error: unknown }
-    if (error || !data) return []
-    return data.map(mapRow)
-  } catch {
-    return []
   }
 }
 
@@ -148,6 +142,15 @@ export async function listPlacementsPage(opts: { limit?: number; offset?: number
   }
 }
 
+/** One placement row by id (any age — never a scan of the newest N). */
+export async function getPlacement(id: string): Promise<PlacementRecord | null> {
+  try {
+    const supabase = createServerClient()
+    const { data, error } = await (supabase.from('pedla_placements').select('*').eq('id', id).limit(1)) as { data: any[] | null; error: unknown }
+    return error || !data?.[0] ? null : mapRow(data[0])
+  } catch { return null }
+}
+
 /** Placed-but-unsettled real slips — the ones the results loop should chase. */
 export async function listOpenPlacements(): Promise<PlacementRecord[]> {
   try {
@@ -158,6 +161,7 @@ export async function listOpenPlacements(): Promise<PlacementRecord[]> {
       .eq('status', 'placed')
       .eq('dry_run', false)
       .eq('settled', false)
+      .limit(5000)
       .order('created_at', { ascending: false })) as { data: any[] | null; error: unknown }
     if (error || !data) return []
     return data.map(mapRow)
@@ -180,6 +184,7 @@ export async function settlePlacement(input: SettleInput): Promise<boolean> {
   try {
     const supabase = createServerClient()
     const patch = {
+      status: input.won ? 'won' : 'lost',
       settled: true,
       settled_at: new Date().toISOString(),
       settled_by: input.settledBy,
@@ -211,19 +216,30 @@ export interface LedgerSummary {
 }
 
 export async function ledgerSummary(): Promise<LedgerSummary> {
-  const rows = await listPlacements({ limit: 500, includeDryRun: false })
-  const placed = rows.filter(r => r.status === 'placed')
-  const settled = placed.filter(r => r.settled)
-  const staked = placed.reduce((s, r) => s + r.stake, 0)
+  const rows: Pick<PlacementRecord, 'status' | 'stake' | 'siteStake' | 'settled' | 'won' | 'returned'>[] = []
+  try {
+    const supabase = createServerClient()
+    for (let from = 0; from < 50_000; from += 1000) {
+      // narrow columns only (never the legs JSON) — the ledger reads every real slip, so this must stay light
+      const { data, error } = await ((supabase.from('pedla_placements').select('id,status,stake,site_stake,settled,won,returned')
+        .eq('dry_run', false).in('status', ['placed', 'won', 'lost'])
+        .order('id', { ascending: true }).range(from, from + 999)) as any) as { data: any[] | null; error: unknown }
+      if (error || !data) break
+      rows.push(...data.map(r => ({ status: r.status, stake: Number(r.stake), siteStake: r.site_stake == null ? null : Number(r.site_stake), settled: Boolean(r.settled), won: r.won, returned: r.returned == null ? null : Number(r.returned) })))
+      if (data.length < 1000) break
+    }
+  } catch { /* soft-fail → zeros */ }
+  const stakeOf = (r: { siteStake: number | null; stake: number }) => r.siteStake ?? r.stake
+  const settled = rows.filter(r => r.settled)
   const returned = settled.reduce((s, r) => s + (r.returned ?? 0), 0)
   return {
-    placed: placed.length,
+    placed: rows.length,
     settled: settled.length,
     won: settled.filter(r => r.won).length,
     lost: settled.filter(r => r.won === false).length,
-    staked,
+    staked: rows.reduce((s, r) => s + stakeOf(r), 0),
     returned,
-    net: returned - settled.reduce((s, r) => s + r.stake, 0),
-    openStake: placed.filter(r => !r.settled).reduce((s, r) => s + r.stake, 0),
+    net: returned - settled.reduce((s, r) => s + stakeOf(r), 0),
+    openStake: rows.filter(r => !r.settled).reduce((s, r) => s + stakeOf(r), 0),
   }
 }

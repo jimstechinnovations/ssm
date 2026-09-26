@@ -13,7 +13,8 @@
 import 'server-only'
 
 import { createServerClient } from '../supabase/server'
-import { listBooks } from './registry'
+import { listBooks, getBook } from './registry'
+import { boostFromTable } from '../pedlas/boost'
 import type { BookPlacementConfig } from '../placement/config'
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -37,7 +38,7 @@ export interface BookConfig {
 }
 
 /** Defaults for a book with no saved row (mirrors the old DEFAULT_BOOK_CONFIG numbers). */
-function defaults(bookId: string): Pick<BookConfig, 'enabled' | 'delayMinSec' | 'delayMaxSec' | 'kickoffCutoffMin' | 'dailyBudgetCap' | 'boost'> {
+function defaults(): Pick<BookConfig, 'enabled' | 'delayMinSec' | 'delayMaxSec' | 'kickoffCutoffMin' | 'dailyBudgetCap' | 'boost'> {
   return { enabled: false, delayMinSec: 45, delayMaxSec: 180, kickoffCutoffMin: 20, dailyBudgetCap: 5000, boost: null }
 }
 
@@ -88,7 +89,7 @@ export async function listBookConfigs(): Promise<BookConfig[]> {
     const b = base.get(id)
     const r = rows.get(id)
     if (r) out.push(rowToConfig(r, b))
-    else out.push({ bookId: id, ...defaults(id), ...(b as any), minStake: b?.minStake ?? 10, maxPayout: b?.maxPayout ?? 50_000_000, label: b?.label ?? id, currency: b?.currency ?? 'NGN', registered: b?.registered ?? false, feedVerified: b?.feedVerified ?? false, credentialsConfigured: b?.credentialsConfigured ?? false } as BookConfig)
+    else out.push({ bookId: id, ...defaults(), ...(b as any), minStake: b?.minStake ?? 10, maxPayout: b?.maxPayout ?? 50_000_000, label: b?.label ?? id, currency: b?.currency ?? 'NGN', registered: b?.registered ?? false, feedVerified: b?.feedVerified ?? false, credentialsConfigured: b?.credentialsConfigured ?? false } as BookConfig)
   }
   return out.sort((a, b) => (a.registered === b.registered ? a.label.localeCompare(b.label) : a.registered ? -1 : 1))
 }
@@ -99,7 +100,7 @@ export async function getBookConfig(bookId: string): Promise<BookConfig> {
   const found = all.find(c => c.bookId === bookId)
   if (found) return found
   // Unknown id, no row, not registered → bare defaults so callers never crash.
-  return { bookId, label: bookId, currency: 'NGN', minStake: 10, maxPayout: 50_000_000, ...defaults(bookId), registered: false, feedVerified: false, credentialsConfigured: false }
+  return { bookId, label: bookId, currency: 'NGN', minStake: 10, maxPayout: 50_000_000, ...defaults(), registered: false, feedVerified: false, credentialsConfigured: false }
 }
 
 /** Fields a client may create/update on a book config. */
@@ -168,4 +169,19 @@ export function toPlacementConfig(c: BookConfig): BookPlacementConfig {
     delayMaxSec:          c.delayMaxSec,
     kickoffCutoffMinutes: c.kickoffCutoffMin,
   }
+}
+
+/**
+ * The bonus table to price a book's slips with — ONE place, so every route agrees:
+ *   SportyBet → its LIVE plan (the site changes plans; a stored table goes stale — it did on 2026-09-09),
+ *   other books → the verified stored table, else the adapter default.
+ */
+export async function bookBoost(bookId: string): Promise<import('../pedlas/boost').BoostFn> {
+  const adapter = getBook(bookId)
+  if (bookId === 'sportybet') {
+    try { const { fetchSportyBonusPlan, sportyBoostFn } = await import('./sportybet-bonus'); return sportyBoostFn(await fetchSportyBonusPlan()) }
+    catch { return adapter.boostFor }
+  }
+  const cfg = await getBookConfig(bookId)
+  return cfg.boost ? boostFromTable(cfg.boost) : adapter.boostFor
 }

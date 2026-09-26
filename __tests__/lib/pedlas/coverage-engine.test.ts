@@ -178,15 +178,11 @@ describe('coverage engine: planner', () => {
     const rng = (() => { let s = 20260716; return () => { s = (s * 1103515245 + 12345) & 0x7fffffff; return s / 0x7fffffff } })()
     const pool = makePool(40, Array.from({ length: 40 }, () => 0.16 + 0.20 * rng())) // 0.16..0.36
     const plan = planCoverage(pool, { budget: 5000, stake: 10, maxPayout: 50_000_000, boost: noBoost, trials: 1500 })
-    // eslint-disable-next-line no-console
     console.log(`\n  ₦5000 · ₦10 stake · K=${plan.K} slips · N=${plan.poolSize} · β=${plan.beta.toFixed(2)} · mean cutters=${plan.meanCutters.toFixed(1)}`)
-    // eslint-disable-next-line no-console
     console.log('  L   medianOdds  medianPayout   P(≥1 win)   E[return]     net EV')
     for (const c of plan.candidates) {
-      // eslint-disable-next-line no-console
       console.log(`  ${String(c.L).padStart(2)}   ${c.medianOdds.toFixed(1).padStart(9)}   ₦${Math.round(c.medianPayout).toLocaleString().padStart(11)}   ${(100 * c.pAnyWin).toFixed(1).padStart(6)}%   ₦${Math.round(c.evReturn).toLocaleString().padStart(8)}   ₦${Math.round(c.net).toLocaleString().padStart(8)}`)
     }
-    // eslint-disable-next-line no-console
     console.log(`  → best P(≥1 win): L=${plan.best.L}, payout ₦${Math.round(plan.best.medianPayout).toLocaleString()}, P=${(100 * plan.best.pAnyWin).toFixed(1)}%\n`)
     expect(plan.candidates[0].pAnyWin).toBeGreaterThan(plan.candidates[plan.candidates.length - 1].pAnyWin)
   })

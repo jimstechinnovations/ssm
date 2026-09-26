@@ -1,106 +1,16 @@
 // lib/pedlas/build-book.ts
-// One place that turns a bookmaker adapter + build options into a PEDLA book (fetch odds → select
-// Under-4.5 axes → advisory enrich → quality-pick legs → buildPedlasBook). Shared by the /api/pedlas
-// builder and the /api/sessions builder so both use the exact same pipeline. No persistence here.
+// Turns a bookmaker adapter + session options into a coverage book: fetch odds → select axes →
+// history signals (gate) → multi-market coverage (default) or the legacy Under-4.5 scatter/realizer.
+// Used by /api/sessions. No persistence here. (The older PEDLAS-book builder lives in archive/.)
 
 import 'server-only'
 import type { BookAdapter } from '../books/types'
-import type { Fixture, PedlasBook, PedlasParams } from './types'
-import { DEFAULT_PARAMS } from './types'
-import { selectAxes, PEDLA_LINES, PEDLAS_LINES, MIN_DOMINANT_ODDS } from './market-select'
-import { enrichAxes, enrichSignals, advisoryCoverage } from './enrich'
-import { selectByQuality } from './quality'
-import { buildPedlasBook } from './build'
+import type { Fixture } from './types'
+import { selectAxes, PEDLA_LINES, PEDLAS_LINES } from './market-select'
+import { enrichSignals, advisoryCoverage } from './enrich'
 import { buildCoverageBook, type CoverageBook } from './coverage'
 import { buildMultiAxes, buildMultiBook, toPedlasSlips } from './multi-market'
 import type { PedlasSlip } from './types'
-
-export interface BuildBookOptions {
-  dateFrom: string
-  dateTo: string
-  budget: number
-  targetLegs: number
-  minStake: number
-  maxPayout?: number
-  objective?: 'moonshot' | 'coverage'
-  rank?: 'nim' | 'deterministic' | 'auto'
-  scanLimit?: number
-  minKickoffGapMinutes?: number
-  params?: Partial<Pick<PedlasParams, 'minAnchorDistance' | 'maxPerLeague'>>
-}
-
-export interface BuildBookResult {
-  book?: PedlasBook
-  meta?: Record<string, unknown>
-  error?: string
-  detail?: string
-}
-
-/** Build one PEDLA book for one adapter. Returns { book, meta } or { error, detail } — never throws. */
-export async function buildBookForAdapter(adapter: BookAdapter, opts: BuildBookOptions): Promise<BuildBookResult> {
-  const minStake = Math.max(opts.minStake, adapter.minStake)
-  const targetLegs = Math.max(3, opts.targetLegs)
-  const scanLimit = opts.scanLimit ?? Math.max(30, targetLegs * 2 + 10)
-  const minKickoffGapMinutes = opts.minKickoffGapMinutes ?? 60
-  const maxPerLeague = opts.params?.maxPerLeague ?? DEFAULT_PARAMS.maxPerLeague
-
-  if (opts.budget < minStake) {
-    return { error: `Budget share ₦${opts.budget} is below ${adapter.label}'s minimum stake ₦${minStake}` }
-  }
-
-  let fixtures: Fixture[]
-  const sourceMeta: Record<string, unknown> = {}
-  try {
-    const feed = await adapter.fetchFixtures({ dateFrom: opts.dateFrom, dateTo: opts.dateTo, scanLimit, minKickoffGapMinutes })
-    fixtures = feed.fixtures
-    sourceMeta.oddsSource = feed.source
-    sourceMeta.feedUrl = feed.feedUrl
-    sourceMeta.minKickoffGapMinutes = minKickoffGapMinutes
-  } catch (err) {
-    return { error: `Failed to fetch ${adapter.label} odds`, detail: err instanceof Error ? err.message : String(err) }
-  }
-
-  const axesAll = selectAxes(fixtures, { lines: PEDLA_LINES, requireDominantSide: 'Under' })
-  if (axesAll.length < 3) {
-    return {
-      error: 'Not enough qualifying Under 4.5 markets',
-      detail: `Found ${axesAll.length} fixture(s) with Under 4.5 dominant at odds ≥ ${MIN_DOMINANT_ODDS} ` +
-        `(need ≥ 3) among ${fixtures.length} scanned.`,
-    }
-  }
-
-  const shortlist = [...axesAll]
-    .sort((a, b) => Math.max(b.underProb, b.overProb) - Math.max(a.underProb, a.overProb))
-    .slice(0, targetLegs * 2 + 6)
-  const enrichedShort = await enrichAxes(shortlist)
-  const axes = selectByQuality(enrichedShort, targetLegs, maxPerLeague)
-
-  try {
-    const book = await buildPedlasBook({
-      axes,
-      budget: opts.budget,
-      objective: opts.objective ?? 'moonshot',
-      minStake,
-      maxPayout: Math.min(opts.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
-      params: opts.params,
-      rank: opts.rank ?? 'auto',
-      boostFor: adapter.boostFor,
-      bookId: adapter.id,
-    })
-    const meta = {
-      scanned: fixtures.length,
-      fixturesFound: fixtures.length,
-      qualifyingAxes: axesAll.length,
-      usedAxes: axes.length,
-      advisory: advisoryCoverage(axes),
-      boostVerified: adapter.boostVerified,
-      ...sourceMeta,
-    }
-    return { book, meta }
-  } catch (err) {
-    return { error: 'PEDLA build failed', detail: err instanceof Error ? err.message : String(err) }
-  }
-}
 
 export interface CoverageAdapterOptions {
   dateFrom: string
@@ -216,13 +126,27 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
   const medOdds = [...enriched.map(a => a.underOdds)].sort((x, y) => x - y)[Math.floor(enriched.length / 2)]
   const needed = legsNeeded(medOdds)
 
-  // GATE: when requireHistory, use ONLY the form-backed games if enough exist. If not enough yet
-  // (teams not synced into the corpus), fall back to all + say so (never silently blind).
+  // Window honesty: say so whenever the build reached past what was asked for (the dead-end auto-adjust
+  // can go beyond max_window_days when the window has < 4 games) — the session then settles later.
+  const windowDays = daysBetween(opts.dateFrom, usedDateTo)
+  const windowNote = usedDateTo > opts.dateTo
+    ? `Window extended to ${usedDateTo} (${windowDays}d from ${opts.dateFrom})${windowDays > (opts.maxWindowDays ?? 30) ? ` — PAST the ${opts.maxWindowDays}-day cap because the window had too few games` : ''}; the session settles later.`
+    : ''
+  sourceMeta.windowDays = windowDays
+  if (windowNote) sourceMeta.windowWarning = windowNote
+
+  // GATE: when requireHistory, use ONLY the form-backed games. Not enough → REFUSE with the numbers
+  // (h2h-informed-is-default: never silently fall back to history-blind slips).
   let pool = enriched
-  let gateNote = ''
+  const gateNote = ''
   if (opts.requireHistory) {
     if (withHistory.length >= needed) pool = withHistory
-    else gateNote = `Only ${withHistory.length}/${enriched.length} games are history-informed (need ~${needed}). Placed on ALL games — sync more teams' form to gate properly.`
+    else return {
+      error: 'Not enough history-informed games',
+      detail: `Only ${withHistory.length}/${enriched.length} games have form for both teams; ~${needed} are needed to reach ₦${target.toLocaleString()}. ` +
+        `Sync history for this window (Sofascore, needs the debug Chrome), lower the target, or widen the dates — then rebuild.`,
+      meta: { withHistory: withHistory.length, qualifying: enriched.length, needed, ...sourceMeta },
+    }
   } else if (withHistory.length >= needed) {
     // not required, but if we have enough with history, prefer them (cleaner selection)
     pool = withHistory
@@ -236,22 +160,26 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
   // trimmed to fit the target. Keep-rate is computed HONESTLY under book independence (still −vig). The
   // legacy Under-4.5/Over-4.5 realizer is reachable with market_policy:'under_4.5'.
   if (opts.marketPolicy !== 'under_4.5') {
-    const mAxes = opts.excludeLeagues?.length
-      ? buildMultiAxes(fixtures).filter(a => !new RegExp(opts.excludeLeagues!.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i').test(a.league))
-      : buildMultiAxes(fixtures)
+    // Build ONLY from the gated pool (history-informed when required) — the multi-market path used to
+    // re-read every fixture here, silently ignoring require_history.
+    const poolIds = new Set(pool.map(a => a.fixtureId))
+    const mAxes = buildMultiAxes(fixtures).filter(a => poolIds.has(a.fixtureId))
     if (mAxes.length >= 6) {
       const mm = buildMultiBook(mAxes, { budget: opts.budget, stake, target, maxPayout: capPay, boost: boostFn })
+      if (mm.slips.length === 0) {
+        return { error: 'No slip can reach the target', detail: `Even the full ${mm.N}-game combo on these ${mAxes.length} games pays < ₦${target.toLocaleString()}. Lower the target or widen the window.` }
+      }
       const slips = toPedlasSlips(mm, mAxes, stake, capPay, boostFn)
       const legCounts = slips.map(s => s.legCount)
       const meta = {
-        scanned: fixtures.length, qualifyingAxes: mAxes.length, withHistory: withHistory.length,
-        poolSize: mAxes.length, legs: mm.N, slips: mm.K, pAnyWin: mm.pAnyWin,
+        scanned: fixtures.length, qualifyingAxes: mAxes.length, withHistory: withHistory.length, historyGated: Boolean(opts.requireHistory),
+        poolSize: mAxes.length, legs: mm.N, slips: slips.length, pAnyWin: mm.pAnyWin, pAnyWinCorrelated: mm.pAnyWinCorrelated, rhoStress: mm.rhoStress,
         medianPayout: mm.medianPayout, keepRate: mm.keepRate, expectedNet: mm.expectedNet,
-        marketBasis: 'multi (U2.5/U4.5/O2.5)', variableLegs: { min: Math.min(...legCounts), max: Math.max(...legCounts) },
-        note: [mm.note, gateNote, `HONEST keep ${mm.keepRate.toFixed(3)} (<1 = −vig); coverage real, vig untouched.`].filter(Boolean).join(' '),
+        marketBasis: 'multi (U2.5/U4.5/O2.5/O4.5)', variableLegs: { min: Math.min(...legCounts), max: Math.max(...legCounts) },
+        note: [mm.note, gateNote, windowNote, `HONEST keep ${mm.keepRate.toFixed(3)} (<1 = −vig); coverage real, vig untouched.`].filter(Boolean).join(' '),
         ...sourceMeta,
       }
-      const bookShim = { L: mm.N, K: mm.K, poolSize: mAxes.length, pAnyWin: mm.pAnyWin, medianPayout: mm.medianPayout, medianOdds: 0, slips, note: mm.note } as unknown as CoverageBook
+      const bookShim = { L: mm.N, K: slips.length, poolSize: mAxes.length, pAnyWin: mm.pAnyWin, medianPayout: mm.medianPayout, medianOdds: 0, slips, note: mm.note } as unknown as CoverageBook
       return { book: bookShim, slips, meta, usedDateTo }
     }
   }
@@ -287,7 +215,7 @@ export async function buildCoverageForAdapter(adapter: BookAdapter, opts: Covera
       expectedFinalAlive: book.cutRisk.expectedFinalAlive,
       top: [...book.cutRisk.games].sort((a, b) => b.riskWeight - a.riskWeight).slice(0, 6),
     } : null,
-    note: [book.note, gateNote].filter(Boolean).join(' '),
+    note: [book.note, gateNote, windowNote].filter(Boolean).join(' '),
     advisory: advisoryCoverage(pool),
     ...sourceMeta,
   }

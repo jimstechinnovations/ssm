@@ -8,6 +8,7 @@
 
 import React, { useEffect, useState, useCallback } from 'react'
 import { Spinner, Dot } from '@/components/Icons'
+import { Page, PageHeader, Banner } from '@/components/ui'
 
 interface BoostRow { legs: number; fraction: number }
 interface BookConfig {
@@ -38,38 +39,22 @@ export default function ConfigPage() {
   const [loading, setLoading] = useState(true)
   const [error, setError] = useState<string | null>(null)
 
-  const load = useCallback(async () => {
-    setLoading(true)
-    try {
-      const r = await fetch('/api/config')
-      const j = await r.json()
-      setConfigs(j.configs ?? [])
-      setPlacementLive(Boolean(j.placementLive))
-      setError(null)
-    } catch { setError('Failed to load config.') }
-    finally { setLoading(false) }
-  }, [])
+  // state only set in promise callbacks (never synchronously inside the effect)
+  const load = useCallback(() => fetch('/api/config').then(r => r.json())
+    .then(j => { setConfigs(j.configs ?? []); setPlacementLive(Boolean(j.placementLive)); setError(null) })
+    .catch(() => setError('Failed to load config.'))
+    .finally(() => setLoading(false)), [])
 
   useEffect(() => { void load() }, [load])
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Bookmaker Config</h1>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">
-          Per-book staking rules, caps and pacing — stored server-side. Dry-run always works; LIVE
-          placement additionally requires the book <em>enabled</em> here <em>and</em> the
-          <code className="mx-1 rounded bg-zinc-100 px-1 dark:bg-zinc-800">PLACEMENT_LIVE=1</code> env gate.
-        </p>
-      </header>
+    <Page>
+      <PageHeader title="Settings" subtitle="Per-bookmaker stakes, caps and the real bonus table — stored on the server. Credentials stay in environment variables and are never shown." />
 
-      <div className={`mb-6 rounded-lg border px-4 py-3 text-sm ${placementLive
-        ? 'border-red-300 bg-red-50 text-red-900 dark:border-red-700/60 dark:bg-red-950/40 dark:text-red-200'
-        : 'border-zinc-200 bg-zinc-50 text-zinc-700 dark:border-zinc-700 dark:bg-zinc-800/50 dark:text-zinc-300'}`}>
-        <strong>Live gate:</strong> PLACEMENT_LIVE is {placementLive
-          ? 'SET — live placement is possible for enabled books with verified placers'
-          : 'not set — every run is dry-run regardless of settings'}. Placing bets with a bot can
-        breach bookmaker terms and lead to limits or voided bets — that risk is yours.
+      <div className="mb-6">
+        <Banner tone={placementLive ? 'warn' : 'muted'} title={placementLive ? 'Extra live lock is ON (PLACEMENT_LIVE=1)' : 'Extra live lock (PLACEMENT_LIVE) is not set'}>
+          Placing bets with a bot can breach bookmaker terms and lead to limits or voided bets — that risk is yours.
+        </Banner>
       </div>
 
       <BrowserPanel />
@@ -79,12 +64,20 @@ export default function ConfigPage() {
 
       <div className="space-y-4">
         {configs.map(c => (
-          <BookCard key={c.bookId} config={c} onSaved={load} onDeleted={load} />
+          <BookCard key={`${c.bookId}:${JSON.stringify(c)}`} config={c} onSaved={load} onDeleted={load} />
         ))}
       </div>
 
       <AddBookForm onAdded={load} existing={configs.map(c => c.bookId)} />
-    </div>
+    </Page>
+  )
+}
+
+function Tag({ ok, on, off }: { ok: boolean; on: string; off: string }) {
+  return (
+    <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${ok
+      ? 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300'
+      : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400'}`}>{ok ? on : off}</span>
   )
 }
 
@@ -92,7 +85,6 @@ function BookCard({ config, onSaved, onDeleted }: { config: BookConfig; onSaved:
   const [c, setC] = useState<BookConfig>(config)
   const [state, setState] = useState<'clean' | 'dirty' | 'saving' | 'saved' | 'error'>('clean')
   const [err, setErr] = useState<string | null>(null)
-  useEffect(() => { setC(config); setState('clean') }, [config])
 
   const set = (patch: Partial<BookConfig>) => { setC(prev => ({ ...prev, ...patch })); setState('dirty') }
 
@@ -122,14 +114,8 @@ function BookCard({ config, onSaved, onDeleted }: { config: BookConfig; onSaved:
     } catch { /* ignore */ }
   }
 
-  const Tag = ({ ok, on, off }: { ok: boolean; on: string; off: string }) => (
-    <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${ok
-      ? 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300'
-      : 'bg-zinc-100 text-zinc-500 dark:bg-zinc-800 dark:text-zinc-400'}`}>{ok ? on : off}</span>
-  )
-
   return (
-    <div className="rounded-lg border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
+    <div className="rounded-2xl border border-zinc-200 bg-white p-5 shadow-sm dark:border-zinc-800 dark:bg-zinc-900">
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <h2 className="text-base font-semibold text-zinc-900 dark:text-zinc-100">{c.label}</h2>
         <span className="text-xs text-zinc-400">{c.bookId}</span>
@@ -212,9 +198,8 @@ function BrowserPanel() {
   const [st, setSt] = useState<BrowserState | null>(null)
   const [busy, setBusy] = useState(false)
 
-  const refresh = React.useCallback(async () => {
-    try { setSt(await (await fetch('/api/browser')).json()) } catch { setSt({ up: false }) }
-  }, [])
+  const refresh = React.useCallback(() => fetch('/api/browser').then(r => r.json())
+    .then(j => setSt(j)).catch(() => setSt({ up: false })), [])
   useEffect(() => { void refresh() }, [refresh])
 
   async function launch() {
@@ -225,7 +210,7 @@ function BrowserPanel() {
 
   const naira = (n?: number | null) => n == null ? '—' : '₦' + Math.round(n).toLocaleString()
   return (
-    <div className="mb-6 flex flex-wrap items-center gap-3 rounded-lg border border-zinc-200 bg-white px-4 py-3 dark:border-zinc-700 dark:bg-zinc-900">
+    <div className="mb-6 flex flex-wrap items-center gap-3 rounded-2xl border border-zinc-200 bg-white px-5 py-4 dark:border-zinc-800 dark:bg-zinc-900">
       <span className="inline-flex items-center gap-2 text-sm font-semibold text-zinc-800 dark:text-zinc-200">
         <Dot tone={st?.up ? (st.mode === 'SIM' ? 'amber' : 'green') : 'zinc'} /> Placement browser
       </span>

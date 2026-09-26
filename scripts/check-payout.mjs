@@ -3,7 +3,7 @@ const N = Number(process.argv[2] || 40)
 // 1. fetch N qualifying Under 4.5 legs (next 3 days)
 const cands=[]
 for (let pg=1; pg<=8 && cands.length<N+5; pg++) {
-  const r=await fetch('https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=18&pageSize=100&pageNum='+pg,{headers:{'User-Agent':'Mozilla/5.0'}})
+  const r=await fetch('https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=18&pageSize=100&pageNum='+pg,{headers:{'User-Agent':'Mozilla/5.0 (Windows NT 10.0; Win64; x64)',Accept:'application/json'}})
   const j=await r.json(); if(!j.data||!j.data.tournaments)break
   // 3h+ out so nothing suspends/goes live mid-capture; skip inactive (suspended/unavailable) outcomes
   const minKick=Date.now()+3*3600*1000, maxKick=Date.now()+3*24*3600*1000

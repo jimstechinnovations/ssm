@@ -1,93 +1,130 @@
 'use client'
 
 /**
- * app/page.tsx — Dashboard. First screen: overview of recent sessions + the entry to build a new one.
- * Everything is server-backed (sessions API); this is the view/control surface.
+ * app/page.tsx — Sessions (home). Every build+place run in one list, newest first, with where each
+ * one stands and the money it has actually moved. Net counts SETTLED slips only — an open stake is not
+ * a loss yet, so a session that is still playing never shows a fake deficit.
  */
 
 import React, { useEffect, useState, useCallback } from 'react'
-import { Spinner, Dot, Plus } from '@/components/Icons'
+import { Plus } from '@/components/Icons'
+import { Page, PageHeader, Stat, Card, Empty, LinkButton, StatusBadge, Progress, Badge, naira, pct, ago } from '@/components/ui'
 
-interface Summary { slips: number; pending: number; placed: number; failed: number; won: number; lost: number; staked: number; returned: number; net: number }
+interface Summary { slips: number; pending: number; placed: number; failed: number; skipped: number; won: number; lost: number; open: number; staked: number; settledStaked: number; returned: number; net: number }
 interface Session {
   code: string; status: string; budget: number; targetWin: number; legCount: number | null; slipCount: number | null
-  poolSize: number | null; createdAt: string; bookIds: string[]; meta?: { pAnyWin?: number } | null; summary: Summary
+  poolSize: number | null; createdAt: string; updatedAt: string; bookIds: string[]; dateFrom: string; dateTo: string
+  heartbeatAgeMs: number; ageMs: number; expired: boolean
+  meta?: { pAnyWin?: number; stopRequested?: boolean; bookMetas?: Record<string, { keepRate?: number; variableLegs?: { min: number; max: number } }> } | null
+  summary: Summary
 }
 
-const naira = (n: number) => '₦' + Math.round(n).toLocaleString()
-const ago = (iso: string) => { const s = (Date.now() - Date.parse(iso)) / 1000; if (s < 3600) return `${Math.round(s / 60)}m ago`; if (s < 86400) return `${Math.round(s / 3600)}h ago`; return `${Math.round(s / 86400)}d ago` }
-
-const STATUS_CLS: Record<string, string> = {
-  building: 'bg-blue-100 text-blue-700 dark:bg-blue-950/60 dark:text-blue-300',
-  placing: 'bg-amber-100 text-amber-700 dark:bg-amber-950/60 dark:text-amber-300',
-  done: 'bg-green-100 text-green-700 dark:bg-green-950/60 dark:text-green-300',
-  failed: 'bg-red-100 text-red-700 dark:bg-red-950/60 dark:text-red-300',
-  stopped: 'bg-zinc-200 text-zinc-600 dark:bg-zinc-800 dark:text-zinc-300',
+/** Where a session stands, derived from its slips (not a stale status flag). */
+function stage(s: Session): string {
+  const sm = s.summary
+  if (s.status === 'failed') return 'failed'
+  const fresh = s.heartbeatAgeMs < 25_000
+  if (s.status === 'placing' && sm.pending > 0 && fresh && !s.meta?.stopRequested) return 'running'
+  if (sm.placed === 0) return s.expired ? 'expired' : 'ready'
+  if (sm.pending > 0) return 'stopped'
+  if (sm.open > 0) return 'placed'
+  return sm.won > 0 ? 'won' : 'done'
 }
 
-export default function Dashboard() {
+export default function Sessions() {
   const [sessions, setSessions] = useState<Session[]>([])
+  const [totals, setTotals] = useState<{ placed: number; staked: number; returned: number; net: number; openStake: number } | null>(null)
+  const [showStale, setShowStale] = useState(false)
   const [loading, setLoading] = useState(true)
+  const [err, setErr] = useState(false)
 
-  const load = useCallback(async () => {
-    try { const j = await (await fetch('/api/sessions')).json(); setSessions(j.sessions ?? []) } catch { /* ignore */ }
-    finally { setLoading(false) }
-  }, [])
-  useEffect(() => { void load() }, [load])
+  // state is only ever set inside promise callbacks (never synchronously in an effect)
+  const load = useCallback(() => fetch('/api/sessions').then(r => r.json())
+    .then(j => { setSessions(j.sessions ?? []); setTotals(j.totals ?? null); setErr(false) })
+    .catch(() => setErr(true))
+    .finally(() => setLoading(false)), [])
+  useEffect(() => { void load(); const t = setInterval(load, 15_000); return () => clearInterval(t) }, [load])
 
-  const tot = sessions.reduce((a, s) => ({ staked: a.staked + s.summary.staked, returned: a.returned + s.summary.returned, placed: a.placed + s.summary.placed }), { staked: 0, returned: 0, placed: 0 })
+  // Totals come from the server ledger (EVERY real slip) — identical to the Results page.
+  const tot = { placed: totals?.placed ?? 0, staked: totals?.staked ?? 0, returned: totals?.returned ?? 0, net: totals?.net ?? 0, open: totals?.openStake ?? 0 }
+  // Sessions built but never placed, older than a day: their games have kicked off, so they can't be
+  // placed any more — fold them away so the live and placed sessions are what you see.
+  const isStale = (s: Session) => s.summary.placed === 0 && s.ageMs > 864e5
+  const visible = sessions.filter(s => !isStale(s))
+  const stale = sessions.filter(isStale)
 
   return (
-    <div className="mx-auto max-w-4xl px-4 py-8 sm:px-6">
-      <header className="mb-6">
-        <h1 className="text-2xl font-bold text-zinc-900 dark:text-zinc-100">Dashboard</h1>
-        <p className="mt-1 text-sm text-zinc-600 dark:text-zinc-400">Total-goals coverage — scatter a budget across many slips so at least one may land. Honest EV, no edge claims.</p>
-      </header>
+    <Page>
+      <PageHeader title="Sessions"
+        subtitle="Each session spreads a budget across many slips so that at least one may land the target. Every slip is priced by the bookmaker — the numbers here are honest, not a promise."
+        actions={<LinkButton href="/bet-manager" variant="primary"><Plus className="h-4 w-4" /> New session</LinkButton>} />
 
-      <div className="mb-6 grid grid-cols-3 gap-3">
-        <Kpi label="Sessions" value={String(sessions.length)} />
-        <Kpi label="Real slips placed" value={tot.placed.toLocaleString()} />
-        <Kpi label="Net (settled)" value={naira(tot.returned - tot.staked)} tone={tot.returned - tot.staked >= 0 ? 'pos' : 'neg'} />
+      <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
+        <Stat label="Slips placed (real)" value={tot.placed.toLocaleString()} />
+        <Stat label="Total staked" value={naira(tot.staked)} hint={tot.open > 0 ? `${naira(tot.open)} still in play` : 'all settled'} />
+        <Stat label="Returned" value={naira(tot.returned)} />
+        <Stat label="Net (settled only)" value={naira(tot.net)} tone={tot.net > 0 ? 'pos' : tot.net < 0 ? 'neg' : undefined} />
       </div>
 
-      <h2 className="mb-2 text-sm font-semibold text-zinc-700 dark:text-zinc-300">Recent sessions</h2>
-      {loading && <div className="flex items-center gap-2 py-6 text-sm text-zinc-500"><Spinner /> Loading sessions…</div>}
-      {!loading && sessions.length === 0 && (
-        <div className="rounded-xl border border-dashed border-zinc-300 p-8 text-center dark:border-zinc-700">
-          <p className="text-sm text-zinc-500 dark:text-zinc-400">No sessions yet.</p>
-          <a href="/bet-manager" className="mt-3 inline-block rounded-lg bg-zinc-900 px-4 py-2 text-sm font-semibold text-white hover:bg-zinc-700 dark:bg-zinc-100 dark:text-zinc-900">Build your first session →</a>
-        </div>
+      {loading && <div className="space-y-3">{[0, 1, 2].map(i => <div key={i} className="h-24 animate-pulse rounded-2xl bg-zinc-100 dark:bg-zinc-900" />)}</div>}
+      {!loading && err && <Empty title="Can't reach the database">The app couldn&apos;t load sessions. If the Supabase project is paused, restore it from the Supabase dashboard, then refresh.</Empty>}
+      {!loading && !err && sessions.length === 0 && (
+        <Empty title="No sessions yet" action={<LinkButton href="/bet-manager" variant="primary">Build your first session</LinkButton>}>
+          Pick a budget and a target — the builder works out the slips, you review the honest odds, then place.
+        </Empty>
       )}
+
       <div className="space-y-3">
-        {sessions.map(s => {
-          const pAny = s.meta?.pAnyWin
+        {[...visible, ...(showStale ? stale : [])].map(s => {
+          const sm = s.summary
+          const total = Math.max(1, s.slipCount ?? sm.slips)
+          const st = stage(s)
+          const keep = s.meta?.bookMetas ? Object.values(s.meta.bookMetas).find(m => m.keepRate != null)?.keepRate : undefined
           return (
-            <a key={s.code} href={`/sessions/${s.code}`} className="block rounded-xl border border-zinc-200 bg-white p-4 transition hover:border-zinc-400 dark:border-zinc-700 dark:bg-zinc-900 dark:hover:border-zinc-500">
+            <a key={s.code} href={`/sessions/${s.code}`}
+              className="block rounded-2xl border border-zinc-200 bg-white p-4 transition hover:border-zinc-400 hover:shadow-sm sm:p-5 dark:border-zinc-800 dark:bg-zinc-900 dark:hover:border-zinc-600">
               <div className="flex flex-wrap items-center gap-2">
-                <span className="font-mono text-sm font-bold text-zinc-900 dark:text-zinc-100">{s.code}</span>
-                <span className={`rounded px-1.5 py-0.5 text-[11px] font-medium ${STATUS_CLS[s.status] ?? STATUS_CLS.stopped}`}>{s.status}</span>
+                <span className="font-mono text-sm font-semibold text-zinc-900 dark:text-zinc-100">{s.code}</span>
+                <StatusBadge status={st} />
                 <span className="text-xs text-zinc-400">{s.bookIds.join(', ')} · {ago(s.createdAt)}</span>
-                <span className="ml-auto text-xs text-zinc-500 dark:text-zinc-400">{naira(s.budget)} → {naira(s.targetWin)}</span>
+                <span className="ml-auto text-sm font-medium tabular-nums text-zinc-700 dark:text-zinc-300">{naira(s.budget)} <span className="text-zinc-400">→</span> {naira(s.targetWin)}</span>
               </div>
-              <div className="mt-2 flex flex-wrap gap-x-4 gap-y-1 text-xs text-zinc-600 dark:text-zinc-400">
-                <span>{s.slipCount ?? s.summary.slips} slips · {s.legCount ?? '—'} legs · pool {s.poolSize ?? '—'}</span>
-                {pAny != null && <span>P(≥1 win) <strong className="text-zinc-800 dark:text-zinc-200">{(100 * pAny).toFixed(1)}%</strong></span>}
-                <span>placed {s.summary.placed} · pending {s.summary.pending} · failed {s.summary.failed}</span>
-                {s.summary.placed > 0 && <span>staked {naira(s.summary.staked)}{s.summary.returned > 0 ? ` · returned ${naira(s.summary.returned)}` : ''}</span>}
+              <div className="mt-3"><Progress total={total} parts={[
+                { value: sm.won, className: 'bg-emerald-500', label: 'won' },
+                { value: sm.placed - sm.won, className: 'bg-sky-500', label: 'placed' },
+                { value: sm.failed, className: 'bg-red-400', label: 'failed' },
+                { value: sm.skipped, className: 'bg-zinc-300 dark:bg-zinc-600', label: 'skipped' },
+              ]} /></div>
+              <div className="mt-2.5 flex flex-wrap items-center gap-x-4 gap-y-1 text-xs text-zinc-500 dark:text-zinc-400">
+                <span><strong className="text-zinc-800 dark:text-zinc-200">{sm.placed}</strong>/{total} placed</span>
+                {sm.pending > 0 && <span>{sm.pending} pending</span>}
+                {sm.failed > 0 && <span className="text-red-600 dark:text-red-400">{sm.failed} failed</span>}
+                {s.meta?.pAnyWin != null && <span>win chance <strong className="text-zinc-800 dark:text-zinc-200">{pct(s.meta.pAnyWin)}</strong></span>}
+                {keep != null && <span>returns ~₦{Math.round(keep * 100)} per ₦100 staked (avg)</span>}
+                {sm.placed > 0 && <span>staked {naira(sm.staked)}</span>}
+                {(sm.won + sm.lost) > 0 && <span>net <strong className={sm.net >= 0 ? 'text-emerald-600 dark:text-emerald-400' : 'text-red-600 dark:text-red-400'}>{naira(sm.net)}</strong></span>}
+                {sm.won > 0 && <Badge tone="green">{sm.won} winning slip{sm.won === 1 ? '' : 's'}</Badge>}
               </div>
             </a>
           )
         })}
       </div>
-    </div>
-  )
-}
 
-function Kpi({ label, value, tone }: { label: string; value: string; tone?: 'pos' | 'neg' }) {
-  return (
-    <div className="rounded-xl border border-zinc-200 bg-white p-4 dark:border-zinc-700 dark:bg-zinc-900">
-      <div className="text-xs text-zinc-500 dark:text-zinc-400">{label}</div>
-      <div className={`text-xl font-bold ${tone === 'pos' ? 'text-green-600 dark:text-green-400' : tone === 'neg' ? 'text-red-600 dark:text-red-400' : 'text-zinc-900 dark:text-zinc-100'}`}>{value}</div>
-    </div>
+      {stale.length > 0 && (
+        <button onClick={() => setShowStale(v => !v)} className="mt-4 w-full rounded-xl border border-dashed border-zinc-300 px-4 py-3 text-sm text-zinc-500 hover:border-zinc-400 hover:text-zinc-800 dark:border-zinc-700 dark:hover:text-zinc-200">
+          {showStale ? 'Hide' : 'Show'} {stale.length} older session{stale.length === 1 ? '' : 's'} that were built but never placed
+        </button>
+      )}
+
+      {sessions.length > 0 && (
+        <Card className="mt-8" title="How to read this">
+          <ul className="list-disc space-y-1 pl-5 text-sm text-zinc-600 dark:text-zinc-400">
+            <li><strong>Win chance</strong> is the modelled chance that at least one slip in the session lands — for these exact slips.</li>
+            <li><strong>Returns per ₦100</strong> is the bookmaker&apos;s price: on average every ₦100 staked comes back as less than ₦100. No mix of slips changes that.</li>
+            <li><strong>Net</strong> only counts settled slips. Money on games still being played isn&apos;t counted as lost until they finish.</li>
+          </ul>
+        </Card>
+      )}
+    </Page>
   )
 }

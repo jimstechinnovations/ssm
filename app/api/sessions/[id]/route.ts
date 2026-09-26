@@ -9,10 +9,10 @@
  * original struck-through). Original fields are never overwritten, so nothing is lost.
  */
 
-import { getSession, listSessionSlips, countSessionSlips, scoreboards } from '@/lib/sessions/store'
-import { getBookConfig } from '@/lib/books/config-store'
+import { getSession, listSessionSlips, countSessionSlips, scoreboards, listWorkers } from '@/lib/sessions/store'
+import { getBookConfig, bookBoost } from '@/lib/books/config-store'
 import { getBook } from '@/lib/books/registry'
-import { boostFromTable, boostedPayout } from '@/lib/pedlas/boost'
+import { boostedPayout } from '@/lib/pedlas/boost'
 
 export const runtime = 'nodejs'
 
@@ -23,7 +23,7 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   const session = await getSession(id)
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
   const url = new URL(request.url)
-  const limit = Math.min(1000, Math.max(1, Number(url.searchParams.get('limit')) || 50))
+  const limit = Math.min(20_000, Math.max(1, Number(url.searchParams.get('limit')) || 50))   // store pages past the 1,000-row API cap
   const offset = Math.max(0, Number(url.searchParams.get('offset')) || 0)
   // withLegs=1 returns each slip's full legs (needed by the placer to build booking codes). The UI omits
   // legs for speed — but we still pull them here to compute the reconciled shorter-combo values, then
@@ -36,15 +36,16 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   const sortDir = (url.searchParams.get('dir') === 'desc' ? 'desc' : 'asc') as 'asc' | 'desc'
   const filtered = status !== 'all' || Boolean(search.trim())
   const listOpts = { limit, offset, withLegs: true, status, search, sortBy, sortDir }
-  const [rawSlips, sb, filteredTotal] = await Promise.all([
+  const [rawSlips, sb, filteredTotal, workers] = await Promise.all([
     listSessionSlips(session.id, listOpts),
     scoreboards([{ id: session.id, slipCount: session.slipCount }]),
     filtered ? countSessionSlips(session.id, { status, search }) : Promise.resolve(null),
+    listWorkers(session.id),
   ])
 
   // Book boost/cap once, so we can price each reconciled (shorter) combo exactly as the book would.
   const cfg = await getBookConfig(session.bookIds[0]); const adapter = getBook(session.bookIds[0])
-  const boost = cfg.boost ? boostFromTable(cfg.boost) : adapter.boostFor
+  const boost = await bookBoost(session.bookIds[0])
   const cap = Math.min(cfg.maxPayout ?? adapter.maxPayout, adapter.maxPayout)
 
   const slips = rawSlips.map(s => {
@@ -56,11 +57,17 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
       const odds = live.reduce((p, l) => p * (l.odds || 1), 1)
       reconciled = { legCount: live.length, combinedOdds: odds, payout: Math.min(boostedPayout(s.stake, odds, live.length, boost), cap) }
     }
+    // ONE truth per slip for the UI: what the SITE accepted (receipt captured at Confirm) beats our
+    // shorter-combo reconciliation, which beats the built numbers.
+    const actual = s.sitePayout != null || s.siteOdds != null
+      ? { source: 'site' as const, stake: s.siteStake ?? s.stake, odds: s.siteOdds ?? reconciled?.combinedOdds ?? s.combinedOdds, payout: s.sitePayout ?? reconciled?.payout ?? s.potentialPayout ?? 0, legCount: reconciled?.legCount ?? s.legCount }
+      : reconciled ? { source: 'reconciled' as const, stake: s.stake, odds: reconciled.combinedOdds, payout: reconciled.payout, legCount: reconciled.legCount }
+        : { source: 'built' as const, stake: s.stake, odds: s.combinedOdds, payout: s.potentialPayout ?? 0, legCount: s.legCount }
     // strip the heavy legs array from the UI response (the placer path keeps it)
     const { legs: _legs, ...rest } = s
-    return withLegs ? { ...rest, legs, reconciled } : { ...rest, reconciled }
+    return withLegs ? { ...rest, legs, reconciled, actual } : { ...rest, reconciled, actual }
   })
 
   const total = filteredTotal ?? session.slipCount ?? sb[session.id]?.slips ?? slips.length
-  return Response.json({ session, slips, summary: sb[session.id], page: { offset, limit, total } })
+  return Response.json({ session, slips, summary: sb[session.id], page: { offset, limit, total }, workers })
 }

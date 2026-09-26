@@ -8,10 +8,10 @@
  *      contradicted; won when all legs finished+correct; else pending). Re-runnable as games finish.
  */
 
-import { getSession, updateSession, listPlacedSlipsWithLegs, settleSessionSlip, sessionSummary } from '@/lib/sessions/store'
+import { getSession, updateSession, listPlacedSlipsWithLegs, settleSessionSlip, sessionSummary, effectivePayout } from '@/lib/sessions/store'
 import { fetchResults } from '@/lib/pedlas/results'
 import { settleSlip, cutLegs, type SlipLeg } from '@/lib/pedlas/settle-slips'
-import { getBookConfig } from '@/lib/books/config-store'
+import { getBookConfig, bookBoost } from '@/lib/books/config-store'
 import { getBook } from '@/lib/books/registry'
 import { boostFromTable, reconciledPayout } from '@/lib/pedlas/boost'
 
@@ -39,7 +39,11 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
   const gameResults = fixtureIds.map(fid => {
     const r = results.get(fid)
     const line = lineByFixture.get(fid) ?? 4.5
-    return { fixtureId: fid, finished: !!r?.finished, total: r?.finished ? (r?.total ?? null) : null, over: r?.finished ? (r!.total > line) : null }
+    return {
+      fixtureId: fid, finished: !!r?.finished, total: r?.finished ? (r?.total ?? null) : null,
+      home: r?.finished ? (r?.home ?? null) : null, away: r?.finished ? (r?.away ?? null) : null,
+      over: r?.finished ? (r!.total > line) : null,   // legacy totals view only
+    }
   })
   // touch:false — persisting outcomes must NOT bump the placer heartbeat (would make an idle session
   // look like it's actively placing again).
@@ -52,7 +56,7 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
   let boost = null as ReturnType<typeof boostFromTable> | null, cap = Infinity
   if (anyDropped) {
     const cfg = await getBookConfig(session.bookIds[0]); const adapter = getBook(session.bookIds[0])
-    boost = cfg.boost ? boostFromTable(cfg.boost) : adapter.boostFor
+    boost = await bookBoost(session.bookIds[0])
     cap = Math.min(cfg.maxPayout ?? adapter.maxPayout, adapter.maxPayout)
   }
   const unsettled = allPlaced.filter(s => s.status === 'placed')
@@ -62,8 +66,12 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
     const verdict = settleSlip(legs, results)
     if (verdict === 'pending') { pending++; continue }
     const dropped = legs.some(l => l.suspended)
+    // Credit what the BOOK will pay: the site's own Potential Win captured at Confirm (exact — it already
+    // reflects accepted odds changes, dropped legs and the real bonus). Older slips without a receipt fall
+    // back to the reconciled shorter-combo payout, else the built payout.
     const returned = verdict !== 'won' ? 0
-      : (dropped && boost) ? reconciledPayout(legs, Number(s.stake), boost, cap) : (s.potentialPayout ?? 0)
+      : s.sitePayout != null ? s.sitePayout
+      : (dropped && boost) ? reconciledPayout(legs, Number(s.stake), boost, cap) : effectivePayout(s)
     const note = verdict === 'lost' ? `cut by ${cutLegs(legs, results).slice(0, 2).map(l => l.fixtureId).join(', ')}` : (dropped ? 'live legs landed (shorter combo)' : 'all legs landed')
     await settleSessionSlip(session.id, s.slipId, verdict === 'won', returned, note)
     if (verdict === 'won') won++; else lost++

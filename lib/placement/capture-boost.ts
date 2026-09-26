@@ -17,7 +17,9 @@ const STAKE = 10
 function readOne(n: number): Promise<BoostRow | null> {
   return new Promise((resolve) => {
     let out = ''
-    const p = spawn('node', ['scripts/check-payout.mjs', String(n)], { shell: process.platform === 'win32' })
+    // script path built at runtime so the bundler doesn't try to resolve it as a module import
+    const script = ['scripts', 'check-payout.mjs'].join('/')
+    const p = spawn('node', [script, String(n)], { shell: process.platform === 'win32' })
     p.stdout.on('data', (d) => { out += d.toString() })
     p.stderr.on('data', () => {})
     const done = () => {

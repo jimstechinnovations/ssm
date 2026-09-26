@@ -66,3 +66,7 @@ backtest-cutters.json
 session-*.json
 500-slips.json
 engine-screenshots/
+
+# placer run logs (one per run, per PC)
+logs/
+.placer-cdp-*.lock

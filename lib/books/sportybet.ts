@@ -7,27 +7,31 @@
 // outcomes [{desc: "Over X" | "Under X", odds}]. We keep only half-lines (X.5) that map onto
 // the engine's OVER_UNDER_<line> markets.
 //
-// Win Boost: SportyBet NG's Multi Bet Bonus (MBB), plan MBB_1699286159923, qualifyingOddsLimit 1.20
-// (each leg must be ≥1.20 — the reason MIN_DOMINANT_ODDS is 1.20). CAPTURED from live betslips on
-// 2026-07-19 (scripts read the real Bonus vs Total Odds for ≥1.20 Under-4.5 slips, leg counts 3–38).
-// The bonus is odds-dependent (a min–max range per leg count); this table is the realized % for our
-// actual all-Under ≥1.20 profile — the LOWEST-odds slip at each leg count, so it never overstates the
-// higher-odds flipped slips (boostFromTable floors to the entry ≤ N). Verified — no longer zero.
+// Win Boost: SportyBet NG Multi Bet Bonus. The EXACT bonus is computed at build time from SportyBet's LIVE
+// plan (lib/books/sportybet-bonus.ts — the site's own formula, verified to the kobo on real betslips
+// 2026-09-25). This table is only the FALLBACK when the plan can't be fetched: a snapshot of plan
+// MBB_1788955181864 (from 2026-09-09) for football — plan max × football factor 0.6, which is the rate the
+// site applies to every realistic accumulator. Legs under 1.20 don't count toward it (they don't cancel it).
+// (The July table this replaced came from an older plan and overstated long slips ~2×.)
 
 import 'server-only'
 import type { BookAdapter } from './types'
 import type { Fixture, OddsValue, MarketType } from '../pedlas/types'
 import { boostFromTable } from '../pedlas/boost'
+import { selectionsFromMarkets, SELECTION_MARKET_IDS, type SelectionGame } from '../pedlas/selections'
 
-// SportyBet MBB — realized bonus fraction by qualifying leg count (captured from live betslips).
+// fallback: effective bonus fraction by number of QUALIFYING legs (plan MBB_1788955181864, football)
 const SPORTYBET_MBB: { legs: number; fraction: number }[] = [
-  { legs: 3, fraction: 0.05 }, { legs: 4, fraction: 0.09 }, { legs: 5, fraction: 0.15 },
-  { legs: 6, fraction: 0.19 }, { legs: 7, fraction: 0.23 }, { legs: 8, fraction: 0.26 },
-  { legs: 9, fraction: 0.30 }, { legs: 10, fraction: 0.34 }, { legs: 11, fraction: 0.38 },
-  { legs: 12, fraction: 0.43 }, { legs: 14, fraction: 0.54 }, { legs: 16, fraction: 0.64 },
-  { legs: 18, fraction: 0.76 }, { legs: 20, fraction: 0.92 }, { legs: 23, fraction: 1.14 },
-  { legs: 26, fraction: 1.39 }, { legs: 29, fraction: 1.66 }, { legs: 32, fraction: 1.90 },
-  { legs: 35, fraction: 2.31 }, { legs: 38, fraction: 2.74 },
+  { legs: 2, fraction: 0.018 }, { legs: 3, fraction: 0.03 }, { legs: 4, fraction: 0.048 }, { legs: 5, fraction: 0.072 },
+  { legs: 6, fraction: 0.096 }, { legs: 7, fraction: 0.12 }, { legs: 8, fraction: 0.15 }, { legs: 9, fraction: 0.18 },
+  { legs: 10, fraction: 0.198 }, { legs: 11, fraction: 0.21 }, { legs: 12, fraction: 0.222 }, { legs: 13, fraction: 0.24 },
+  { legs: 14, fraction: 0.252 }, { legs: 15, fraction: 0.27 }, { legs: 16, fraction: 0.3 }, { legs: 17, fraction: 0.33 },
+  { legs: 18, fraction: 0.36 }, { legs: 19, fraction: 0.39 }, { legs: 20, fraction: 0.42 }, { legs: 21, fraction: 0.45 },
+  { legs: 22, fraction: 0.48 }, { legs: 23, fraction: 0.51 }, { legs: 24, fraction: 0.54 }, { legs: 25, fraction: 0.57 },
+  { legs: 26, fraction: 0.6 }, { legs: 27, fraction: 0.66 }, { legs: 28, fraction: 0.72 }, { legs: 29, fraction: 0.78 },
+  { legs: 30, fraction: 0.96 }, { legs: 31, fraction: 1.08 }, { legs: 32, fraction: 1.14 }, { legs: 33, fraction: 1.2 },
+  { legs: 34, fraction: 1.26 }, { legs: 35, fraction: 1.32 }, { legs: 36, fraction: 1.38 }, { legs: 37, fraction: 1.44 },
+  { legs: 38, fraction: 1.5 }, { legs: 39, fraction: 1.56 }, { legs: 40, fraction: 1.62 },
 ]
 const sportyBoost = boostFromTable(SPORTYBET_MBB)
 
@@ -38,38 +42,11 @@ const MAX_PAGES = 10
 /** A leg shape sufficient to build a SportyBet selection (fixtureId + line + side). */
 export interface BookingLeg { fixtureId: number; line: number; side: 'Under' | 'Over' }
 
-/**
- * Create a SportyBet booking code for a set of total-goals legs (public /orders/share API, no auth).
- * The code reproduces the exact slip in any SportyBet session — this is how a human places a
- * bot-built PEDLA slip with one tap (Playwright can't place real bets; see the placement notes).
- */
-export async function sportybetBookingCode(legs: BookingLeg[]): Promise<{ code: string; url: string }> {
-  const selections = legs.map(l => ({
-    eventId: `sr:match:${l.fixtureId}`,
-    marketId: '18',
-    specifier: `total=${l.line}`,
-    outcomeId: l.side === 'Under' ? '13' : '12',
-  }))
-  const res = await fetch('https://www.sportybet.com/api/ng/orders/share', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'User-Agent': 'Mozilla/5.0', platform: 'web' },
-    body: JSON.stringify({ selections, shareType: 1 }),
-  })
-  const json = (await res.json()) as { bizCode?: number; data?: { shareCode?: string; shareURL?: string } }
-  if (json.bizCode !== 10000 || !json.data?.shareCode) {
-    throw new Error(`SportyBet booking code failed (bizCode ${json.bizCode})`)
-  }
-  return {
-    code: json.data.shareCode,
-    url: json.data.shareURL ?? `https://www.sportybet.com/ng/?shareCode=${json.data.shareCode}`,
-  }
-}
-
 /** Engine total-goals lines we accept from the feed. */
 const ACCEPTED_LINES = new Set([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5])
 
 // ── Feed shapes (only the fields we read) ────────────────────────────────────────
-interface SbOutcome { desc?: string; odds?: string; isActive?: number }
+interface SbOutcome { id?: string; desc?: string; odds?: string; probability?: string; isActive?: number }
 interface SbMarket { id?: string; specifier?: string; status?: number; outcomes?: SbOutcome[] }
 interface SbEvent {
   eventId?: string           // "sr:match:53452533"
@@ -148,6 +125,38 @@ export const sportybet: BookAdapter = {
   boostVerified: true,
   feedVerified: true,
   credentialEnv: { username: 'SPORTY_NUMBER', password: 'SPORTY_PASSWORD' },
+
+  /** Decision Bot feed: every upcoming game with all two-sided selections (1X2↔DC, totals, team totals,
+   *  BTTS, odd/even, clean sheets), each carrying the market/specifier/outcome ids booking codes need. */
+  async fetchSelectionGames(opts) {
+    const fromMs = Date.parse(`${opts.dateFrom}T00:00:00Z`)
+    const toMs = Date.parse(`${opts.dateTo}T23:59:59Z`)
+    const minKick = Date.now() + opts.minKickoffGapMinutes * 60_000
+    const games: SelectionGame[] = []
+    const seen = new Set<number>()
+    for (let page = 1; page <= MAX_PAGES && games.length < opts.scanLimit; page++) {
+      const url = `${BASE}?sportId=${encodeURIComponent('sr:sport:1')}&marketId=${encodeURIComponent(SELECTION_MARKET_IDS.join(','))}&pageSize=${PAGE_SIZE}&pageNum=${page}`
+      // the feed rejects requests without a full browser user-agent (HTTP 403)
+      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' }, cache: 'no-store' })
+      if (!res.ok) throw new Error(`SportyBet feed HTTP ${res.status} (page ${page})`)
+      const json = (await res.json()) as SbResponse
+      if (json.bizCode !== 10000) throw new Error(`SportyBet feed bizCode ${json.bizCode ?? 'unknown'}`)
+      const tournaments = json.data?.tournaments ?? []
+      for (const t of tournaments) for (const ev of t.events ?? []) {
+        const id = srIdDigits(ev.eventId)
+        if (id == null || seen.has(id) || !ev.homeTeamName || !ev.awayTeamName || !ev.estimateStartTime) continue
+        const kick = ev.estimateStartTime
+        if (kick < fromMs || kick > toMs || kick < minKick) continue
+        const selections = selectionsFromMarkets(ev.markets ?? [])
+        if (selections.length < 6) continue
+        const cat = ev.sport?.category?.name, tn = t.name ?? ev.sport?.category?.tournament?.name ?? 'Unknown'
+        seen.add(id)
+        games.push({ fixtureId: id, home: ev.homeTeamName, away: ev.awayTeamName, game: `${ev.homeTeamName} vs ${ev.awayTeamName}`, league: cat ? `${cat} — ${tn}` : tn, tournamentId: t.id ?? ev.sport?.category?.tournament?.id, kickoff: new Date(kick).toISOString(), selections })
+      }
+      if (tournaments.length === 0 || page * PAGE_SIZE >= (json.data?.totalNum ?? 0)) break
+    }
+    return { games, source: 'sportybet-public-api (all two-sided markets)' }
+  },
 
   async fetchFixtures(opts) {
     const fromMs = Date.parse(`${opts.dateFrom}T00:00:00Z`)

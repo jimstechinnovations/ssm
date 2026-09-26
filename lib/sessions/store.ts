@@ -30,6 +30,11 @@ export interface SessionRow {
   meta: Record<string, unknown> | null
   createdAt: string
   updatedAt: string
+  /** Server-computed timings, so the UI never reads the clock during render (and clock skew can't
+   *  mis-flag a run): ms since the last placer heartbeat / since creation, and whether the game window ended. */
+  heartbeatAgeMs: number
+  ageMs: number
+  expired: boolean
 }
 
 export interface CreateSessionInput {
@@ -58,6 +63,8 @@ function mapSession(r: any): SessionRow {
     budget: Number(r.budget), targetWin: Number(r.target_win), minStake: Number(r.min_stake),
     legCount: r.leg_count, slipCount: r.slip_count, poolSize: r.pool_size, coverageDepth: r.coverage_depth,
     status: r.status, meta: r.meta ?? null, createdAt: r.created_at, updatedAt: r.updated_at,
+    heartbeatAgeMs: Date.now() - Date.parse(r.updated_at), ageMs: Date.now() - Date.parse(r.created_at),
+    expired: Date.parse(`${r.date_to}T23:59:59Z`) < Date.now(),
   }
 }
 
@@ -126,10 +133,6 @@ export async function requestStop(idOrCode: string): Promise<boolean> {
 export async function clearStop(sessionId: string, meta?: Record<string, unknown> | null): Promise<void> {
   await updateSession(sessionId, { meta: { ...(meta ?? {}), stopRequested: false, runStartedAt: new Date().toISOString() } })
 }
-/** Is a stop currently requested for this session? (read by the slip-status report). */
-export async function isStopRequested(sessionId: string): Promise<boolean> {
-  const s = await getSession(sessionId); return Boolean((s?.meta as any)?.stopRequested)
-}
 
 export async function getSession(idOrCode: string): Promise<SessionRow | null> {
   try {
@@ -174,6 +177,7 @@ export async function saveSessionSlips(sessionId: string, bookId: string, slips:
       leg_count:       slip.legCount,
       legs:            slip.legs,
       true_prob:       slip.trueProb,
+      decision:        (slip as PedlasSlip & { decision?: unknown }).decision ?? null,
       status:          'pending',
       attempts:        0,
     }))
@@ -183,39 +187,77 @@ export async function saveSessionSlips(sessionId: string, bookId: string, slips:
   } catch { return 0 }
 }
 
-/** Update one session slip's placement status (called by the placer as each slip resolves). */
+/** Update one session slip's placement status (called by the placer as each slip resolves).
+ *
+ *  With `worker` (queue mode) the update only applies if that worker still HOLDS the slip (claimed_by +
+ *  status placing/submitting) — a worker that lost its lease can never overwrite another PC's result.
+ *  status 'retry' = a transient failure: the slip goes back to the shared queue (any PC may retry it)
+ *  until its attempts are used up, then it becomes 'failed'. Returns false if nothing was updated. */
 export async function updateSessionSlipStatus(sessionId: string, slipId: number, patch: {
-  status: 'pending' | 'placing' | 'placed' | 'failed' | 'skipped'
+  status: 'pending' | 'placing' | 'placed' | 'failed' | 'skipped' | 'retry' | 'verify'
+  worker?: string
   bookingCode?: string | null
   betId?: string | null
   failureReason?: string | null
   live?: boolean
   droppedFixtures?: number[]
   placedLegs?: number
-}): Promise<boolean> {
+  /** The SITE's own numbers read off the betslip right before Confirm (what was really staked). */
+  siteOdds?: number | null
+  siteStake?: number | null
+  sitePayout?: number | null
+  placedFixtures?: number[] | null
+}, maxAttempts = 3): Promise<boolean> {
   try {
     const supabase = createServerClient()
-    const row: Record<string, unknown> = { status: patch.status, updated_at: new Date().toISOString() }
+    const { data: cur } = await (supabase.from('pedla_placements')
+      .select('legs,attempts').eq('session_id', sessionId).eq('slip_id', slipId).single()) as { data: { legs: unknown; attempts: number } | null }
+    if (!cur) return false
+    const now = new Date().toISOString()
+    const status = patch.status === 'retry' ? ((cur.attempts ?? 0) >= maxAttempts ? 'failed' : 'pending') : patch.status
+    const row: Record<string, unknown> = { status, updated_at: now }
+    if (patch.siteOdds != null) row.site_odds = patch.siteOdds
+    if (patch.siteStake != null) row.site_stake = patch.siteStake
+    if (patch.sitePayout != null) row.site_payout = patch.sitePayout
+    if (patch.placedFixtures?.length) row.placed_fixtures = patch.placedFixtures
     if (patch.bookingCode !== undefined) row.booking_code = patch.bookingCode
     if (patch.betId !== undefined) row.bet_id = patch.betId
-    if (patch.failureReason !== undefined) row.failure_reason = patch.failureReason
-    if (patch.status === 'placed') { row.dry_run = !patch.live ? true : false; row.confirmed_by = 'balance+history'; row.placed_at = new Date().toISOString(); row.failure_reason = null } // clear any prior failure on successful retry
+    if (patch.failureReason !== undefined) { row.failure_reason = patch.failureReason; row.last_error = patch.failureReason }
+    if (status === 'pending') { row.claimed_by = null; row.claim_expires_at = null }        // back to the shared queue
+    if (status === 'failed' || status === 'skipped' || status === 'verify') row.claim_expires_at = null
+    if (status === 'placed') { row.dry_run = !patch.live; row.confirmed_by = 'site'; row.placed_at = now; row.failure_reason = null; row.claim_expires_at = null } // clear any prior failure on successful retry
     // Match the DB to what was ACTUALLY placed: if the placer dropped legs (games suspended at placement),
     // mark those legs suspended in the stored slip and record the real leg count, so settle/survival/payout
-    // all reflect the shorter combo that was truly staked — not the built 32-leg record.
-    if (patch.status === 'placed' && patch.droppedFixtures?.length) {
-      const { data: cur } = await (supabase.from('pedla_placements')
-        .select('legs').eq('session_id', sessionId).eq('slip_id', slipId).single()) as { data: { legs: unknown } | null }
-      const legs = (cur?.legs as Array<{ fixtureId: number; suspended?: boolean }> | undefined) ?? []
+    // all reflect the shorter combo that was truly staked — not the built record.
+    if (status === 'placed' && patch.droppedFixtures?.length) {
+      const legs = (cur.legs as Array<{ fixtureId: number; suspended?: boolean }> | undefined) ?? []
       if (legs.length) {
         const drop = new Set(patch.droppedFixtures)
         row.legs = legs.map(l => drop.has(l.fixtureId) ? { ...l, suspended: true } : l)
       }
       if (patch.placedLegs != null) row.leg_count = patch.placedLegs
     }
-    const { error } = await ((supabase.from('pedla_placements') as any)
-      .update(row).eq('session_id', sessionId).eq('slip_id', slipId)) as { error: unknown }
-    return !error
+    let q = (supabase.from('pedla_placements') as any).update(row).eq('session_id', sessionId).eq('slip_id', slipId)
+    if (patch.worker) q = q.eq('claimed_by', patch.worker).in('status', ['placing', 'submitting'])
+    const { data, error } = await q.select('id') as { data: unknown[] | null; error: unknown }
+    return !error && (data?.length ?? 0) > 0
+  } catch { return false }
+}
+
+/** Resolve a slip stuck in 'verify' (its worker vanished mid-submit): placed = it IS on the bet history
+ *  (record it), not placed = it is NOT there (return it to the queue). */
+export async function resolveVerify(sessionId: string, slipId: number, placed: boolean, info: { bookingCode?: string | null; betId?: string | null; note?: string } = {}): Promise<boolean> {
+  try {
+    const supabase = createServerClient()
+    const now = new Date().toISOString()
+    const row: Record<string, unknown> = placed
+      ? { status: 'placed', dry_run: false, confirmed_by: 'bet-history', placed_at: now, claim_expires_at: null, failure_reason: null, last_error: info.note ?? null, updated_at: now }
+      : { status: 'pending', claimed_by: null, claim_expires_at: null, submit_started_at: null, last_error: info.note ?? 'not on bet history — returned to the queue', updated_at: now }
+    if (info.bookingCode !== undefined) row.booking_code = info.bookingCode
+    if (info.betId !== undefined) row.bet_id = info.betId
+    const { data, error } = await ((supabase.from('pedla_placements') as any).update(row)
+      .eq('session_id', sessionId).eq('slip_id', slipId).eq('status', 'verify').select('id')) as { data: unknown[] | null; error: unknown }
+    return !error && (data?.length ?? 0) > 0
   } catch { return false }
 }
 
@@ -236,6 +278,42 @@ export interface SessionSlip {
   won: boolean | null
   returned: number | null
   failureReason: string | null
+  /** What the SITE accepted at Confirm (null when not captured — older runs, or 007 not applied). */
+  siteOdds: number | null
+  siteStake: number | null
+  sitePayout: number | null
+  /** Decision Bot: the slip-level decision (rule, reason, win chance, keep); null for other engines. */
+  decision: Record<string, unknown> | null
+  lastError: string | null
+}
+
+/** What this slip really pays if it wins: the site's own Potential Win when captured, else the built
+ *  payout. Settlement and every UI total use this, so the app matches the bookmaker. */
+export function effectivePayout(s: Pick<SessionSlip, 'sitePayout' | 'potentialPayout'>): number {
+  return s.sitePayout ?? s.potentialPayout ?? 0
+}
+
+const BASE_COLS = 'id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason,site_odds'
+const RECEIPT_COLS = ',site_stake,site_payout,decision,last_error'   // 007/008 — dropped automatically if a migration isn't applied
+
+function mapSlip(r: any): SessionSlip {
+  const num = (v: unknown) => v == null ? null : Number(v)
+  return {
+    id: r.id, slipId: r.slip_id, bookId: r.book_id, status: r.status, stake: Number(r.stake),
+    combinedOdds: r.combined_odds, potentialPayout: num(r.potential_payout),
+    legCount: r.leg_count, legs: r.legs ?? [], bookingCode: r.booking_code, betId: r.bet_id,
+    attempts: r.attempts ?? 0, settled: Boolean(r.settled), won: r.won,
+    returned: num(r.returned), failureReason: r.failure_reason,
+    siteOdds: num(r.site_odds), siteStake: num(r.site_stake), sitePayout: num(r.site_payout),
+    decision: r.decision ?? null, lastError: r.last_error ?? null,
+  }
+}
+
+/** Run a slip select with the 007 receipt columns; if they don't exist yet, rerun without them. */
+async function selectSlips(build: (cols: string) => any, extra = ''): Promise<any[] | null> {
+  let { data, error } = await build(BASE_COLS + RECEIPT_COLS + extra) as { data: any[] | null; error: { message?: string } | null }
+  if (error && /column|schema cache/i.test(error.message ?? '')) ({ data, error } = await build(BASE_COLS + extra))
+  return error ? null : (data ?? [])
 }
 
 /** Which DB column each UI sort key maps to (whitelist — never interpolate user input into a query). */
@@ -272,24 +350,23 @@ function applySlipFilters(q: any, opts: ListSlipsOpts) {
 export async function listSessionSlips(sessionId: string, opts: ListSlipsOpts = {}): Promise<SessionSlip[]> {
   try {
     const supabase = createServerClient()
-    const cols = 'id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason'
-      + (opts.withLegs ? ',legs' : '')
-    let q = supabase.from('pedla_placements').select(cols).eq('session_id', sessionId)
-    q = applySlipFilters(q, opts)
     const sortCol = (opts.sortBy && SORT_COLS[opts.sortBy]) || 'slip_id'
     const asc = opts.sortDir ? opts.sortDir === 'asc' : true
-    q = q.order(sortCol, { ascending: asc }).order('slip_id', { ascending: true })   // stable tiebreak
-    if (opts.offset != null && opts.limit) q = q.range(opts.offset, opts.offset + opts.limit - 1)
-    else if (opts.limit) q = q.limit(opts.limit)
-    const { data, error } = await (q as any) as { data: any[] | null; error: unknown }
-    if (error || !data) return []
-    return data.map((r: any) => ({
-      id: r.id, slipId: r.slip_id, bookId: r.book_id, status: r.status, stake: Number(r.stake),
-      combinedOdds: r.combined_odds, potentialPayout: r.potential_payout == null ? null : Number(r.potential_payout),
-      legCount: r.leg_count, legs: r.legs ?? [], bookingCode: r.booking_code, betId: r.bet_id,
-      attempts: r.attempts ?? 0, settled: Boolean(r.settled), won: r.won,
-      returned: r.returned == null ? null : Number(r.returned), failureReason: r.failure_reason,
-    }))
+    // The API returns at most 1,000 rows per request, so read in 1,000-row pages until `limit` (or the
+    // whole session when no limit) — a 2,000-slip session must never be silently cut to 1,000.
+    const start = opts.offset ?? 0
+    const want = opts.limit ?? Infinity
+    const out: SessionSlip[] = []
+    for (let from = start; out.length < want; from += 1000) {
+      const n = Math.min(1000, want - out.length)
+      const data = await selectSlips(cols => applySlipFilters(supabase.from('pedla_placements').select(cols).eq('session_id', sessionId), opts)
+        .order(sortCol, { ascending: asc }).order('slip_id', { ascending: true })   // stable tiebreak
+        .range(from, from + n - 1), opts.withLegs ? ',legs' : '')
+      if (!data) break
+      out.push(...data.map(mapSlip))
+      if (data.length < n) break
+    }
+    return out
   } catch { return [] }
 }
 
@@ -308,17 +385,9 @@ export async function countSessionSlips(sessionId: string, opts: ListSlipsOpts =
 export async function getSessionSlip(sessionId: string, slipId: number): Promise<SessionSlip | null> {
   try {
     const supabase = createServerClient()
-    const { data, error } = await (supabase.from('pedla_placements')
-      .select('id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason,legs')
-      .eq('session_id', sessionId).eq('slip_id', slipId).limit(1).single()) as { data: any; error: unknown }
-    if (error || !data) return null
-    return {
-      id: data.id, slipId: data.slip_id, bookId: data.book_id, status: data.status, stake: Number(data.stake),
-      combinedOdds: data.combined_odds, potentialPayout: data.potential_payout == null ? null : Number(data.potential_payout),
-      legCount: data.leg_count, legs: data.legs ?? [], bookingCode: data.booking_code, betId: data.bet_id,
-      attempts: data.attempts ?? 0, settled: Boolean(data.settled), won: data.won,
-      returned: data.returned == null ? null : Number(data.returned), failureReason: data.failure_reason,
-    }
+    const data = await selectSlips(cols => supabase.from('pedla_placements').select(cols)
+      .eq('session_id', sessionId).eq('slip_id', slipId).limit(1), ',legs')
+    return data?.[0] ? mapSlip(data[0]) : null
   } catch { return null }
 }
 
@@ -326,36 +395,10 @@ export async function getSessionSlip(sessionId: string, slipId: number): Promise
 export async function listPlacedSlipsWithLegs(sessionId: string): Promise<SessionSlip[]> {
   try {
     const supabase = createServerClient()
-    const { data, error } = await (supabase.from('pedla_placements')
-      .select('id,slip_id,book_id,status,stake,combined_odds,potential_payout,leg_count,booking_code,bet_id,attempts,settled,won,returned,failure_reason,legs')
-      .eq('session_id', sessionId).in('status', ['placed', 'won', 'lost'])) as { data: any[] | null; error: unknown }
-    if (error || !data) return []
-    return data.map((r: any) => ({
-      id: r.id, slipId: r.slip_id, bookId: r.book_id, status: r.status, stake: Number(r.stake),
-      combinedOdds: r.combined_odds, potentialPayout: r.potential_payout == null ? null : Number(r.potential_payout),
-      legCount: r.leg_count, legs: r.legs ?? [], bookingCode: r.booking_code, betId: r.bet_id,
-      attempts: r.attempts ?? 0, settled: Boolean(r.settled), won: r.won,
-      returned: r.returned == null ? null : Number(r.returned), failureReason: r.failure_reason,
-    }))
+    const data = await selectSlips(cols => supabase.from('pedla_placements').select(cols)
+      .eq('session_id', sessionId).in('status', ['placed', 'won', 'lost']), ',legs')
+    return (data ?? []).map(mapSlip)
   } catch { return [] }
-}
-
-/** Rewrite potential_payout for a batch of slips (e.g. after a max-win cap fix). Chunked. */
-export async function updateSlipPayouts(sessionId: string, updates: { slipId: number; payout: number }[]): Promise<number> {
-  if (!updates.length) return 0
-  try {
-    const supabase = createServerClient()
-    let n = 0
-    const CHUNK = 25
-    for (let i = 0; i < updates.length; i += CHUNK) {
-      const res = await Promise.all(updates.slice(i, i + CHUNK).map(u =>
-        ((supabase.from('pedla_placements') as any)
-          .update({ potential_payout: u.payout, updated_at: new Date().toISOString() })
-          .eq('session_id', sessionId).eq('slip_id', u.slipId)) as Promise<{ error: unknown }>))
-      n += res.filter(r => !r.error).length
-    }
-    return n
-  } catch { return 0 }
 }
 
 /** Record a slip's settlement (won/lost) — status, settled flag, returned amount. */
@@ -375,11 +418,16 @@ export interface SessionSummary {
   pending: number
   placed: number
   failed: number
+  skipped: number   // not placed on purpose (suspended / odds too unstable)
+  verify: number    // a worker vanished mid-submit — must be checked against bet history (never auto-retried)
+  inFlight: number  // claimed by a worker right now (placing / submitting)
   won: number
   lost: number
-  staked: number
+  open: number      // placed but not yet settled
+  staked: number    // everything actually staked (site stake when captured)
+  settledStaked: number
   returned: number
-  net: number
+  net: number       // returned − settledStaked (settled slips only)
 }
 
 /**
@@ -406,7 +454,7 @@ export async function cloneSession(sourceIdOrCode: string): Promise<SessionRow |
     const ps = {
       slipId: s.slipId, legs: s.legs, stake: s.stake, combinedOdds: s.combinedOdds,
       legCount: s.legCount, payout: s.potentialPayout ?? 0, trueProb: 0, vector: [],
-      boostPct: 0, uncappedPayout: s.potentialPayout ?? 0, capped: false, evMultiple: 0, rankScore: 0,
+      boostPct: 0, uncappedPayout: s.potentialPayout ?? 0, capped: false, evMultiple: 0, rankScore: 0, decision: s.decision,
     } as unknown as PedlasSlip
     const arr = byBook.get(s.bookId) ?? []; arr.push(ps); byBook.set(s.bookId, arr)
   }
@@ -416,53 +464,73 @@ export async function cloneSession(sourceIdOrCode: string): Promise<SessionRow |
   return getSession(clone.id)
 }
 
-const emptySummary = (): SessionSummary => ({ slips: 0, pending: 0, placed: 0, failed: 0, won: 0, lost: 0, staked: 0, returned: 0, net: 0 })
+const emptySummary = (): SessionSummary => ({ slips: 0, pending: 0, placed: 0, failed: 0, skipped: 0, verify: 0, inFlight: 0, won: 0, lost: 0, open: 0, staked: 0, settledStaked: 0, returned: 0, net: 0 })
 
 /** Scoreboards for many sessions in ONE tiny query: only NON-pending rows (most slips are pending),
- *  deriving `pending` from each session's slip count. Fast even for many 500-slip sessions. */
+ *  deriving `pending` from each session's slip count. Fast even for many 500-slip sessions.
+ *  Money uses what the SITE took (site_stake) when captured, and `net` counts SETTLED slips only —
+ *  an unsettled stake is not a loss yet, so a live session never shows a fake deficit. */
 export async function scoreboards(sessions: { id: string; slipCount: number | null }[]): Promise<Record<string, SessionSummary>> {
   const out: Record<string, SessionSummary> = {}
   for (const s of sessions) out[s.id] = { ...emptySummary(), slips: s.slipCount ?? 0 }
   if (sessions.length === 0) return out
   try {
     const supabase = createServerClient()
-    const { data } = await (supabase.from('pedla_placements')
-      .select('session_id,status,stake,returned,won')
-      .in('session_id', sessions.map(s => s.id))
-      .neq('status', 'pending')) as { data: any[] | null }
-    for (const r of data ?? []) {
+    // PAGE through every row: the API caps a response at 1,000 rows, and a few 500-slip sessions exceed
+    // that — an unpaged read silently dropped rows and showed placed slips as pending (0 placed).
+    const page = (cols: string, from: number) => (supabase.from('pedla_placements').select(cols)
+      .in('session_id', sessions.map(s => s.id)).neq('status', 'pending')
+      .order('id', { ascending: true }).range(from, from + 999)) as any
+    let cols = 'session_id,status,stake,returned,won,settled,site_stake'
+    const data: any[] = []
+    for (let from = 0; from < 200_000; from += 1000) {
+      let res = await page(cols, from) as { data: any[] | null; error: { message?: string } | null }
+      if (res.error && from === 0 && /column|schema cache/i.test(res.error.message ?? '')) { cols = 'session_id,status,stake,returned,won,settled'; res = await page(cols, from) }
+      if (res.error || !res.data) throw new Error(res.error?.message ?? 'scoreboard read failed')
+      data.push(...res.data)
+      if (res.data.length < 1000) break
+    }
+    for (const r of data) {
       const s = out[r.session_id]; if (!s) continue
       const placed = r.status === 'placed' || r.status === 'won' || r.status === 'lost'
-      if (r.status === 'placing') s.pending++
-      if (placed) { s.placed++; s.staked += Number(r.stake) }
+      const stake = Number(r.site_stake ?? r.stake)
+      if (placed) {
+        s.placed++; s.staked += stake
+        if (r.settled) { s.settledStaked += stake; s.returned += Number(r.returned ?? 0) } else s.open++
+      }
       if (r.status === 'failed') s.failed++
+      if (r.status === 'skipped') s.skipped++
+      if (r.status === 'verify') s.verify++
+      if (r.status === 'placing' || r.status === 'submitting') s.inFlight++
       if (r.won === true) s.won++
       if (r.won === false) s.lost++
-      s.returned += Number(r.returned ?? 0)
     }
     for (const s of sessions) {
       const sum = out[s.id]
-      sum.pending = Math.max(0, (s.slipCount ?? 0) - sum.placed - sum.failed) // rest are pending
-      sum.net = sum.returned - sum.staked
+      sum.pending = Math.max(0, (s.slipCount ?? 0) - sum.placed - sum.failed - sum.skipped - sum.verify) // not yet placed (incl. in-flight)
+      sum.net = sum.returned - sum.settledStaked
     }
   } catch { /* soft-fail → zeros */ }
   return out
 }
 
 export async function sessionSummary(sessionId: string): Promise<SessionSummary> {
-  const slips = await listSessionSlips(sessionId)
-  const placed = slips.filter(s => s.status === 'placed' || s.status === 'won' || s.status === 'lost')
-  const staked = placed.reduce((a, s) => a + s.stake, 0)
-  const returned = slips.reduce((a, s) => a + (s.returned ?? 0), 0)
-  return {
-    slips: slips.length,
-    pending: slips.filter(s => s.status === 'pending' || s.status === 'placing').length,
-    placed: placed.length,
-    failed: slips.filter(s => s.status === 'failed').length,
-    won: slips.filter(s => s.won === true).length,
-    lost: slips.filter(s => s.won === false).length,
-    staked,
-    returned,
-    net: returned - staked,
-  }
+  const slipCount = await countSessionSlips(sessionId)
+  return (await scoreboards([{ id: sessionId, slipCount }]))[sessionId]
+}
+
+export interface PlacementWorker { workerId: string; host: string | null; account: string | null; live: boolean; state: string; currentSlip: number | null; placed: number; failed: number; startedAt: string; lastSeenAgoMs: number }
+
+/** PCs/tabs that worked this session in the last 10 minutes (the placer heartbeats every ~10s). */
+export async function listWorkers(sessionId: string): Promise<PlacementWorker[]> {
+  try {
+    const since = new Date(Date.now() - 10 * 60_000).toISOString()
+    const { data } = await ((createServerClient() as any).from('placement_workers').select('*')
+      .eq('session_id', sessionId).gte('last_seen', since).order('started_at')) as { data: any[] | null }
+    return (data ?? []).map(r => ({
+      workerId: r.worker_id, host: r.host, account: r.account, live: Boolean(r.live), state: r.state,
+      currentSlip: r.current_slip, placed: r.placed ?? 0, failed: r.failed ?? 0, startedAt: r.started_at,
+      lastSeenAgoMs: Date.now() - Date.parse(r.last_seen),
+    }))
+  } catch { return [] }
 }

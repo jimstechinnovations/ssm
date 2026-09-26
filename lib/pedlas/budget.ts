@@ -3,11 +3,8 @@
 // place the top-K separated slips at the minimum stake, and compute accurate
 // winnings-boosted payouts + the honest EV verdict. Pure, no I/O.
 
-import type {
-  BinaryAxis, PedlasLeg, PedlasSlip, PedlasVerdict, RankedVector,
-} from './types'
+import type { BinaryAxis, PedlasLeg, PedlasSlip } from './types'
 import { sideOdds, stateSide } from './types'
-import { boostPercent, boostedPayout, honestEvMultiple, boostFor, type BoostFn } from './boost'
 
 /** Nigerian bookmaker minimum stake per slip. */
 export const DEFAULT_MIN_STAKE = 100
@@ -43,59 +40,6 @@ export function buildLegs(vector: (0 | 1)[], axes: BinaryAxis[]): PedlasLeg[] {
       odds:      sideOdds(a, side),
     }
   })
-}
-
-/** Turn a ranked vector into a placed slip with accurate, cap-clamped stake/payout/EV. */
-export function assembleSlip(
-  rv: RankedVector,
-  axes: BinaryAxis[],
-  slipId: number,
-  stake: number,
-  maxPayout: number = DEFAULT_MAX_PAYOUT,
-  boost: BoostFn = boostFor,
-): PedlasSlip {
-  const legCount = axes.length
-  const uncappedPayout = boostedPayout(stake, rv.combinedOdds, legCount, boost)
-  const payout = Math.min(uncappedPayout, maxPayout)
-  return {
-    slipId,
-    vector:       rv.vector,
-    legs:         buildLegs(rv.vector, axes),
-    legCount,
-    combinedOdds: rv.combinedOdds,
-    trueProb:     rv.trueProb,
-    boostPct:     boostPercent(legCount, boost),
-    stake,
-    payout,
-    uncappedPayout,
-    capped:       uncappedPayout > payout,
-    // EV reflects the cap: capping forfeits upside, so this can only get worse, never +EV.
-    evMultiple:   (rv.trueProb * payout) / stake,
-    rankScore:    rv.rankScore,
-    reasoning:    rv.reasoning,
-    hiddenRisk:   rv.hiddenRisk,
-  }
-}
-
-/**
- * Honest book-level verdict. evMultiple is the geometric-mean representative EV per ₦1
- * with NO edge (always < 1 at any real margin); positiveEV is hard-wired false because
- * neither structure nor boost can create edge — only a calibrated p̂ can (not supplied here).
- */
-export function buildVerdict(axes: BinaryAxis[], slips: PedlasSlip[]): PedlasVerdict {
-  const L = axes.length
-  const avgMargin = L ? axes.reduce((s, a) => s + a.margin, 0) / L : 0
-  // Representative EV: median-ish via the mean true-prob slip — but EV is ~flat across
-  // slips, so use the average of placed-slip EV multiples.
-  const evMultiple = slips.length
-    ? slips.reduce((s, sl) => s + sl.evMultiple, 0) / slips.length
-    : (L ? honestEvMultiple(Math.pow(1 / (1 + avgMargin), L) /* anchor-ish */, Math.pow(1 + avgMargin, L), L) : 0)
-  return {
-    evMultiple,
-    positiveEV: false,
-    avgMargin,
-    honestLabel: HONEST_LABEL,
-  }
 }
 
 /** Disjoint-approximation probability that AT LEAST ONE placed slip hits. */

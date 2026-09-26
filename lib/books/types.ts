@@ -4,6 +4,7 @@
 
 import type { Fixture } from '../pedlas/types'
 import type { BoostFn } from '../pedlas/boost'
+import type { SelectionGame } from '../pedlas/selections'
 
 export interface FetchFixturesOptions {
   dateFrom: string              // YYYY-MM-DD
@@ -30,6 +31,9 @@ export interface BookAdapter {
   /** Env var names holding placement credentials (values are NEVER stored anywhere else). */
   credentialEnv: { username: string; password: string }
   fetchFixtures(opts: FetchFixturesOptions): Promise<FetchFixturesResult>
+  /** Every two-sided selection per game (Decision Bot). Optional — only books whose feed exposes the
+   *  markets + outcome ids needed for booking codes implement it. */
+  fetchSelectionGames?(opts: FetchFixturesOptions): Promise<{ games: SelectionGame[]; source: string }>
 }
 
 /** Safe metadata for client/UI use (no functions, no secrets). */

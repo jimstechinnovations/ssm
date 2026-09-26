@@ -16,37 +16,49 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
   const session = await getSession(id)
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
 
-  const [base] = await listSessionSlips(session.id, { withLegs: true, limit: 1 })
-  const legs = (base?.legs as Array<{ game: string; kickoff: string; odds: number }> | undefined) ?? []
-  const games = await Promise.all(legs.map(async l => {
-    const [home, away] = l.game.split(' vs ').map(s => s.trim())
-    const [hr, ar] = await Promise.all([getTeamRecent(home, l.kickoff, 8), getTeamRecent(away, l.kickoff, 8)])
+  // Games = union across slips (Decision Bot slips differ in length); the pick mix shows how the family
+  // bets each game (Decision Bot) or how many slips flipped it (legacy Under-4.5 books).
+  const slips = await listSessionSlips(session.id, { withLegs: true, limit: 300 })
+  const byGame = new Map<number, { game: string; kickoff: string; picks: Map<string, number> }>()
+  for (const s of slips) for (const l of (s.legs as Array<{ fixtureId: number; game: string; kickoff: string; outcome?: string; side?: string; line?: number }>) ?? []) {
+    const g = byGame.get(l.fixtureId) ?? { game: l.game, kickoff: l.kickoff, picks: new Map<string, number>() }
+    const name = l.outcome ?? `${l.side} ${l.line}`
+    g.picks.set(name, (g.picks.get(name) ?? 0) + 1); byGame.set(l.fixtureId, g)
+  }
+  const games = await Promise.all([...byGame.values()].map(async g => {
+    const [home, away] = g.game.split(' vs ').map(s => s.trim())
+    const [hr, ar] = await Promise.all([getTeamRecent(home, g.kickoff, 8), getTeamRecent(away, g.kickoff, 8)])
     const hist = [...hr, ...ar].map(m => m.hg + m.ag)
-    const overRate = hist.length ? hist.filter(t => t >= 5).length / hist.length : null
-    return { game: l.game, underOdds: l.odds, overRate, n: hist.length }
+    return {
+      game: g.game, n: hist.length, avgGoals: hist.length ? +(hist.reduce((a, b) => a + b, 0) / hist.length).toFixed(2) : null,
+      fivePlusPct: hist.length ? Math.round(100 * hist.filter(t => t >= 5).length / hist.length) : null,
+      picks: [...g.picks.entries()].sort((a, b) => b[1] - a[1]).slice(0, 3).map(([name, count]) => `${name} ×${count}`),
+    }
   }))
-  const withHist = games.filter(g => g.overRate != null)
-  const riskiest = [...withHist].sort((a, b) => (b.overRate! - a.overRate!) || (a.underOdds - b.underOdds)).slice(0, 6)
-  const pAny = (session.meta as { pAnyWin?: number } | null)?.pAnyWin
+  const withHist = games.filter(g => g.n > 0)
+  const meta = session.meta as { pAnyWin?: number; engine?: string; bookMetas?: Record<string, { keepRate?: number }> } | null
+  const pAny = meta?.pAnyWin
+  const keep = meta?.bookMetas ? Object.values(meta.bookMetas).find(m => m.keepRate != null)?.keepRate : undefined
+  const engine = meta?.engine === 'decision_bot' ? 'Decision Bot (mixed two-sided markets per game, every slip paying ≈ the target)' : 'total-goals coverage (Under/Over lines)'
+  // most-contested games = where the slips' picks are most concentrated on one selection (one result kills many)
+  const concentrated = [...games].map(g => ({ ...g, top: Number(/×(\d+)/.exec(g.picks[0] ?? '')?.[1] ?? 0) })).sort((a, b) => b.top - a.top).slice(0, 5)
 
-  // deterministic fallback (also the data the model reasons over)
   const facts = {
-    games: legs.length, withHistory: withHist.length, budget: session.budget, target: session.targetWin,
-    pAnyWin: pAny, riskiest: riskiest.map(g => ({ game: g.game, overPct: Math.round((g.overRate ?? 0) * 100), n: g.n, underOdds: g.underOdds })),
+    engine, slips: slips.length, games: games.length, withHistory: withHist.length, budget: session.budget, target: session.targetWin,
+    pAnyWin: pAny, returnsPer100: keep != null ? Math.round(keep * 100) : null,
+    mostConcentratedGames: concentrated.map(g => ({ game: g.game, picks: g.picks, avgGoals: g.avgGoals, fivePlusPct: g.fivePlusPct })),
   }
   const deterministic =
-    `${legs.length}-game all-Under base; only ${withHist.length} have history. ` +
-    (riskiest.length
-      ? `Highest Over-4.5 history: ${riskiest.slice(0, 3).map(g => `${g.game} (${Math.round((g.overRate ?? 0) * 100)}%)`).join(', ')}. `
-      : 'No history to flag specific games. ') +
-    `Modelled P(≥1 win) ${pAny != null ? (100 * pAny).toFixed(1) + '%' : '—'} — every slip is −vig; treat as a high-variance scatter, not an edge.`
+    `${slips.length} slips over ${games.length} games (${withHist.length} with history), built by the ${engine}. ` +
+    (concentrated.length ? `Most slips ride on: ${concentrated.slice(0, 3).map(g => `${g.game} (${g.picks[0]})`).join(', ')} — one result there decides many slips at once. ` : '') +
+    `Chance ≥1 slip wins ${pAny != null ? (100 * pAny).toFixed(2) + '%' : '—'}${keep != null ? `; on average ₦100 staked returns ₦${Math.round(keep * 100)}` : ''} — every slip is −vig; a spread of long shots, not an edge.`
 
   if (!nimConfigured()) return Response.json({ summary: deterministic, source: 'deterministic' })
 
   try {
     const summary = await nimChat([
-      { role: 'system', content: 'You are an honest betting-risk analyst. NEVER claim an edge or predict profit — these total-goals markets are −vig and models do not beat them. Be concise (3-4 sentences), concrete, and grounded ONLY in the data given.' },
-      { role: 'user', content: `A PEDLA coverage session bets an all-Under-4.5 base across many games plus flipped variants. Data:\n${JSON.stringify(facts, null, 2)}\nGive a short, honest read: which games most threaten the all-Under base (by history), how realistic the P(≥1 win) is, and one caveat. No edge claims.` },
+      { role: 'system', content: 'You are an honest betting-risk analyst. NEVER claim an edge or predict profit — these markets are priced with a margin and models do not beat them. Be concise (3-4 sentences), concrete, and grounded ONLY in the data given.' },
+      { role: 'user', content: `A betting session spreads a budget over many accumulator slips. Data:\n${JSON.stringify(facts, null, 2)}\nGive a short, honest read: which games carry the most slips on one result (and what their history says), how realistic the chance of ≥1 win is, and one caveat. No edge claims.` },
     ], { temperature: 0, maxTokens: 400, timeoutMs: 45_000 })
     return Response.json({ summary: summary.trim() || deterministic, source: 'nim', model: nimModel() })
   } catch (e) {

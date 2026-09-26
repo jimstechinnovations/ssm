@@ -8,6 +8,9 @@
  */
 
 import { spawn } from 'node:child_process'
+import { mkdirSync, openSync } from 'node:fs'
+import { join as joinPath } from 'node:path'
+import { hostname } from 'node:os'
 import { getSession, updateSession, sessionSummary, clearStop } from '@/lib/sessions/store'
 import { browserStatus } from '@/lib/placement/browser'
 
@@ -18,18 +21,18 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   const session = await getSession(id)
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
 
-  let live = false
+  let live = false, join = false
   let workers = 1
-  try { const b = await request.json(); live = Boolean(b?.live); workers = Math.min(8, Math.max(1, Number(b?.workers) || 1)) } catch { /* dry */ }
+  try { const b = await request.json(); live = Boolean(b?.live); join = Boolean(b?.join); workers = Math.min(8, Math.max(1, Number(b?.workers) || 1)) } catch { /* dry */ }
   const summary = await sessionSummary(session.id)
   if (summary.pending === 0) return Response.json({ error: 'No pending slips to place' }, { status: 409 })
 
-  // Guard against a second concurrent run (double-click / two tabs): a fresh heartbeat + not-stopped
-  // means a placer is already working — two placers would collide on submits (per-process mutex).
-  const heartbeatMs = Date.now() - Date.parse(session.updatedAt)
+  // A run is already active (maybe on ANOTHER PC). Live placement goes through the shared database queue,
+  // so a second PC can safely JOIN it (no slip can be placed twice) — but only when asked explicitly, so a
+  // double-click never starts an accidental second run on this PC.
   const stopReq = Boolean((session.meta as Record<string, unknown> | null)?.stopRequested)
-  if (session.status === 'placing' && heartbeatMs < 25_000 && !stopReq) {
-    return Response.json({ error: 'A placement run is already active for this session — Stop it first, or wait for it to finish.' }, { status: 409 })
+  if (session.status === 'placing' && session.heartbeatAgeMs < 25_000 && !stopReq && !(live && join)) {
+    return Response.json({ error: 'Already placing (possibly on another PC). Use “Add this PC” to place in parallel, or Stop it first.', active: true }, { status: 409 })
   }
 
   if (live) {
@@ -42,12 +45,19 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
     if (st.balance != null && st.balance < session.minStake) return Response.json({ error: `Balance ₦${st.balance} below min stake ₦${session.minStake}` }, { status: 409 })
   }
 
-  await clearStop(session.id, session.meta)   // fresh run: drop any stale stop flag
+  if (!join) await clearStop(session.id, session.meta)   // fresh run: drop any stale stop flag (a join keeps the run's state)
   const origin = new URL(request.url).origin
   const args = ['scripts/place-session.mjs', session.code, '--base', origin, '--workers', String(workers), ...(live ? ['--live'] : [])]
-  const child = spawn('node', args, { stdio: 'ignore', detached: true, shell: process.platform === 'win32' })
+  // Keep the placer's full output: one log file per run, per PC (logs/ is git-ignored). Diagnosing a failed
+  // or stuck run starts here — the session page shows the file name.
+  mkdirSync('logs', { recursive: true })
+  const logFile = joinPath('logs', `placer-${session.code}-${hostname()}-${new Date().toISOString().replace(/[:.]/g, '-')}.log`)
+  const out = openSync(logFile, 'a')
+  // Launch node DIRECTLY (no shell): on Windows a detached `cmd` wrapper does not pass the log file handles
+  // on, so the run's output was lost. process.execPath is the same node that runs this server.
+  const child = spawn(process.execPath, args, { stdio: ['ignore', out, out], detached: true, windowsHide: true })
   child.unref()
 
   if (live) await updateSession(session.id, { status: 'placing' })   // only live drives the run-state UI; dry is a rehearsal
-  return Response.json({ started: true, live, workers, session: session.code, pending: summary.pending })
+  return Response.json({ started: true, live, join, workers, session: session.code, pending: summary.pending, logFile })
 }

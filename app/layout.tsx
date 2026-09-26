@@ -14,8 +14,8 @@ const geistMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "PEDLAS — Total-Goals Odds Builder",
-  description: "PEDLAS — structural coverage odds builder for Betway total-goals markets (honest EV, no edge claims)",
+  title: "PEDLA — Coverage Builder",
+  description: "PEDLA — spread a budget across many total-goals slips, place them, and settle against real results. Honest odds, no edge claims.",
 };
 
 export default function RootLayout({
