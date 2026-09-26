@@ -73,6 +73,11 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
   mkdirSync('logs', { recursive: true })
   const stamp = new Date().toISOString().replace(/[:.]/g, '-')
   const logFiles: string[] = []
+  // One durable, low-noise line per run: a real-money run that silently spawned as dry (a one-off dev-server
+  // hot-reload artifact was seen doing exactly this on 2026-09-26, self-resolved on retry, never recurred
+  // across 53 live placements after) is the worst possible failure to miss. This line lets the server log
+  // be cross-checked against the placer's own log file if it ever happens again.
+  console.log(`[place] session=${session.code} live=${live} browsers=${ready.length} ports=${ready.map(w => w.port).join(',')}`)
   for (const w of ready) {
     const args = ['scripts/place-session.mjs', session.code, '--base', origin, '--port', String(w.port), ...(live ? ['--live'] : [])]
     const logFile = joinPath('logs', `placer-${session.code}-${hostname()}-${w.port}-${stamp}.log`)
