@@ -54,10 +54,13 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
     const total = finished ? (r?.total ?? null) : null
     const over = finished && g.line > 0 ? (total! > g.line) : null
     let cut = 0
+    let cutSlipIds: number[] = [], aliveSlipIdsAfter: number[] = []
     if (finished) {
       const survivors = alive.filter(i => { const l = legMaps[i].get(g.fixtureId); return !l || legOutcome(l, r) !== false })
       cut = alive.length - survivors.length
+      cutSlipIds = alive.filter(i => !survivors.includes(i)).map(i => placed[i].slipId)
       alive = survivors
+      aliveSlipIdsAfter = alive.map(i => placed[i].slipId)
     }
     // how many slips bet this game on the breakout side (legacy Over) — the hedge weight on it
     const overSlips = legMaps.filter(m => { const l = m.get(g.fixtureId); return l && !l.rule && l.side === 'Over' }).length
@@ -66,6 +69,7 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
       order: order + 1, fixtureId: g.fixtureId, game: g.game, kickoff: g.kickoff,
       underOdds, bucket: bucketOf(underOdds), overSlips,
       finished, total, score: finished && r?.home != null ? `${r.home}-${r.away}` : null, over, cut, aliveAfter: alive.length,
+      cutSlipIds, aliveSlipIdsAfter,
     }
   })
 
