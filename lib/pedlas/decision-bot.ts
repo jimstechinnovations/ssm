@@ -113,7 +113,9 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   // Without skipping, a slip walks the games in order, so it can never use more than the first maxLegs
   // games — only those are calibrated and simulated. With skipping, every game in the window is usable.
   const games = orderGames(inputGames).filter(g => g.selections.length >= 2).slice(0, config.skip ? 80 : config.maxLegs)
+  const tDiag0 = Date.now()
   const tables: ScorelineTable[] = games.map(g => calibrateTable(g.selections))
+  if (process.env.BOT_DIAG) console.log(`[decision-bot] calibrateTable x${games.length}: ${((Date.now() - tDiag0) / 1000).toFixed(1)}s`)
   const calibrationMaxError = tables.reduce((m, t) => Math.max(m, t.maxError), 0)
   const opts = games.map((g, gi) => g.selections
     .filter(s => config.allowSubMinLegs || s.odds >= config.minLegOdds)
@@ -344,6 +346,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   }
   if (slips.length === 0) notes.push(`no slip can reach ${naira(T)}–${naira(Tmax)} with these ${games.length} games`)
   if (timedOut) notes.push(`stopped at ${slips.length}/${K} slips: hit the ${(config.deadlineMs / 1000).toFixed(0)}s build budget (deadlineMs) — raise it or loosen maxLegs/skip to fit more slips in budget`)
+  if (process.env.BOT_DIAG) console.log(`[decision-bot] slip loop (${slips.length} slips): ${((Date.now() - t0) / 1000).toFixed(1)}s`)
 
   // ── measure: P(≥1 win) on FRESH simulated outcomes (games independent, calibrated to the book) ──
   const ED = config.evalDays
