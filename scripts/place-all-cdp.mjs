@@ -130,7 +130,6 @@ const placedLog = existsSync(LOG) ? JSON.parse(readFileSync(LOG, 'utf8')) : {}
 let saveChain = Promise.resolve()
 const savePlaced = () => { saveChain = saveChain.then(() => { try { writeFileSync(LOG, JSON.stringify(placedLog, null, 2)) } catch { /* ignore */ } }); return saveChain } // serialize writes across workers
 
-const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0 Safari/537.36'
 const sleep = ms => new Promise(r => setTimeout(r, ms))
 // --trace: time each step of a slip (where the seconds go) — for tuning speed
 const TRACE = process.argv.includes('--trace')
@@ -144,7 +143,12 @@ const rand = (a, b) => Math.round(a + Math.random() * (b - a))
 let submitLock = Promise.resolve()
 async function acquireSubmit() { const prev = submitLock; let rel; submitLock = new Promise(r => (rel = r)); await prev; return rel }
 
-async function bookingCode(legs) {
+// Runs the request INSIDE the real Chrome tab (page.evaluate), not as a server-side Node fetch. SportyBet's
+// edge started silently dropping our server's raw requests at the TCP/TLS handshake (never even reaching
+// HTTP) 2026-10-01 — a real Chrome's TLS/TCP fingerprint doesn't match a script's, and no header can fake
+// that. The page is already on sportybet.com, so this fetch is genuinely same-origin, with the browser's
+// real cookies/fingerprint — confirmed working when the server-side path was fully blocked.
+async function bookingCode(legs, page) {
   const selections = legs.map(l => l.marketId
     ? { eventId: `sr:match:${l.fixtureId}`, marketId: String(l.marketId), specifier: l.specifier || '', outcomeId: String(l.outcomeId) }
     : { eventId: `sr:match:${l.fixtureId}`, marketId: '18', specifier: `total=${l.line}`, outcomeId: l.side === 'Under' ? '13' : '12' })
@@ -153,8 +157,19 @@ async function bookingCode(legs) {
   let last
   for (let a = 1; a <= 4; a++) {
     try {
-      const r = await fetch('https://www.sportybet.com/api/ng/orders/share', { method: 'POST', headers: { 'Content-Type': 'application/json', 'User-Agent': UA, platform: 'web' }, body: JSON.stringify({ selections, shareType: 1 }), signal: AbortSignal.timeout(10_000) })
-      const j = await r.json()
+      const j = await page.evaluate(async (body) => {
+        // window.fetch is monkey-patched by SportyBet's own Grafana Faro instrumentation (confirmed live
+        // 2026-10-01: calling it threw a generic "Sorry, something went wrong, please try again later."
+        // instead of making the request) — a throwaway iframe's fetch is a clean, unpatched native one.
+        const iframe = document.createElement('iframe')
+        iframe.style.display = 'none'
+        document.body.appendChild(iframe)
+        try {
+          const nativeFetch = iframe.contentWindow.fetch.bind(window)
+          const r = await nativeFetch('/api/ng/orders/share', { method: 'POST', headers: { 'Content-Type': 'application/json', platform: 'web' }, body: JSON.stringify(body), signal: AbortSignal.timeout(10_000) })
+          return r.json()
+        } finally { iframe.remove() }
+      }, { selections, shareType: 1 })
       if (j.bizCode === 10000 && j.data?.shareCode) return j.data.shareCode
       last = new Error(`booking code failed (bizCode ${j.bizCode})`)
       if (j.bizCode === 19000) throw last   // the selections themselves are rejected — retrying won't help
@@ -317,7 +332,7 @@ function makeWorker(page, tag, parallel) {
     // Only Over/Under legs print "Over/Under" on the betslip; for other markets the betslip storage is the count.
     const allTotals = slip.legs.every(l => !l.rule || l.rule.kind === 'total')
     const stake = STAKE_OVERRIDE ?? slip.stake
-    const code = await bookingCode(slip.legs)
+    const code = await bookingCode(slip.legs, page)
     const legSig = slip.legs.map(l => `${l.fixtureId}:${l.outcome}`).sort().join('|')
     const idem = `${SESSION}|sportybet|${stake}|${legSig}`
     if (placedLog[idem]?.placed) { const e = placedLog[idem]; log(`slip ${idx}: SKIP (already placed in this session, ${e.code})`); return { result: 'skip', code: e.code, droppedFixtures: e.droppedFixtures, placedLegs: e.placedLegs, receipt: e.receipt } }
