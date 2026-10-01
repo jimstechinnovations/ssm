@@ -19,6 +19,7 @@ import type { BookAdapter } from './types'
 import type { Fixture, OddsValue, MarketType } from '../pedlas/types'
 import { boostFromTable } from '../pedlas/boost'
 import { selectionsFromMarkets, SELECTION_MARKET_IDS, type SelectionGame } from '../pedlas/selections'
+import { cdpFetch } from '../placement/cdp-fetch'
 
 // fallback: effective bonus fraction by number of QUALIFYING legs (plan MBB_1788955181864, football)
 const SPORTYBET_MBB: { legs: number; fraction: number }[] = [
@@ -35,7 +36,9 @@ const SPORTYBET_MBB: { legs: number; fraction: number }[] = [
 ]
 const sportyBoost = boostFromTable(SPORTYBET_MBB)
 
-const BASE = 'https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents'
+const ORIGIN = 'https://www.sportybet.com'
+const BASE_PATH = '/api/ng/factsCenter/pcUpcomingEvents'
+const BASE = ORIGIN + BASE_PATH
 const PAGE_SIZE = 100
 const MAX_PAGES = 10
 
@@ -135,11 +138,10 @@ export const sportybet: BookAdapter = {
     const games: SelectionGame[] = []
     const seen = new Set<number>()
     for (let page = 1; page <= MAX_PAGES && games.length < opts.scanLimit; page++) {
-      const url = `${BASE}?sportId=${encodeURIComponent('sr:sport:1')}&marketId=${encodeURIComponent(SELECTION_MARKET_IDS.join(','))}&pageSize=${PAGE_SIZE}&pageNum=${page}`
-      // the feed rejects requests without a full browser user-agent (HTTP 403)
-      const res = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' }, cache: 'no-store' })
-      if (!res.ok) throw new Error(`SportyBet feed HTTP ${res.status} (page ${page})`)
-      const json = (await res.json()) as SbResponse
+      const path = `${BASE_PATH}?sportId=${encodeURIComponent('sr:sport:1')}&marketId=${encodeURIComponent(SELECTION_MARKET_IDS.join(','))}&pageSize=${PAGE_SIZE}&pageNum=${page}`
+      // CDP first (a real browser), raw fetch as fallback — see cdp-fetch.ts. The feed also rejects a raw
+      // fetch without a full browser user-agent (HTTP 403) even when the TCP block isn't in play.
+      const json = await cdpFetch<SbResponse>(ORIGIN, path, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' } })
       if (json.bizCode !== 10000) throw new Error(`SportyBet feed bizCode ${json.bizCode ?? 'unknown'}`)
       const tournaments = json.data?.tournaments ?? []
       for (const t of tournaments) for (const ev of t.events ?? []) {
