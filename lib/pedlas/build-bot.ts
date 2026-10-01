@@ -30,6 +30,9 @@ export interface BotBuildOptions {
   excludeLeagues?: string[]
   boost?: BoostFn
   maxPayout?: number
+  skip?: boolean                // let a slip skip games (fewer, higher-odds legs) — needs maxLegs
+  maxLegs?: number
+  deadlineMs?: number           // wall-clock build budget — see BotConfig.deadlineMs (never hangs the server)
 }
 
 /** A stored slip plus the bot's slip-level decision (persisted to pedla_placements.decision). */
@@ -88,6 +91,7 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
   const result = runDecisionBot(pool, {
     stake, target: o.target, budget: o.budget, band: o.band, rule: o.rule, allowSubMinLegs: o.allowSubMinLegs,
     seed: o.seed, boost: o.boost ?? adapter.boostFor, bonusFn, maxPayout: Math.min(o.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
+    skip: o.skip, maxLegs: o.maxLegs, deadlineMs: o.deadlineMs,
   })
   if (result.slips.length === 0) return { error: 'No slip can reach the target band', detail: result.notes.join(' ') || 'Lower the target or widen the window.' }
 
@@ -114,14 +118,14 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
   const legCounts = slips.map(s => s.legCount)
   const meta = {
     engine: 'decision_bot',
-    bot: { rule: result.config.rule, band: result.config.band, allowSubMinLegs: result.config.allowSubMinLegs, seed: result.config.seed, minLegOdds: result.config.minLegOdds },
+    bot: { rule: result.config.rule, band: result.config.band, allowSubMinLegs: result.config.allowSubMinLegs, seed: result.config.seed, minLegOdds: result.config.minLegOdds, skip: result.config.skip, maxLegs: result.config.maxLegs },
     scanned: games.length, withHistory: withHist.filter(g => g.history?.hasForm).length, historyGated: requireHistory, poolSize: pool.length,
     gamesUsed: Math.max(...legCounts), slips: slips.length, pAnyWin: result.pAnyWin, ceiling: result.ceiling,
     keepRate: result.keepRate, expectedNet: result.expectedNet, variableLegs: { min: Math.min(...legCounts), max: Math.max(...legCounts) },
     bonusSlips: result.slips.filter(s => s.bonusApplies).length, calibrationMaxError: result.calibrationMaxError,
     order: result.games.slice(0, Math.max(...legCounts)).map(g => g.game),
     bonusPlan: plan ? plan.planName : 'fallback leg-count table (live plan unavailable)',
-    note: [`Decision Bot (${result.config.rule}, band ${(100 * result.config.band).toFixed(1)}%, seed ${result.config.seed})`, plan ? `bonus priced with SportyBet's live plan ${plan.planName}` : 'bonus from the fallback table', ...result.notes].join(' · '),
+    note: [`Decision Bot (${result.config.rule}, band ${(100 * result.config.band).toFixed(1)}%, seed ${result.config.seed}${result.config.skip ? `, skip on, maxLegs ${result.config.maxLegs}` : ''})`, plan ? `bonus priced with SportyBet's live plan ${plan.planName}` : 'bonus from the fallback table', ...result.notes].join(' · '),
   }
   return { slips, result, meta }
 }

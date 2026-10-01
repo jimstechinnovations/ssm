@@ -37,6 +37,11 @@ export interface BotConfig {
   /** Exact bonus per ₦1 staked for a set of legs (SportyBet's live plan). Overrides `boost`. */
   bonusFn?: (sels: Selection[]) => number
   candidates?: number        // greedy: candidates built per slip
+  /** Wall-clock budget in ms (default 90_000). Node is single-threaded, so an API route calling this
+   *  SYNCHRONOUSLY blocks every other request on the server until it returns — proven live 2026-10-01:
+   *  skip mode on a fresh (uncached) live pool ran long enough to freeze the whole app for 10+ minutes.
+   *  Past the budget the build stops with whatever slips it has (never hangs) and a note says so. */
+  deadlineMs?: number
   /** Let a slip SKIP games while walking them in order (default false = every slip uses games 1..k).
    *  With a leg cap (maxLegs), skipping lets each slip reach the target on fewer, higher-odds legs taken
    *  from anywhere in the day — less compounded margin, so a higher keep and a higher P(≥1 win) — and a
@@ -96,6 +101,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
     band: cfg.band ?? 0.01, rule: cfg.rule ?? 'greedy', allowSubMinLegs: cfg.allowSubMinLegs ?? true,
     minLegOdds: cfg.minLegOdds ?? 1.20, seed: cfg.seed ?? 1, maxLegs: cfg.maxLegs ?? 40,
     maxPayout: cfg.maxPayout ?? Infinity, candidates: cfg.candidates ?? 24, skip: cfg.skip ?? false,
+    deadlineMs: cfg.deadlineMs ?? 90_000,
     evalDays: cfg.evalDays ?? 20000,
   }
   const boost = cfg.boost ?? boostFor
@@ -270,7 +276,10 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   const slips: BotSlip[] = []
   const seen = new Set<string>()
   let failures = 0
+  const t0 = Date.now()
+  let timedOut = false
   for (let k = 0; k < K && failures < 40; k++) {
+    if (Date.now() - t0 > config.deadlineMs) { timedOut = true; break }
     let chosen: BotSlip | null = null
     if (config.rule === 'greedy') {
       type Cand = { b: { legs: Choice[]; backtracks: number }; gain: number; own: number; overlap: number; overlapping: number }
@@ -283,6 +292,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
       const scale = all.length / Math.max(1, family.length)
       const familyMaps = family.map(f => new Map(f.map(l => [l.gi, l.s])))
       for (let c = 0; c < config.candidates * 3 && built < config.candidates; c++) {
+        if ((c & 15) === 0 && Date.now() - t0 > config.deadlineMs) { timedOut = true; break }   // checked every 16 candidates (Date.now() itself isn't free at this volume)
         // Three candidate generators give greedy a diverse pool: uniform (ignores likelihood), weighted by
         // P (high survival, but drifts to low odds ⇒ more legs), and a FINGERPRINT SEPARATOR that, at each
         // game, prefers the pick that shares no scoreline with the earlier slips this candidate still
@@ -333,6 +343,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
     slips.push(chosen)
   }
   if (slips.length === 0) notes.push(`no slip can reach ${naira(T)}–${naira(Tmax)} with these ${games.length} games`)
+  if (timedOut) notes.push(`stopped at ${slips.length}/${K} slips: hit the ${(config.deadlineMs / 1000).toFixed(0)}s build budget (deadlineMs) — raise it or loosen maxLegs/skip to fit more slips in budget`)
 
   // ── measure: P(≥1 win) on FRESH simulated outcomes (games independent, calibrated to the book) ──
   const ED = config.evalDays
