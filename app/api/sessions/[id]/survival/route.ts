@@ -55,6 +55,18 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
     const over = finished && g.line > 0 ? (total! > g.line) : null
     let cut = 0
     let cutSlipIds: number[] = [], aliveSlipIdsAfter: number[] = []
+    // UNBIASED per-game view: every slip's leg on this game, alive or not. `cut` alone is survivorship-
+    // biased — a late game can't cut slips that are already dead, so "cut 0" there says nothing about
+    // how safe the game was. legHitRate vs expectedHitRate (mean of the bot's own p) is the calibration check.
+    let legs = 0, legWins = 0, expectedWins = 0
+    if (finished) for (const m of legMaps) {
+      const l = m.get(g.fixtureId) as (Leg & { p?: number }) | undefined
+      if (!l) continue
+      const w = legOutcome(l, r)
+      if (w === null) continue
+      legs++; if (w) legWins++
+      expectedWins += typeof l.p === 'number' ? l.p : (l.odds ? 1 / l.odds : 0)
+    }
     if (finished) {
       const survivors = alive.filter(i => { const l = legMaps[i].get(g.fixtureId); return !l || legOutcome(l, r) !== false })
       cut = alive.length - survivors.length
@@ -70,6 +82,8 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
       underOdds, bucket: bucketOf(underOdds), overSlips,
       finished, total, score: finished && r?.home != null ? `${r.home}-${r.away}` : null, over, cut, aliveAfter: alive.length,
       cutSlipIds, aliveSlipIdsAfter,
+      legs, legWins, expectedWins: Math.round(expectedWins * 100) / 100,
+      legHitRate: legs ? legWins / legs : null, expectedHitRate: legs ? expectedWins / legs : null,
     }
   })
 

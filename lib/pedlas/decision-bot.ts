@@ -37,6 +37,11 @@ export interface BotConfig {
   /** Exact bonus per ₦1 staked for a set of legs (SportyBet's live plan). Overrides `boost`. */
   bonusFn?: (sels: Selection[]) => number
   candidates?: number        // greedy: candidates built per slip
+  /** Let a slip SKIP games while walking them in order (default false = every slip uses games 1..k).
+   *  With a leg cap (maxLegs), skipping lets each slip reach the target on fewer, higher-odds legs taken
+   *  from anywhere in the day — less compounded margin, so a higher keep and a higher P(≥1 win) — and a
+   *  game one slip skips is covered by others. Overlap maths aligns legs BY GAME, so it stays exact. */
+  skip?: boolean
   evalDays?: number          // simulated outcomes used to measure P(≥1 win)
 }
 
@@ -90,7 +95,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
     stake: cfg.stake, target: cfg.target, budget: cfg.budget,
     band: cfg.band ?? 0.01, rule: cfg.rule ?? 'greedy', allowSubMinLegs: cfg.allowSubMinLegs ?? true,
     minLegOdds: cfg.minLegOdds ?? 1.20, seed: cfg.seed ?? 1, maxLegs: cfg.maxLegs ?? 40,
-    maxPayout: cfg.maxPayout ?? Infinity, candidates: cfg.candidates ?? 24,
+    maxPayout: cfg.maxPayout ?? Infinity, candidates: cfg.candidates ?? 24, skip: cfg.skip ?? false,
     evalDays: cfg.evalDays ?? 20000,
   }
   const boost = cfg.boost ?? boostFor
@@ -99,9 +104,9 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   const notes: string[] = []
 
   // ── order + calibrate ──
-  // A slip walks the games in order without skipping, so it can never use more than the first maxLegs
-  // games — only those are calibrated and simulated.
-  const games = orderGames(inputGames).filter(g => g.selections.length >= 2).slice(0, config.maxLegs)
+  // Without skipping, a slip walks the games in order, so it can never use more than the first maxLegs
+  // games — only those are calibrated and simulated. With skipping, every game in the window is usable.
+  const games = orderGames(inputGames).filter(g => g.selections.length >= 2).slice(0, config.skip ? 80 : config.maxLegs)
   const tables: ScorelineTable[] = games.map(g => calibrateTable(g.selections))
   const calibrationMaxError = tables.reduce((m, t) => Math.max(m, t.maxError), 0)
   const opts = games.map((g, gi) => g.selections
@@ -127,13 +132,32 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
     return { pay, odds, bonus: odds > 0 ? bonusPerStake / odds : 0, qualifying: sels.filter(s => s.odds >= config.minLegOdds).length }
   }
 
+  // Reachability bound for pruning (skip mode): the best payout ANY k more legs could add is the product of
+  // the k biggest per-game max odds left on the board, times a generous bonus allowance. A branch that can't
+  // reach T even then is cut immediately — without it, skip mode explored dead branches across every game.
+  const MAX_BONUS = 1.6
+  const suffixTopOdds = games.map((_, gi) => opts.slice(gi).map(o => o.reduce((m, x) => Math.max(m, x.s.odds), 1)).sort((a, b) => b - a))
+  const canReach = (gi: number, curOdds: number, legsLeft: number) => {
+    if (gi >= games.length || legsLeft <= 0) return false
+    let best = curOdds
+    const top = suffixTopOdds[gi]
+    for (let i = 0; i < legsLeft && i < top.length; i++) best *= top[i]
+    return config.stake * best * MAX_BONUS >= T
+  }
+
   // ── build ONE slip: walk games in order, choose by `order(gi)`, close inside the band ──
   type Choice = { gi: number; s: Selection; p: number; why: string }
-  function buildSlip(order: (gi: number, legs: Choice[]) => { s: Selection; p: number; why: string }[]): { legs: Choice[]; backtracks: number } | null {
+  function buildSlip(order: (gi: number, legs: Choice[]) => { s: Selection; p: number; why: string }[], r?: () => number): { legs: Choice[]; backtracks: number } | null {
     const legs: Choice[] = []
     let nodes = 0, backtracks = 0
     const dfs = (gi: number): boolean => {
       if (gi >= games.length || legs.length >= config.maxLegs || ++nodes > 4000) return false
+      if (config.skip && !canReach(gi, legs.reduce((x, l) => x * l.s.odds, 1), config.maxLegs - legs.length)) return false
+      // SKIP (opt-in): leave this game to other slips. Skipped first with probability 1 − legsLeft/gamesLeft,
+      // so a slip spreads its legs across the whole day instead of piling onto the first games; if picking
+      // here fails later, the search still falls back to skipping it (and vice versa).
+      const skipFirst = config.skip && r ? r() < Math.max(0, Math.min(0.9, 1 - (config.maxLegs - legs.length) / Math.max(1, games.length - gi))) : false
+      if (skipFirst && dfs(gi + 1)) return true
       const ranked = order(gi, legs)
       const sels = legs.map(l => l.s)
       // 1) closing: any option that lands the payout inside the band ends the slip here
@@ -152,6 +176,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
         legs.pop()
         if (tried >= 3) break          // bounded backtracking per level keeps the search fast
       }
+      if (config.skip && !skipFirst) return dfs(gi + 1)
       return false
     }
     return dfs(0) ? { legs, backtracks } : null
@@ -190,8 +215,8 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   }
 
   // ── exact overlap maths for greedy ──
-  // A slip wins with p = Π p(leg). Every slip walks the SAME ordered games from game 0, so two slips share
-  // their first min(L₁, L₂) games; P(both win) = Π_shared P(both picks win on that game) × Π_rest p(leg).
+  // A slip wins with p = Π p(leg). Two slips share the games they both bet (without skipping: their first
+  // min(L₁, L₂) games); P(both win) = Π_shared P(both picks win on that game) × Π_rest p(leg).
   // The joint per game comes straight from the calibrated scoreline table (cells both rules accept).
   // Greedy's gain for a candidate = p − Σ_j P(candidate ∧ slip j) (inclusion–exclusion to 2nd order —
   // exact enough when every p is tiny). Exact maths, so no simulation noise decides between candidates.
@@ -212,14 +237,17 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   }
   const pCache = new Map<string, number>()
   function probOfKey(gi: number, s: Selection) { const k = `${gi}:${s.key}`; let v = pCache.get(k); if (v == null) { v = probOf(tables[gi], s); pCache.set(k, v) } return v }
+  // Legs are aligned BY GAME (not by position), so slips that skip different games are still exact:
+  // a game both slips bet → the joint from the table; a game only one bets → that leg's own p.
   const pBoth = (a: { gi: number; s: Selection }[], b: { gi: number; s: Selection }[]) => {
     let x = 1
-    const n = Math.max(a.length, b.length)
-    for (let i = 0; i < n; i++) {
-      const la = a[i], lb = b[i]
-      if (la && lb) { x *= joint(la.gi, la.s, lb.s); if (x === 0) return 0 }
-      else x *= probOfKey((la ?? lb)!.gi, (la ?? lb)!.s)
+    const bm = new Map(b.map(l => [l.gi, l.s]))
+    for (const la of a) {
+      const sb = bm.get(la.gi)
+      if (sb) { x *= joint(la.gi, la.s, sb); if (x === 0) return 0; bm.delete(la.gi) }
+      else x *= probOfKey(la.gi, la.s)
     }
+    for (const [gi, s] of bm) x *= probOfKey(gi, s)
     return x
   }
 
@@ -227,10 +255,10 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   // whose pick shares ≥1 scoreline with ours on every game so far. At game gi, a pick that shares NO
   // scoreline with such a slip's pick separates the two for good (they can never both win). Options are
   // drawn by probability (survival) boosted by how many open overlaps they close.
-  function separator(gi: number, legs: Choice[], family: { gi: number; s: Selection }[][], r: () => number) {
-    const open = family.filter(f => legs.every((l, i) => !f[i] || joint(l.gi, l.s, f[i].s) > 0))
+  function separator(gi: number, legs: Choice[], family: Map<number, Selection>[], r: () => number) {
+    const open = family.filter(f => legs.every(l => { const fs = f.get(l.gi); return !fs || joint(l.gi, l.s, fs) > 0 }))
     return opts[gi]
-      .map(o => { const cuts = open.reduce((n, f) => n + (f[gi] && joint(gi, o.s, f[gi].s) === 0 ? 1 : 0), 0); return { ...o, cuts, key: Math.pow(r(), 1 / Math.max(1e-6, o.p * (1 + cuts) ** 2)) } })
+      .map(o => { const cuts = open.reduce((n, f) => { const fs = f.get(gi); return n + (fs && joint(gi, o.s, fs) === 0 ? 1 : 0) }, 0); return { ...o, cuts, key: Math.pow(r(), 1 / Math.max(1e-6, o.p * (1 + cuts) ** 2)) } })
       .sort((x, y) => y.key - x.key)
       .map(o => ({ s: o.s, p: o.p, why: o.cuts
         ? `fingerprint separator: ${o.s.name} @${o.s.odds} (P=${(100 * o.p).toFixed(1)}%) shares no scoreline with ${o.cuts} earlier slip${o.cuts === 1 ? '' : 's'} still overlapping here`
@@ -253,15 +281,16 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
       const all = slips.map(s => s.legs.map(l => ({ gi: l.game, s: l.selection })))
       const family = all.length <= 300 ? all : Array.from({ length: 300 }, (_, i) => all[Math.floor((i + 0.5) * all.length / 300)])
       const scale = all.length / Math.max(1, family.length)
+      const familyMaps = family.map(f => new Map(f.map(l => [l.gi, l.s])))
       for (let c = 0; c < config.candidates * 3 && built < config.candidates; c++) {
         // Three candidate generators give greedy a diverse pool: uniform (ignores likelihood), weighted by
         // P (high survival, but drifts to low odds ⇒ more legs), and a FINGERPRINT SEPARATOR that, at each
         // game, prefers the pick that shares no scoreline with the earlier slips this candidate still
         // overlaps — so it becomes disjoint from them — weighted by P to keep survival high.
         const gen = c % 3
-        const b = gen === 0 ? buildSlip(gi => shuffled(gi, rng, 'random'))
-          : gen === 1 ? buildSlip(gi => weighted(gi, rng))
-            : buildSlip((gi, legs) => separator(gi, legs, family, rng))
+        const b = gen === 0 ? buildSlip(gi => shuffled(gi, rng, 'random'), rng)
+          : gen === 1 ? buildSlip(gi => weighted(gi, rng), rng)
+            : buildSlip((gi, legs) => separator(gi, legs, familyMaps, rng), rng)
         if (!b) continue
         const key = keyOf(b.legs); if (seen.has(key)) continue
         built++
@@ -282,8 +311,8 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
     } else {
       for (let attempt = 0; attempt < 30 && !chosen; attempt++) {
         let b: { legs: Choice[]; backtracks: number } | null = null
-        if (config.rule === 'random') b = buildSlip(gi => shuffled(gi, rng, 'random'))
-        else if (config.rule === 'weighted') b = buildSlip(gi => weighted(gi, rng))
+        if (config.rule === 'random') b = buildSlip(gi => shuffled(gi, rng, 'random'), rng)
+        else if (config.rule === 'weighted') b = buildSlip(gi => weighted(gi, rng), rng)
         else {
           // flip: slip 1 random; afterwards prefer the flip of the previous slip's pick at this game
           const prev = slips[slips.length - 1]
@@ -294,7 +323,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
             const flip = rest.find(o => o.s.key === prevLeg.selection.flipKey)
             if (!flip) return rest
             return [{ ...flip, why: `flip of slip ${prev!.slipId}'s "${prevLeg.selection.name}" → ${flip.s.name} @${flip.s.odds}` }, ...rest.filter(o => o !== flip)]
-          })
+          }, rng)
         }
         if (b && !seen.has(keyOf(b.legs))) chosen = finalize(b, k + 1, `${config.rule}${attempt ? ` (attempt ${attempt + 1} — earlier attempts duplicated a slip or missed the band)` : ''}`)
       }
