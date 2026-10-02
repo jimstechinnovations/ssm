@@ -158,7 +158,10 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
   if (floorShare > 0) {
     const jackpotGames = new Set(result.slips.flatMap(s => s.legs.map(l => result.games[l.game].fixtureId)))
     const panelP = (_g: SelectionGame, s: Selection) => s.sharp && s.sharp.n >= 2 && s.sharp.spread <= 0.04 ? s.sharp.p : s.probability
-    const fl = buildFloor(pool, { budget: o.budget - jackpotBudget, stake, avoidFixtures: jackpotGames, probOf: panelP })
+    // floor tickets at the book's MINIMUM stake (₦10), whatever the jackpot stake: more, smaller tickets
+    // spread the floor over more games, so the money back is steadier
+    const floorStake = adapter.minStake
+    const fl = buildFloor(pool, { budget: o.budget - jackpotBudget, stake: floorStake, avoidFixtures: jackpotGames, probOf: panelP })
     let id = slips.length
     for (const t of fl.tickets) {
       const legs: PedlasLeg[] = t.legs.map(l => {
@@ -173,7 +176,7 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
       })
       slips.push({
         slipId: ++id, vector: [], legs, legCount: legs.length, combinedOdds: t.odds, trueProb: t.pWin,
-        boostPct: 0, stake, payout: t.payout, uncappedPayout: t.payout, capped: false, evMultiple: t.key, rankScore: 0,
+        boostPct: 0, stake: floorStake, payout: t.payout, uncappedPayout: t.payout, capped: false, evMultiple: t.key, rankScore: 0,
         decision: { engine: 'floor', product: 'flexi', k: t.k, n: t.n, flexiOdds: t.odds, key: t.key, pWin: t.pWin, why: t.why },
       })
     }

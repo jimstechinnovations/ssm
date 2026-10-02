@@ -44,6 +44,7 @@ export default function NewSessionPage() {
   const [bandPct, setBandPct] = useState(1)
   const [allowSubMin, setAllowSubMin] = useState(true)
   const [seed, setSeed] = useState<number | ''>('')
+  const [stakeIn, setStakeIn] = useState<number | ''>('')   // stake per jackpot slip; blank = the book's minimum
   const [floorShare, setFloorShare] = useState(0)   // share of the budget on floor tickets (docs/near-miss-design.md)
   const [building, setBuilding] = useState(false)
   const [result, setResult] = useState<SessionResult | null>(null)
@@ -60,8 +61,9 @@ export default function NewSessionPage() {
     })()
   }, [])
 
-  const minStake = Math.max(1, ...books.filter(b => selected.includes(b.bookId)).map(b => b.minStake))
-  const slips = Math.floor(budget / minStake)
+  const bookMin = Math.max(1, ...books.filter(b => selected.includes(b.bookId)).map(b => b.minStake))
+  const minStake = Math.max(bookMin, Number(stakeIn) || 0)
+  const slips = Math.floor(budget * (1 - (engine === 'decision_bot' ? floorShare : 0)) / minStake)
   const runMin = Math.ceil((slips * 20) / 60)
   const autoWindow = Math.max(60, runMin + 75)
   const multiple = target / Math.max(1, minStake)
@@ -75,6 +77,7 @@ export default function NewSessionPage() {
       if (maxDays) body.max_window_days = maxDays
       if (skipFriendlies) body.exclude_leagues = ['friendl']
       body.engine = engine
+      if (stakeIn) body.min_stake = minStake
       // skip + an 8-leg cap: fewer, higher-odds legs from the whole day (benched +26% win chance, 2026-10-01)
       if (engine === 'decision_bot') { body.rule = rule; body.band_pct = bandPct; body.allow_sub_min_legs = allowSubMin; body.skip = true; body.max_legs = 8; body.floor_share = floorShare; if (seed !== '') body.seed = seed }
       const r = await fetch('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
@@ -131,11 +134,14 @@ export default function NewSessionPage() {
                 </button>
               ))}
             </div>
-            <div className="grid grid-cols-2 gap-4">
-              <Field label="Budget (₦)" hint={`${slips.toLocaleString()} slips of ${naira(minStake)}`}>
+            <div className="grid grid-cols-1 gap-4 sm:grid-cols-3">
+              <Field label="Budget (₦)" hint={`${slips.toLocaleString()} jackpot slip${slips === 1 ? '' : 's'} of ${naira(minStake)}${floorShare && engine === 'decision_bot' ? ` + floor ${naira(budget * floorShare)}` : ''}`}>
                 <input type="number" min={10} step={100} value={budget} onChange={e => setBudget(+e.target.value)} className={inputCls} />
               </Field>
-              <Field label="Target win per slip (₦)" hint={`${Math.round(multiple).toLocaleString()}× the stake`}>
+              <Field label="Stake per slip (₦)" hint={`Blank = ${naira(bookMin)}. A bigger stake needs fewer, cheaper legs for the same target — more back per ₦1.`}>
+                <input type="number" min={bookMin} step={10} value={stakeIn} placeholder={String(bookMin)} onChange={e => setStakeIn(e.target.value === '' ? '' : +e.target.value)} className={inputCls} />
+              </Field>
+              <Field label="Target win per slip (₦)" hint={`${Math.round(multiple).toLocaleString()}× the stake${multiple > 2000 ? ' — a very long shot: expect a big bookmaker margin' : ''}`}>
                 <input type="number" min={100} step={10000} value={target} onChange={e => setTarget(+e.target.value)} className={inputCls} />
               </Field>
             </div>
