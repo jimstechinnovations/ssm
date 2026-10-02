@@ -23,14 +23,22 @@ export const ago = (iso: string) => {
 export const kickoff = (iso: string) => new Date(iso).toLocaleString([], { weekday: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })
 
 // ── layout ─────────────────────────────────────────────────────────────────────
-export function Page({ children, wide }: { children: React.ReactNode; wide?: boolean }) {
-  return <div className={cx('mx-auto w-full px-4 pb-16 pt-6 sm:px-6 sm:pt-8', wide ? 'max-w-6xl' : 'max-w-5xl')}>{children}</div>
+/** Every page sits in the same column as the top navigation (max-w-6xl), so nothing floats outside it.
+ *  `wide` is kept for old callers; it no longer changes the width. */
+export function Page({ children }: { children: React.ReactNode; wide?: boolean }) {
+  return <div className="mx-auto w-full max-w-6xl px-4 pb-16 pt-6 sm:px-6 sm:pt-8">{children}</div>
 }
 
-export function PageHeader({ title, subtitle, actions, back, badge }: { title: React.ReactNode; subtitle?: React.ReactNode; actions?: React.ReactNode; back?: { href: string; label: string }; badge?: React.ReactNode }) {
+export function PageHeader({ title, subtitle, actions, back, badge }: { title: React.ReactNode; subtitle?: React.ReactNode; actions?: React.ReactNode; back?: { href: string; label: string; current?: string }; badge?: React.ReactNode }) {
   return (
     <header className="mb-6">
-      {back && <a href={back.href} className="mb-2 inline-flex items-center gap-1 text-sm text-zinc-500 hover:text-zinc-900 dark:hover:text-zinc-200">← {back.label}</a>}
+      {back && (
+        <nav aria-label="Breadcrumb" className="mb-2 flex items-center gap-1.5 text-sm text-zinc-500">
+          <a href={back.href} className="hover:text-zinc-900 dark:hover:text-zinc-200">{back.label}</a>
+          <span aria-hidden className="text-zinc-300 dark:text-zinc-600">/</span>
+          <span className="text-zinc-700 dark:text-zinc-300">{typeof title === 'string' ? title : back.current ?? ''}</span>
+        </nav>
+      )}
       <div className="flex flex-wrap items-start gap-3">
         <div className="min-w-0 flex-1">
           <div className="flex flex-wrap items-center gap-2">

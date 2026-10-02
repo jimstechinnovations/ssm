@@ -1,7 +1,7 @@
 'use client'
 
-/** Global top navigation — full links on desktop, a menu on mobile (the bar never overflows).
- *  Four places, in the order you use them: see sessions → build one → check results → settings. */
+/** Global top navigation. Three places (Sessions, Bets, Settings) and ONE primary action (New session),
+ *  in the same column as every page. On mobile the places fold into a menu; the action stays visible. */
 import React, { useState } from 'react'
 import Link from 'next/link'
 import { usePathname } from 'next/navigation'
@@ -9,15 +9,15 @@ import { Plus, Bolt, Menu, XMark } from '@/components/Icons'
 
 const links = [
   { href: '/', label: 'Sessions' },
-  { href: '/bet-manager', label: 'New session' },
-  { href: '/placements', label: 'Results' },
-  { href: '/config', label: 'Settings' },
+  { href: '/bets', label: 'Bets' },
+  { href: '/settings', label: 'Settings' },
 ]
 
 export default function TopNav() {
   const path = usePathname() || '/'
   const [open, setOpen] = useState(false)
-  const active = (href: string) => href === '/' ? path === '/' || path.startsWith('/sessions') : path.startsWith(href)
+  const creating = path === '/sessions/new'
+  const active = (href: string) => href === '/' ? (path === '/' || path.startsWith('/sessions/')) && !creating : path.startsWith(href)
   const linkCls = (href: string) => `rounded-lg px-3 py-1.5 text-sm font-medium transition-colors ${active(href)
     ? 'bg-zinc-900/[0.06] text-zinc-900 dark:bg-white/10 dark:text-white'
     : 'text-zinc-500 hover:text-zinc-900 dark:text-zinc-400 dark:hover:text-zinc-100'}`
@@ -30,21 +30,25 @@ export default function TopNav() {
           PEDLA
         </Link>
 
-        <nav className="ml-4 hidden items-center gap-0.5 sm:flex">
-          {links.map(l => <Link key={l.href} href={l.href} className={linkCls(l.href)}>{l.label}</Link>)}
+        <nav aria-label="Main" className="ml-4 hidden items-center gap-0.5 sm:flex">
+          {links.map(l => <Link key={l.href} href={l.href} aria-current={active(l.href) ? 'page' : undefined} className={linkCls(l.href)}>{l.label}</Link>)}
         </nav>
-        <Link href="/bet-manager" className="ml-auto hidden h-8 items-center gap-1 whitespace-nowrap rounded-lg bg-zinc-900 px-3 text-sm font-medium text-white hover:bg-zinc-700 sm:inline-flex dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200">
-          <Plus className="h-4 w-4" /> New session
+
+        <Link href="/sessions/new" aria-current={creating ? 'page' : undefined}
+          className={`ml-auto inline-flex h-8 items-center gap-1 whitespace-nowrap rounded-lg px-3 text-sm font-medium transition-colors ${creating
+            ? 'bg-zinc-900/[0.06] text-zinc-900 dark:bg-white/10 dark:text-white'
+            : 'bg-zinc-900 text-white hover:bg-zinc-700 dark:bg-white dark:text-zinc-900 dark:hover:bg-zinc-200'}`}>
+          <Plus className="h-4 w-4" /> <span className="hidden sm:inline">New session</span><span className="sm:hidden">New</span>
         </Link>
 
         <button onClick={() => setOpen(o => !o)} aria-label="Menu" aria-expanded={open}
-          className="ml-auto inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-300 text-zinc-700 hover:bg-zinc-100 sm:hidden dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800">
+          className="inline-flex h-9 w-9 items-center justify-center rounded-lg border border-zinc-300 text-zinc-700 hover:bg-zinc-100 sm:hidden dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800">
           {open ? <XMark className="h-5 w-5" /> : <Menu className="h-5 w-5" />}
         </button>
       </div>
 
       {open && (
-        <nav className="border-t border-zinc-200 bg-white sm:hidden dark:border-zinc-800 dark:bg-zinc-950">
+        <nav aria-label="Main" className="border-t border-zinc-200 bg-white sm:hidden dark:border-zinc-800 dark:bg-zinc-950">
           <div className="mx-auto flex max-w-6xl flex-col gap-1 px-4 py-2">
             {links.map(l => <Link key={l.href} href={l.href} onClick={() => setOpen(false)} className={linkCls(l.href)}>{l.label}</Link>)}
           </div>

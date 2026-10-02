@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * app/config/page.tsx — per-book configuration (server-side CRUD via /api/config).
+ * app/settings/page.tsx — per-book configuration (server-side CRUD via /api/config).
  * Each book is saved independently (upsert). You can add a config-only book now and wire its
  * feed/placement adapter later. Credentials are env vars only — shown as set/missing, never values.
  */
@@ -217,7 +217,7 @@ function BrowserPanel() {
       <span className="text-xs text-zinc-600 dark:text-zinc-400">
         {st == null ? 'checking…' : st.up ? `up · ${st.loggedIn ? 'logged in' : 'not logged in'} · ${st.mode ?? '—'} · ${naira(st.balance)}` : 'down'}
       </span>
-      <div className="ml-auto flex gap-2">
+      <div className="ml-auto flex flex-wrap justify-end gap-2">
         <button onClick={refresh} className="rounded-lg border border-zinc-300 px-3 py-1.5 text-xs font-medium text-zinc-700 hover:bg-zinc-100 dark:border-zinc-600 dark:text-zinc-300 dark:hover:bg-zinc-800">Refresh</button>
         <button onClick={launch} disabled={busy || st?.up} className="inline-flex items-center gap-1.5 rounded-lg bg-zinc-900 px-3 py-1.5 text-xs font-semibold text-white hover:bg-zinc-700 disabled:opacity-50 dark:bg-zinc-100 dark:text-zinc-900 dark:hover:bg-zinc-300">
           {busy && <Spinner className="h-3.5 w-3.5" />}{busy ? 'Launching…' : st?.up ? 'Running' : 'Launch browser'}

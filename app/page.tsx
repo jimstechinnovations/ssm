@@ -56,8 +56,7 @@ export default function Sessions() {
   return (
     <Page>
       <PageHeader title="Sessions"
-        subtitle="Each session spreads a budget across many slips so that at least one may land the target. Every slip is priced by the bookmaker — the numbers here are honest, not a promise."
-        actions={<LinkButton href="/bet-manager" variant="primary"><Plus className="h-4 w-4" /> New session</LinkButton>} />
+        subtitle="Each session spreads a budget across many slips so that at least one may land the target. Every slip is priced by the bookmaker — the numbers here are honest, not a promise." />
 
       <div className="mb-8 grid grid-cols-2 gap-3 lg:grid-cols-4">
         <Stat label="Slips placed (real)" value={tot.placed.toLocaleString()} />
@@ -69,7 +68,7 @@ export default function Sessions() {
       {loading && <div className="space-y-3">{[0, 1, 2].map(i => <div key={i} className="h-24 animate-pulse rounded-2xl bg-zinc-100 dark:bg-zinc-900" />)}</div>}
       {!loading && err && <Empty title="Can't reach the database">The app couldn&apos;t load sessions. If the Supabase project is paused, restore it from the Supabase dashboard, then refresh.</Empty>}
       {!loading && !err && sessions.length === 0 && (
-        <Empty title="No sessions yet" action={<LinkButton href="/bet-manager" variant="primary">Build your first session</LinkButton>}>
+        <Empty title="No sessions yet" action={<LinkButton href="/sessions/new" variant="primary"><Plus className="h-4 w-4" /> Build your first session</LinkButton>}>
           Pick a budget and a target — the builder works out the slips, you review the honest odds, then place.
         </Empty>
       )}

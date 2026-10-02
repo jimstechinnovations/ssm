@@ -28,7 +28,7 @@ interface Coverage {
   site: null | { error?: string; openOnAccount?: number; openInFamily?: number; aliveHereSettledOnSite?: string[]; openOnSiteDeadHere?: string[]; openNotInFamily?: number }
 }
 
-const hm = (iso: string) => iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }) : ''
+const hm = (iso: string) => iso ? new Date(iso).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit', hour12: false }) : ''   // 24h: fits the narrow column on phones
 
 export function CoverageTab({ code }: { code: string }) {
   const [c, setC] = useState<Coverage | null>(null)
@@ -56,7 +56,7 @@ export function CoverageTab({ code }: { code: string }) {
           <input type="checkbox" checked={combine} onChange={e => setCombine(e.target.checked)} />
           Include every session from the same day ({c.sessions.length} now)
         </label>
-        <div className="flex gap-2">
+        <div className="flex flex-wrap gap-2">
           {live && <Button size="sm" onClick={() => void load(true)} loading={busy === 'site'}>Check SportyBet</Button>}
           <Button size="sm" onClick={() => void load()} loading={busy === 'load'} icon={<Refresh className="h-3.5 w-3.5" />}>Refresh</Button>
         </div>

@@ -13,8 +13,8 @@
  * the shorter-combo reconciliation when a game was dropped, else the built number (labelled).
  */
 
-import React, { useEffect, useState, useCallback } from 'react'
-import { useParams } from 'next/navigation'
+import React, { Suspense, useEffect, useState, useCallback } from 'react'
+import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Copy, Check, Spinner, Download, Refresh, Play, StopIcon } from '@/components/Icons'
 import { TotalsChart } from '@/components/TotalsChart'
 import { CoverageTab } from '@/components/CoverageTab'
@@ -39,10 +39,18 @@ interface SlipDetail { slipId: number; status: string; stake: number; combinedOd
 
 const HEARTBEAT_STALE_MS = 25_000
 const PAGE = 50
-type Tab = 'slips' | 'games' | 'results' | 'coverage' | 'risk'
+type Tab = 'slips' | 'games' | 'survival' | 'risk'
+const TABS: Tab[] = ['slips', 'games', 'survival', 'risk']
 
-export default function SessionPage() {
+// useSearchParams needs a Suspense boundary (Next 16: required for production builds)
+export default function SessionPageRoute() {
+  return <Suspense fallback={<Page><div className="flex min-h-[40vh] items-center justify-center gap-2 text-sm text-zinc-500"><Spinner /> Loading…</div></Page>}><SessionPage /></Suspense>
+}
+
+function SessionPage() {
   const code = String(useParams().code)
+  const router = useRouter()
+  const search = useSearchParams()
   const [session, setSession] = useState<Session | null>(null)
   const [slips, setSlips] = useState<Slip[]>([])
   const [summary, setSummary] = useState<Summary | null>(null)
@@ -50,7 +58,11 @@ export default function SessionPage() {
   const [msg, setMsg] = useState<{ text: string; tone: 'ok' | 'warn' | 'info' | 'error' } | null>(null)
   const [busy, setBusy] = useState<null | 'dry' | 'live' | 'stop' | 'clone' | 'prep' | 'settle' | 'reconcile'>(null)
   const [copied, setCopied] = useState<string | null>(null)
-  const [tab, setTab] = useState<Tab>('slips')
+  // the tab lives in the URL (?tab=survival): it survives a refresh, can be shared, and Back works.
+  // Old names (results, coverage) land on Survival, which merged them.
+  const rawTab = search.get('tab')
+  const tab: Tab = rawTab === 'results' || rawTab === 'coverage' ? 'survival' : TABS.includes(rawTab as Tab) ? rawTab as Tab : 'slips'
+  const setTab = (t: Tab) => router.replace(t === 'slips' ? `/sessions/${code}` : `/sessions/${code}?tab=${t}`, { scroll: false })
   const [slipView, setSlipView] = useState<null | { slipId: number; loading: boolean; data?: SlipDetail }>(null)
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
@@ -170,7 +182,7 @@ export default function SessionPage() {
 
   return (
     <Page>
-      <PageHeader back={{ href: '/', label: 'Sessions' }}
+      <PageHeader back={{ href: '/', label: 'Sessions', current: session.code }}
         title={<span className="font-mono">{session.code}</span>}
         badge={<StatusBadge status={stageKey} />}
         subtitle={<>{session.bookIds.join(', ')} · games {session.dateFrom}{session.dateTo !== session.dateFrom ? ` → ${session.dateTo}` : ''} · built {ago(session.createdAt)}</>}
@@ -217,7 +229,7 @@ export default function SessionPage() {
             {running || stopping ? (
               <div className="flex flex-wrap items-center gap-3">
                 <span className="inline-flex items-center gap-2 text-sm font-medium text-zinc-800 dark:text-zinc-200"><Spinner /> {stopping ? 'Stopping after the current slip…' : `Placing — ${pending} to go`}</span>
-                <div className="ml-auto flex gap-2">
+                <div className="ml-auto flex flex-wrap justify-end gap-2">
                   {!stopping && <WindowsPicker value={windows} onChange={setWindows} pending={pending} />}
                   {!stopping && <FloorPicker value={floorPct} onChange={setFloorPct} />}
                   {!stopping && <Button onClick={() => place(true, true)} loading={busy === 'live'} disabled={busy != null || !liveReady} title={liveReady ? 'Place from this PC too — the shared queue prevents double placing' : 'Prepare this PC\'s browser first'}>Add this PC</Button>}
@@ -248,7 +260,7 @@ export default function SessionPage() {
             ) : placed > 0 ? (
               <div className="flex flex-wrap items-center gap-2">
                 <span className="text-sm text-zinc-700 dark:text-zinc-300">{summary.open > 0 ? 'All slips are placed. Check results as games finish — slips settle the moment one leg is decided.' : 'Every placed slip is settled.'}</span>
-                <div className="ml-auto flex gap-2">
+                <div className="ml-auto flex flex-wrap justify-end gap-2">
                   <Button onClick={reconcile} loading={busy === 'reconcile'} icon={<Refresh className="h-3.5 w-3.5" />}>Check suspended games</Button>
                   <Button variant="primary" onClick={settle} loading={busy === 'settle'} icon={<Check className="h-3.5 w-3.5" />}>Check results</Button>
                 </div>
@@ -266,15 +278,13 @@ export default function SessionPage() {
       <Tabs value={tab} onChange={setTab} tabs={[
         { id: 'slips', label: 'Slips', count: summary.slips || slipTotal },
         { id: 'games', label: 'Games', count: session.poolSize ?? undefined },
-        { id: 'results', label: 'Results' },
-        { id: 'coverage', label: 'Coverage' },
+        { id: 'survival', label: 'Survival' },
         { id: 'risk', label: 'Risk' },
       ]} />
       <div className="mt-4">
         {tab === 'slips' && <SlipsTab slips={slips} summary={summary} total={total} page={page} setPage={setPage} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} sort={sort} setSort={setSort} onOpen={openSlip} onCopy={copy} copied={copied} />}
         {tab === 'games' && <GamesTab code={code} />}
-        {tab === 'results' && <ResultsTab code={code} placed={placed} />}
-        {tab === 'coverage' && <CoverageTab code={code} />}
+        {tab === 'survival' && <div className="space-y-6"><CoverageTab code={code} />{placed > 0 && <ResultsTab code={code} placed={placed} />}</div>}
         {tab === 'risk' && <RiskTab code={code} cutRisk={meta?.cutRisk ?? null} note={meta?.note} stress={meta?.pAnyWinCorrelated} headline={session.meta?.pAnyWin} bot={meta?.engine === 'decision_bot' ? meta : undefined} />}
       </div>
 

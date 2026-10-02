@@ -1,7 +1,7 @@
 'use client'
 
 /**
- * app/placements/page.tsx — the money ledger.
+ * app/bets/page.tsx — Bets: the money ledger.
  *
  * What actually got placed (as the BOOKMAKER confirmed it), with the booking code and bet id
  * that tie our engine to the book, per-leg live progress against real scores, auto-settlement,
@@ -119,7 +119,7 @@ export default function PlacementsPage() {
 
   return (
     <Page wide>
-      <PageHeader title="Results"
+      <PageHeader title="Bets"
         subtitle={<>Every real slip, as the <strong>bookmaker</strong> confirmed it — with its booking code, the amounts the site accepted, and the final scores.</>}
         actions={<Button variant="primary" onClick={autoSettle} loading={busy === 'settle'} icon={<Refresh className="h-4 w-4" />}>Settle finished games</Button>} />
 

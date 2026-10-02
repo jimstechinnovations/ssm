@@ -22,7 +22,7 @@ placement bot can queue the slips (live placement is env-gated). See [pedla_v1.m
 
 ## Layout
 
-- `app/` — the UI: Sessions (`/`), New session (`/bet-manager`), session page (`/sessions/[code]`), Results (`/placements`), Settings (`/config`); shared kit in `components/ui.tsx`
+- `app/` — the UI: Sessions (`/`), New session (`/sessions/new`), session page (`/sessions/[code]`, tabs Slips · Games · Survival · Risk in `?tab=`), Bets (`/bets`), Settings (`/settings`); old URLs redirect (`next.config.ts`); shared kit in `components/ui.tsx`
 - `app/api/pedlas/` — build + persisted-books + history-sync routes
 - `lib/pedlas/` — the engine (market select, enrich, quality, build, rank, budget, boost, …)
 - `lib/betway/` — Betway feed scraper (Playwright)

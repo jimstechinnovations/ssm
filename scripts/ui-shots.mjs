@@ -8,10 +8,10 @@ mkdirSync(OUT, { recursive: true })
 
 const pages = [
   ['dashboard', '/'],
-  ['bet-manager', '/bet-manager'],
-  ['config', '/config'],
+  ['new-session', '/sessions/new'],
+  ['settings', '/settings'],
   ['session', '/sessions/S-03CFC8'],
-  ['reports', '/placements'],
+  ['bets', '/bets'],
   ['print', '/sessions/S-03CFC8/print'],
 ]
 const viewports = [['desktop', 1440, 900], ['mobile', 390, 844]]

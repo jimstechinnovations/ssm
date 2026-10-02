@@ -1,6 +1,6 @@
 'use client'
 /**
- * app/bet-manager/page.tsx — New session.
+ * app/sessions/new/page.tsx — New session.
  * Three inputs that matter (book, dates, budget → target); the engine computes everything else. The
  * right-hand panel shows what the budget buys BEFORE you build, and after building shows the honest
  * result: the modelled chance that ≥1 slip lands, and what the bookmaker's price keeps on average.
@@ -89,7 +89,7 @@ export default function NewSessionPage() {
 
   return (
     <Page>
-      <PageHeader title="New session" subtitle="Set the money. The builder picks the games, the markets and how many legs each slip needs to reach your target." />
+      <PageHeader back={{ href: '/', label: 'Sessions' }} title="New session" subtitle="Set the money. The builder picks the games, the markets and how many legs each slip needs to reach your target." />
 
       <div className="grid gap-5 lg:grid-cols-[1fr_320px]">
         <div className="space-y-5">
