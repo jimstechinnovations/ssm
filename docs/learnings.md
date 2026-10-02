@@ -119,6 +119,21 @@ Status as of 2026-10-02. What was built is described in `algorithm_v1.md` §0.5.
 
 ---
 
+### 2 Oct: why the count jumped 24 → 21 → 18 → 16, and what the chance does
+
+- **Two clocks.** Our settlement waits for full time; SportyBet settles a leg the moment it can't win
+  (El Dakhleya 1–1 in the first half killed an Under 1.5 and an Under 0.5 slip), and sometimes lags a
+  finished game. 21 was SportyBet mid-catch-up; 18 was our full-time count; 16 was both, once the
+  in-play kills were counted. The Coverage tab now shows both and matches every open bet to its slip.
+- **The chance moves both ways.** Each closed game raises P(≥ 1 win) if it goes our way and lowers it
+  if it cuts. On average it stays put. 1 Oct family: 4.8% before kickoff → 7.2% after CA Platense →
+  2.35% after Seattle → 2.3% on 2 Oct afternoon, with 16 alive.
+- **Tonight's survivors cluster.** Most live slips ride on two stories: "nobody scores" (Under 0.5 on
+  France–Italy, Belgium–Turkiye, Bosnia–Sweden) and away upsets. Five games are one-sided (cut every
+  slip on them ≥ 50% of the time). Visible before placing in the Coverage tab's plan mode.
+
+---
+
 ## Session log (add a row to this table after every run — newest last)
 
 | Date | Sessions | Slips | Legs graded | Leg hit / predicted | Alive / expected | Draw z (games) | Notes |

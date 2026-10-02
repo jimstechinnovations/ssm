@@ -17,6 +17,7 @@ import React, { useEffect, useState, useCallback } from 'react'
 import { useParams } from 'next/navigation'
 import { Copy, Check, Spinner, Download, Refresh, Play, StopIcon } from '@/components/Icons'
 import { TotalsChart } from '@/components/TotalsChart'
+import { CoverageTab } from '@/components/CoverageTab'
 import { Page, PageHeader, Card, Stat, Button, LinkButton, Banner, Badge, StatusBadge, Progress, Tabs, Modal, Empty, naira, pct, ago, kickoff, cx, STATUS, inputCls } from '@/components/ui'
 
 interface Actual { source: 'site' | 'reconciled' | 'built'; stake: number; odds: number; payout: number; legCount: number }
@@ -38,7 +39,7 @@ interface SlipDetail { slipId: number; status: string; stake: number; combinedOd
 
 const HEARTBEAT_STALE_MS = 25_000
 const PAGE = 50
-type Tab = 'slips' | 'games' | 'results' | 'risk'
+type Tab = 'slips' | 'games' | 'results' | 'coverage' | 'risk'
 
 export default function SessionPage() {
   const code = String(useParams().code)
@@ -266,12 +267,14 @@ export default function SessionPage() {
         { id: 'slips', label: 'Slips', count: summary.slips || slipTotal },
         { id: 'games', label: 'Games', count: session.poolSize ?? undefined },
         { id: 'results', label: 'Results' },
+        { id: 'coverage', label: 'Coverage' },
         { id: 'risk', label: 'Risk' },
       ]} />
       <div className="mt-4">
         {tab === 'slips' && <SlipsTab slips={slips} summary={summary} total={total} page={page} setPage={setPage} filter={filter} setFilter={setFilter} query={query} setQuery={setQuery} sort={sort} setSort={setSort} onOpen={openSlip} onCopy={copy} copied={copied} />}
         {tab === 'games' && <GamesTab code={code} />}
         {tab === 'results' && <ResultsTab code={code} placed={placed} />}
+        {tab === 'coverage' && <CoverageTab code={code} />}
         {tab === 'risk' && <RiskTab code={code} cutRisk={meta?.cutRisk ?? null} note={meta?.note} stress={meta?.pAnyWinCorrelated} headline={session.meta?.pAnyWin} bot={meta?.engine === 'decision_bot' ? meta : undefined} />}
       </div>
 

@@ -28,7 +28,12 @@ export async function fetchResult(fixtureId: number): Promise<GameResult | null>
     // A score we cannot read must NEVER settle as 0-0 (that would wrongly win every Under leg) —
     // treat it as not finished so the slip stays pending until a real score is available.
     if (score == null) return { finished: false, total: 0 }
-    return { finished, total: score[0] + score[1], home: score[0], away: score[1] }
+    // In play: the clock is running (playedSeconds "37:57") or the status names a period (H1/HT/H2/ET).
+    // Before kick-off productStatus already reads "0#0", so a score alone doesn't mean the game started.
+    const played = /^(\d+):\d+/.exec(String(d.playedSeconds ?? ''))
+    const inPlay = !finished && ((played != null && Number(played[1]) > 0) || /^(H1|H2|HT|ET|1st|2nd|half|pause|extra|penalt)/i.test(d.matchStatus || ''))
+    const minute = inPlay ? (/^HT|half|pause/i.test(d.matchStatus || '') ? 45 : played ? Number(played[1]) : 45) : undefined
+    return { finished, total: score[0] + score[1], home: score[0], away: score[1], ...(inPlay ? { live: true, minute } : {}) }
   } catch { return null }
 }
 

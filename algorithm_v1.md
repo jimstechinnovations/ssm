@@ -1,7 +1,8 @@
 # algorithm_v1 — the Decision Bot (target-driven, multi-market, logged)
 
 > Status: **BUILT (2026-09-25)** and the default engine; see [§0](#0-what-was-built-and-verified). Changes
-> after the first real-money runs (2026-10-02) are in [§0.5](#05-changes-after-real-money-2026-10-02). §1–§8
+> after the first real-money runs (2026-10-02) are in [§0.5](#05-changes-after-real-money-2026-10-02). The
+> Coverage tab (survivors, both ways, slips and budget) is [§0.6](#06-coverage-survivors-both-ways-slips-and-budget-2026-10-02). §1–§8
 > below are the original spec, kept as written, with corrections marked **[corrected]**. The worked
 > example is reproducible: `node scripts/algorithm-v1-example.mjs 10 200 5 7` (read-only; nothing placed).
 
@@ -123,6 +124,48 @@ returns in expectation. A leg under 1.20 is flagged because it earns no bonus.
   them: a small gap from one bench. Re-bench before changing it.
 - **The honest ceiling.** P(≥1 win) ≤ keep × budget ÷ target still holds. None of these changes beats it.
   They only stop us falling further below it.
+
+---
+
+## 0.6 Coverage: survivors, both ways, slips and budget (2026-10-02)
+
+The session page has a **Coverage** tab (`components/CoverageTab.tsx`, `GET /api/sessions/[id]/coverage`,
+maths in `lib/pedlas/survivors.ts`). It answers "do we have enough survivors for at least one to land?"
+before placing (plan mode) and while the games run (live mode). By default it combines every session from
+the same day, because one budget is often split across sessions.
+
+**How it works.** Each game's scoreline table is rebuilt from the probabilities the legs were priced at.
+Every distinct pick on the game is fitted (iterative proportional fitting) to its stored P, so picks on
+the same game stay correlated as the book prices them. Games are independent of each other. Then it
+simulates. Two passes use the same tables:
+
+- **Now:** finished games settle legs. Games **in play** kill a leg as soon as no final score can win it
+  (an Under 0.5 dies at the first goal), as SportyBet does. The remaining games are simulated over the
+  slips still alive.
+- **Plan:** every game not started, over the whole family. This is what the family was worth before
+  kickoff. Budget answers come from this pass, because a slip that already survived six games is worth
+  far more than a fresh one. Pricing new slips off survivors would overstate them about 9×.
+
+**What it shows.**
+
+| Question | Shown as |
+|---|---|
+| How many are really alive? | Alive now (full time + in-play kills). **Check SportyBet** reads the account's open bets (`realbetlist?isSettled=0`) and matches each to our slip by its exact selections. On 2 Oct: 16 alive here, 16 open on the site, all 16 matched. |
+| Both ways, per game | Picks riding on the game; the chance it cuts every slip on it (**one-sided** at ≥ 50% with 2+ slips); for each likely score, the slips left on it and the chance of at least one win **after** that score. |
+| Does each closed game make it smaller or bigger? | **Both.** A game that goes our way removes its uncertainty, so the chance rises. A game that cuts slips lowers it. Averaged over all results, today's chance equals tomorrow's expected chance; there is no drift. The timeline shows each move (e.g. 2 Oct: CA Platense 1–0 took it from 3.6% to 7.2%; Seattle 2–1 then cut 4 slips and it fell to 2.35%). |
+| How deep does at least one survive? | P(≥ 1 slip alive) and expected survivors after each game; "survives the first K games with ≥ 90%". |
+| How many slips / what budget? | P(≥ 1 win) as slips are added (the curve), and the slips/budget for 5 / 10 / 25 / 50%. The floor column is the zero-overlap bound `goal × target ÷ (keep × stake)`. In live mode, the **top-up**: new slips on games not started that would lift today's chance to each goal. |
+
+**Measured on the 1 Oct family (299 slips at ₦51,000):** 4.66% before kickoff (the six builds' own
+figures add to 4.8%; the gap is overlap between sessions), keep 0.83, 95% of the summed chance
+survives overlap. To reach 10% from scratch: about 655 slips (₦6,550). The floor with zero overlap is
+618. Every line costs about budget × (1 − keep) on average: a bigger budget buys a bigger chance, never
+an edge.
+
+**What it does not do.** It doesn't change how the bot picks. The bot's objective is already P(≥ 1 win)
+with exact pairwise overlap. A one-sided game costs P only through overlap, which the objective already
+counts. The tab makes the trade visible before money goes in. Use it to choose the budget, and to rebuild
+when the plan shows one-sided early games.
 
 ---
 
