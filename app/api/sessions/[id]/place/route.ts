@@ -12,10 +12,11 @@
  * SportyBet's one-submit-at-a-time rule. Extra windows copy the main window's login. A window that isn't
  * ready (not logged in / looks like SIM) is left out; the run goes ahead on the others.
  *
- * `floorPct` (1-100, default 100): a payout that has drifted below the exact target since the build is
+ * `floorPct` (1-100, default 70): a payout that has drifted below the exact target since the build is
  * still placed, not skipped, as long as it's still at or above the HIGHER of floorPct% of the target and
  * the session's own budget — e.g. floorPct:50 places anything that still clears half the target (never
- * below budget). 100 (the default) reproduces the exact-target-or-skip behaviour.
+ * below budget). 100 reproduces the old exact-target-or-skip behaviour; 70 is the default because at 100
+ * odds drift between build and place skipped 46% of one run's slips (docs/learnings.md).
  */
 
 import { spawn } from 'node:child_process'
@@ -34,7 +35,7 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
 
   let live = false, join = false
   let requested: number | 'auto' = 'auto'
-  let floorPct = 100
+  let floorPct = 70
   try {
     const b = await request.json(); live = Boolean(b?.live); join = Boolean(b?.join)
     if (Number(b?.browsers) > 0) requested = Number(b.browsers)

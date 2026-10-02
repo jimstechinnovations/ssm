@@ -58,7 +58,7 @@ async function prep() {
   const browser = await chromium.connectOverCDP('http://127.0.0.1:9222')
   try {
     const ctx = browser.contexts()[0]
-    let page = ctx.pages().find(p => /sportybet\.com/.test(p.url()))
+    let page = ctx.pages().find(p => /sportybet\.com\/(?!robots\.txt)/.test(p.url()))
     if (!page) { page = await ctx.newPage(); await page.goto('https://www.sportybet.com/ng/', { waitUntil: 'domcontentloaded' }) }
     await page.reload({ waitUntil: 'domcontentloaded' }).catch(() => {})
     await page.waitForTimeout(3500)

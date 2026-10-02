@@ -37,10 +37,9 @@ export interface BotConfig {
   /** Exact bonus per ₦1 staked for a set of legs (SportyBet's live plan). Overrides `boost`. */
   bonusFn?: (sels: Selection[]) => number
   candidates?: number        // greedy: candidates built per slip
-  /** Wall-clock budget in ms (default 90_000). Node is single-threaded, so an API route calling this
-   *  SYNCHRONOUSLY blocks every other request on the server until it returns — proven live 2026-10-01:
-   *  skip mode on a fresh (uncached) live pool ran long enough to freeze the whole app for 10+ minutes.
-   *  Past the budget the build stops with whatever slips it has (never hangs) and a note says so. */
+  /** Wall-clock budget in ms (default 90_000). Past it the build stops with whatever slips it has (never
+   *  hangs) and a note says so. Servers should call runDecisionBotAsync (non-blocking) — the synchronous
+   *  runDecisionBot froze the whole Next server for 10+ minutes on 2026-10-01 (one JS thread). */
   deadlineMs?: number
   /** Let a slip SKIP games while walking them in order (default false = every slip uses games 1..k).
    *  With a leg cap (maxLegs), skipping lets each slip reach the target on fewer, higher-odds legs taken
@@ -95,7 +94,24 @@ export interface BotResult {
 function mulberry32(seed: number) { let s = seed >>> 0; return () => { s = (s + 0x6D2B79F5) | 0; let t = Math.imul(s ^ (s >>> 15), 1 | s); t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t; return ((t ^ (t >>> 14)) >>> 0) / 4294967296 } }
 const naira = (n: number) => '₦' + Math.round(n).toLocaleString('en-US')
 
+/** Build synchronously (tests, bench scripts). On a server use runDecisionBotAsync — see botSteps. */
 export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult {
+  const it = botSteps(inputGames, cfg)
+  for (;;) { const r = it.next(); if (r.done) return r.value }
+}
+
+/** Same build, but it hands the thread back between steps, so a long build never blocks the server.
+ *  Found live 2026-10-01: a synchronous build froze every request on the Next server for 10+ minutes
+ *  (Node has one JS thread), which is why builds had to be capped — and capping split one ₦2,000
+ *  budget into six mini-sessions. Non-blocking, a build can take the time it needs. */
+export async function runDecisionBotAsync(inputGames: BotGame[], cfg: BotConfig): Promise<BotResult> {
+  const it = botSteps(inputGames, cfg)
+  for (;;) { const r = it.next(); if (r.done) return r.value; await new Promise<void>(res => setImmediate(res)) }
+}
+
+/** The build as a generator: it yields between slips (and every 16 candidates, and during the final
+ *  simulation) so the caller decides whether to pause. Pure: no I/O. */
+function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotResult, void> {
   const config = {
     stake: cfg.stake, target: cfg.target, budget: cfg.budget,
     band: cfg.band ?? 0.01, rule: cfg.rule ?? 'greedy', allowSubMinLegs: cfg.allowSubMinLegs ?? true,
@@ -114,7 +130,8 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   // games — only those are calibrated and simulated. With skipping, every game in the window is usable.
   const games = orderGames(inputGames).filter(g => g.selections.length >= 2).slice(0, config.skip ? 80 : config.maxLegs)
   const tDiag0 = Date.now()
-  const tables: ScorelineTable[] = games.map(g => calibrateTable(g.selections))
+  const tables: ScorelineTable[] = []
+  for (const g of games) { tables.push(calibrateTable(g.selections)); yield }   // up to 80 calibrations — pause between them
   if (process.env.BOT_DIAG) console.log(`[decision-bot] calibrateTable x${games.length}: ${((Date.now() - tDiag0) / 1000).toFixed(1)}s`)
   const calibrationMaxError = tables.reduce((m, t) => Math.max(m, t.maxError), 0)
   const opts = games.map((g, gi) => g.selections
@@ -196,7 +213,11 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
     const nonQualifying = b.legs.length - qualifying
     return {
       slipId, combinedOdds: odds, bonusApplies: bonus > 0, bonus, payout: Math.round(pay * 100) / 100, pWin, keep: pWin * pay / config.stake,
-      legs: b.legs.map(l => ({ game: l.gi, fixtureId: games[l.gi].fixtureId, selection: l.s, p: l.p, why: `${l.why} · history: ${h2hWins(l.gi, l.s)}` })),
+      // Every leg states its own odds of surviving: P (calibrated), what it keeps after the book's margin
+      // (P × odds — below 1 is the vig), and whether it counts toward the bonus. History is cited last
+      // (format read by scripts/session-learnings.py — keep "history: x/y past meetings").
+      legs: b.legs.map(l => ({ game: l.gi, fixtureId: games[l.gi].fixtureId, selection: l.s, p: l.p,
+        why: `${l.why} · P ${(100 * l.p).toFixed(1)}%, keeps ${(l.p * l.s.odds).toFixed(3)}${l.s.odds < config.minLegOdds ? `, under ${config.minLegOdds} so no bonus` : ''} · history: ${h2hWins(l.gi, l.s)}` })),
       why: why + (b.backtracks ? ` · backtracked ${b.backtracks}×` : '') + ` · bonus ${(100 * bonus).toFixed(1)}% on ${qualifying} qualifying leg${qualifying === 1 ? '' : 's'}` + (nonQualifying ? ` (${nonQualifying} under ${config.minLegOdds} don't count)` : ''),
     }
   }
@@ -281,6 +302,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   const t0 = Date.now()
   let timedOut = false
   for (let k = 0; k < K && failures < 40; k++) {
+    yield
     if (Date.now() - t0 > config.deadlineMs) { timedOut = true; break }
     let chosen: BotSlip | null = null
     if (config.rule === 'greedy') {
@@ -294,7 +316,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
       const scale = all.length / Math.max(1, family.length)
       const familyMaps = family.map(f => new Map(f.map(l => [l.gi, l.s])))
       for (let c = 0; c < config.candidates * 3 && built < config.candidates; c++) {
-        if ((c & 15) === 0 && Date.now() - t0 > config.deadlineMs) { timedOut = true; break }   // checked every 16 candidates (Date.now() itself isn't free at this volume)
+        if ((c & 15) === 0) { yield; if (Date.now() - t0 > config.deadlineMs) { timedOut = true; break } }   // checked every 16 candidates (Date.now() itself isn't free at this volume)
         // Three candidate generators give greedy a diverse pool: uniform (ignores likelihood), weighted by
         // P (high survival, but drifts to low odds ⇒ more legs), and a FINGERPRINT SEPARATOR that, at each
         // game, prefers the pick that shares no scoreline with the earlier slips this candidate still
@@ -353,6 +375,7 @@ export function runDecisionBot(inputGames: BotGame[], cfg: BotConfig): BotResult
   const ev = simulate(ED, config.seed ^ 0xE7A1)
   let hits = 0
   for (let d = 0; d < ED; d++) {
+    if ((d & 1023) === 0) yield
     for (const s of slips) { if (s.legs.every(l => ruleWins(l.selection.rule, ev[l.game].h[d], ev[l.game].a[d]))) { hits++; break } }
   }
   const pSim = hits / ED

@@ -54,7 +54,7 @@ export default function SessionPage() {
   const [page, setPage] = useState(0)
   const [total, setTotal] = useState(0)
   const [windows, setWindows] = useState<'auto' | number>('auto')   // placement windows on this PC
-  const [floorPct, setFloorPct] = useState(100)   // place a drifted payout down to this % of target (never below budget)
+  const [floorPct, setFloorPct] = useState(70)    // place a drifted payout down to this % of target (never below budget) — 70 default: at 100, 46% of one run was skipped for drift (docs/learnings.md)
   const [workersSeen, setWorkersSeen] = useState<Worker[]>([])
   const [filter, setFilterRaw] = useState('all')
   const [query, setQueryRaw] = useState('')
@@ -397,7 +397,7 @@ function GamesTab({ code }: { code: string }) {
     setBusy(true); setNote(null)
     try {
       const j = await (await fetch(`/api/sessions/${code}/fetch-history`, { method: 'POST' })).json()
-      setNote(j.error ?? `Synced ${j.processed}/${j.games} games · ${j.withH2H} with head-to-head · ${j.rows} matches stored.${j.more ? ' Run again for the rest.' : ''}`)
+      setNote(j.error ?? `Synced ${j.processed}/${j.games} games · ${j.withH2H} with head-to-head · ${j.rows} matches stored.${j.requests?.blocked || j.requests?.failed ? ` ⚠ ${j.requests.blocked} request(s) blocked, ${j.requests.failed} failed — some history may be missing.` : ''}${j.more ? ' Run again for the rest.' : ''}`)
       await load()
     } catch { setNote('Could not fetch history (the debug Chrome must be running).') } finally { setBusy(false) }
   }
@@ -670,12 +670,13 @@ function WindowsPicker({ value, onChange, pending }: { value: 'auto' | number; o
 function FloorPicker({ value, onChange }: { value: number; onChange: (v: number) => void }) {
   return (
     <label className="inline-flex items-center gap-1.5 text-xs text-zinc-600 dark:text-zinc-400"
-      title="If the site's odds moved since the build, place anyway as long as the payout is still at least this % of target (and never below the session budget). 100% = only place at/above the exact target.">
+      title="If the site's odds moved since the build, place anyway as long as the payout is still at least this % of target (and never below the session budget). 100% = only place at/above the exact target. Default 70%.">
       Floor
       <select value={String(value)} onChange={e => onChange(Number(e.target.value))}
         className="rounded-md border border-zinc-300 bg-white px-1.5 py-1 text-xs dark:border-zinc-700 dark:bg-zinc-900">
         <option value="100">100% (exact target)</option>
         <option value="75">75% of target</option>
+        <option value="70">70% of target (default)</option>
         <option value="50">50% of target</option>
         <option value="25">25% of target</option>
       </select>

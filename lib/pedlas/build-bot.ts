@@ -1,14 +1,14 @@
 // lib/pedlas/build-bot.ts
-// Session builder for the Decision Bot: fetch every two-sided selection per game from the book, apply
-// the HISTORY gate (only games where both teams have recent form — h2h-informed-is-default), attach each
-// game's past meetings (cited in the decision log), run the bot, and turn its slips into stored legs that
-// carry the exact booking-code ids, the settlement rule and the reason for every pick. No persistence.
+// Session builder for the Decision Bot: fetch every two-sided selection per game from the book, attach
+// each game's recent form and past meetings (cited in the decision log — never a filter, see below), run
+// the bot without blocking the server, and turn its slips into stored legs that carry the exact
+// booking-code ids, the settlement rule and the reason for every pick. No persistence.
 
 import 'server-only'
 import type { BookAdapter } from '../books/types'
 import type { BoostFn } from './boost'
 import type { PedlasLeg, PedlasSlip } from './types'
-import { runDecisionBot, type BotGame, type BotRule, type BotResult } from './decision-bot'
+import { runDecisionBotAsync, type BotGame, type BotRule, type BotResult } from './decision-bot'
 import { orderGames } from './selections'
 import { getTeamRecent, getH2H } from './history-store'
 import { formFromMatchResults } from '../football-history/apifootball'
@@ -101,7 +101,7 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
   const tournamentOf = new Map(pool.flatMap(g => g.selections.map(sel => [sel, g.tournamentId] as const)))
   const bonusFn = plan ? (sels: Selection[]) => sportyBonus(sels.map(x => ({ odds: x.odds, probability: x.probability, margin: x.margin, tournamentId: tournamentOf.get(x) })), plan!).perStake : undefined
 
-  const result = runDecisionBot(pool, {
+  const result = await runDecisionBotAsync(pool, {   // non-blocking: the server keeps answering while it builds
     stake, target: o.target, budget: o.budget, band: o.band, rule: o.rule, allowSubMinLegs: o.allowSubMinLegs,
     seed: o.seed, boost: o.boost ?? adapter.boostFor, bonusFn, maxPayout: Math.min(o.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
     skip: o.skip, maxLegs: o.maxLegs, deadlineMs: o.deadlineMs,

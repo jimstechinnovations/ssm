@@ -27,7 +27,24 @@ try {
   page = await browser.contexts()[0].newPage()
   await page.goto('https://www.sofascore.com/', { waitUntil: 'domcontentloaded', timeout: 45000 }).catch(() => {})
   await page.waitForTimeout(3000)
-  const g = (u) => page.evaluate(async x => { try { const r = await fetch(x, { headers: { Accept: 'application/json' } }); return r.ok ? await r.json() : null } catch { return null } }, u)
+  // LOUD failures: a Sofascore block (403/429) used to read as "0 games found" — the history quietly vanished
+  // (2026-10-01). Every request is counted by outcome; the totals go in the RESULT, and once most requests
+  // are blocked/failing the run stops with an explicit error instead of syncing nothing.
+  const req = { ok: 0, notFound: 0, blocked: 0, failed: 0 }
+  const g = async (u) => {
+    const r = await page.evaluate(async x => { try { const r = await fetch(x, { headers: { Accept: 'application/json' } }); return { status: r.status, body: r.ok ? await r.json() : null } } catch (e) { return { status: 0, error: String(e) } } }, u).catch(e => ({ status: 0, error: e.message }))
+    if (r.status >= 200 && r.status < 300) req.ok++
+    else if (r.status === 404) req.notFound++
+    else if (r.status === 403 || r.status === 429) req.blocked++
+    else req.failed++
+    const n = req.ok + req.notFound + req.blocked + req.failed, bad = req.blocked + req.failed
+    if (n >= 12 && bad / n >= 0.6) {
+      const msg = req.blocked >= req.failed ? `Sofascore is blocking us (${req.blocked} of ${n} requests got 403/429) — wait ~15-30 min, then sync again` : `Sofascore unreachable (${req.failed} of ${n} requests failed${r.error ? `: ${String(r.error).slice(0, 80)}` : `, HTTP ${r.status}`})`
+      out({ error: msg, requests: req })
+      throw new Error(msg)
+    }
+    return r.body ?? null
+  }
   const idCache = new Map()
   const team = async (n) => { if (!idCache.has(n)) { const s = await g(`https://api.sofascore.com/api/v1/search/all?q=${encodeURIComponent(n)}`); const t = (s?.results || []).find(x => x.type === 'team')?.entity; idCache.set(n, t ? { id: t.id, name: t.name } : null) } return idCache.get(n) }
   const finished = async (id) => { const o = []; for (let p = 0; p < 2; p++) { const dd = await g(`https://api.sofascore.com/api/v1/team/${id}/events/last/${p}`); const ev = (dd?.events || []).filter(e => e.status?.type === 'finished' && e.homeScore?.current != null && e.awayScore?.current != null); o.push(...ev); if (!ev.length) break; await sleep(120) } return o }
@@ -53,5 +70,5 @@ try {
     await sleep(60)
   }
   const up = await fetch(`${BASE}/api/history/upsert`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ events: batch }) }).then(r => r.json()).catch(() => ({ rows: 0 }))
-  out({ games: games.length, processed, withH2H, withForm, rows: up.rows ?? 0 })
+  out({ games: games.length, processed, withH2H, withForm, rows: up.rows ?? 0, requests: req })
 } finally { await page?.close().catch(() => {}); await browser.close() }

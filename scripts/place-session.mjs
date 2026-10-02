@@ -54,13 +54,34 @@ for (const s of slips) for (const l of (s.legs ?? [])) {
 }
 const marketIds = [...new Set([...need.values()].flatMap(g => [...g.outcomes].map(k => k.split('|')[0])))]
 console.log(`pre-flight: checking ${need.size} game(s) × ${marketIds.length} market type(s) against the live feed…`)
+// The feed goes through the debug Chrome when it's up: SportyBet's edge drops a script's raw requests at
+// times (2026-10-01 — TLS fingerprint, not IP), and a tab parked on sportybet.com/robots.txt has a clean,
+// unwrapped native fetch (the same tab the app's cdp-fetch uses). The raw fetch is only the fallback.
+const portI = args.indexOf('--port')
+const CDP_PORT = portI >= 0 ? Number(args[portI + 1]) : 9222
+let feedTab = null
+async function feedJson(url) {
+  try {
+    if (!feedTab) {
+      const { chromium } = await import('playwright')
+      const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`, { timeout: 5000 })
+      const ctx = browser.contexts()[0]
+      let page = ctx.pages().find(pg => pg.url() === 'https://www.sportybet.com/robots.txt')
+      if (!page) { page = await ctx.newPage(); await page.goto('https://www.sportybet.com/robots.txt', { waitUntil: 'domcontentloaded', timeout: 20_000 }) }
+      feedTab = { browser, page }
+    }
+    const j = await feedTab.page.evaluate(async u => { const r = await fetch(u, { signal: AbortSignal.timeout(15_000) }); return r.ok ? r.json() : { httpStatus: r.status } }, url)
+    if (j?.data) return { j, via: 'browser' }
+  } catch { /* no browser up / tab gone → raw fetch below */ }
+  // the feed rejects requests without a full browser user-agent (HTTP 403)
+  const fr = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) }).catch(e => ({ error: e?.cause?.code || e?.message }))
+  const j = fr?.json ? await fr.json().catch(() => null) : null
+  return { j, via: 'raw', status: fr?.status ?? fr?.error ?? '—' }
+}
 const status = new Map()   // fixtureId → { upcoming, closed: n }
 for (let pg = 1; pg <= 10; pg++) {
-  // the feed rejects requests without a full browser user-agent (HTTP 403)
-  const fr = await fetch(`https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=${encodeURIComponent(marketIds.join(','))}&pageSize=100&pageNum=${pg}`,
-    { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' } }).catch(() => null)
-  const j = fr ? await fr.json().catch(() => null) : null
-  if (!j?.data?.tournaments) { if (pg === 1) console.error(`⚠ pre-flight: feed unreachable (HTTP ${fr?.status ?? '—'}) — continuing; the placer checks every slip on the betslip anyway`); break }
+  const { j, via, status: st } = await feedJson(`https://www.sportybet.com/api/ng/factsCenter/pcUpcomingEvents?sportId=sr%3Asport%3A1&marketId=${encodeURIComponent(marketIds.join(','))}&pageSize=100&pageNum=${pg}`)
+  if (!j?.data?.tournaments) { if (pg === 1) console.error(`⚠ pre-flight: feed unreachable (${via}${st ? `, ${st}` : ''}) — continuing; the placer checks every slip on the betslip anyway`); break }
   for (const t of j.data.tournaments) for (const ev of (t.events || [])) {
     const id = Number((ev.eventId || '').split(':').pop())
     const g = need.get(id); if (!g) continue
@@ -75,6 +96,7 @@ for (let pg = 1; pg <= 10; pg++) {
   }
   if (pg * 100 >= (j.data.totalNum ?? 0)) break
 }
+await feedTab?.browser.close().catch(() => {})   // disconnects only — the parked tab stays for reuse
 if (status.size) {
   const gone = [...need.entries()].filter(([id]) => !status.get(id)?.upcoming)
   const partly = [...need.entries()].filter(([id]) => status.get(id)?.upcoming && status.get(id).closed > 0)

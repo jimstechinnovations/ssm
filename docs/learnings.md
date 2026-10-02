@@ -89,27 +89,33 @@ the target band.
 
 | Problem | What happened | Status |
 |---|---|---|
-| Build time cap | 200-slip budget split into 6 mini-sessions: each build hit the 180 s cap at 30–79 slips | **Proposed:** run the build in a worker thread (not the server's main thread), then raise or remove the cap so one budget = one session |
-| Server froze during builds | The bot's search ran synchronously on Node's only thread and blocked every request | Fixed: wall-clock budget (`deadlineMs`). Worker thread above is the real fix |
-| SportyBet blocked server-side requests | TCP/TLS-level drop of non-browser clients after heavy automated use | Fixed for booking codes + odds feed via CDP (`lib/placement/cdp-fetch.ts`). **Still raw:** bonus plan (fell back to the stored table), results, pre-flight check |
-| Faro-wrapped `window.fetch` | SportyBet's monitoring SDK broke in-page requests | Fixed: clean fetch from a throwaway iframe |
-| Sofascore 403 on history sync | Sync script swallowed every error and reported 0 found | Open: make sync errors loud |
-| 46% skipped at floor 100% | Odds drift between build and place | Fixed: `floorPct` (70% default for big targets) + requeue |
+| Build time cap | 200-slip budget split into 6 mini-sessions: each build hit the 180 s cap at 30–79 slips | Fixed 2026-10-02: the build no longer blocks the server (below), so the cap is now 15 min. One budget should fit one session; not yet measured on a full 200-slip build |
+| Server froze during builds | The bot's search ran synchronously on Node's only thread and blocked every request | Fixed 2026-10-02: the bot is a generator that yields to the event loop (`runDecisionBotAsync`). Chosen over a worker thread: same effect, no serialization of the game tables |
+| SportyBet blocked server-side requests | TCP/TLS-level drop of non-browser clients after heavy automated use | Fixed: booking codes, odds feed, and (2026-10-02) bonus plan, results and the pre-flight check all go through CDP (`lib/placement/cdp-fetch.ts`, `scripts/place-session.mjs`) |
+| Faro-wrapped `window.fetch` | SportyBet's monitoring SDK broke in-page requests | Fixed: the placer uses a throwaway iframe's fetch; server fetches use one dedicated tab on `sportybet.com/robots.txt` (no scripts there, so fetch is native), never the placer's tab |
+| Sofascore 403 on history sync | Sync script swallowed every error and reported 0 found | Fixed 2026-10-02: every request is counted (ok / not found / blocked / failed) and reported; the sync stops with an explicit error once most requests fail |
+| 46% skipped at floor 100% | Odds drift between build and place | Fixed: `floorPct` + requeue. Default is now 70% in the UI, the place route and the placer CLI (2026-10-02) |
 | "Uncertain" slip | No success popup; the balance proved it placed | Works as designed (verify state). Balance math is the tiebreaker |
-| Leaked Chrome processes | 188 processes, 0.44 GB free RAM, everything slowed | Open: close CDP pages reliably; run fewer ad-hoc debug scripts against the live browser |
+| **No internet connection** (the 1 missed slip) | The connection dropped; the tab sat on a "No internet" page; every retry spent an attempt on a dead connection, the error page looked like a worker crash, respawns failed the same way, and the slip ran out of attempts | Fixed 2026-10-02: the placer detects the offline page (`chrome-error://`, `navigator.onLine`, ERR_INTERNET_DISCONNECTED, SportyBet's own notice), waits for the network, reloads, and re-runs the same slip without spending an attempt. It gives up after `--net-wait-min` (20) and leaves the slips queued. Detection was checked on a real offline tab |
+| Leaked Chrome processes | 188 processes, 0.44 GB free RAM, everything slowed | Fixed 2026-10-02: server fetches reuse one tab, and "Prepare browser" closes blank and duplicate fetch tabs (never a SportyBet page). Still: run fewer ad-hoc debug scripts against the live browser |
 
-## 5. Proposed changes for the next bot (in priority order, none built yet)
+## 5. Proposed changes for the next bot (in priority order)
 
-1. **Drop clean-sheet markets** (finding 2). Free keep.
-2. **Build in a worker thread, one session per budget** (operational 1).
+Status as of 2026-10-02. What was built is described in `algorithm_v1.md` §0.5.
+
+1. **Drop clean-sheet markets** (finding 2). Free keep. **Done**: `DROPPED_MARKETS` in
+   `lib/pedlas/selections.ts`, guarded by a test.
+2. **Build without blocking, one session per budget** (operational 1). **Done** (non-blocking generator,
+   15 min budget). Measure a full 200-slip build on the next run.
 3. **Route the bonus plan, results and pre-flight through CDP** too. The last runs priced bonus from the
-   fallback table.
-4. **Add P and keep to every leg's reason.** Today a reason reads "random pick (u=0.011) of 42: Home
-   over 2.5 @4.7 · history: 0/2". Add "P=31%, keeps 0.95", so each choice states its own odds of
-   surviving.
+   fallback table. **Done.** Check the next build's note says "live plan", not "fallback table".
+4. **Add P and keep to every leg's reason.** A reason used to read "random pick (u=0.011) of 42: Home
+   over 2.5 @4.7 · history: 0/2". **Done**: it now adds "P 21.0%, keeps 0.987", and flags a leg under
+   1.20 as earning no bonus.
 5. **Watch the draw lean** (finding 1). Rerun the script after each run; act only on the game-level test.
-6. **Bench `allow_sub_min_legs=false`.** Legs under 1.20 don't earn bonus, and an earlier bench measured
-   0.64% vs 0.60% P(≥1) without them.
+   **Open (watch only, by design).**
+6. **Bench `allow_sub_min_legs=false`.** Legs under 1.20 don't earn bonus. An earlier bench measured P(≥1)
+   at 0.64% without them against 0.60% with them. **Open**: re-bench before changing the default.
 
 ---
 

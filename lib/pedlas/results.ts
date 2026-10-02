@@ -1,10 +1,12 @@
 // lib/pedlas/results.ts
-// Final scores for SportyBet fixtures, by the SAME id our slips use (sr:match:N). Plain server fetch
-// (the factsCenter event endpoint isn't Cloudflare-gated) — no browser needed. total = home + away.
+// Final scores for SportyBet fixtures, by the SAME id our slips use (sr:match:N). Fetched through the debug
+// Chrome when one is up (cdpFetch — SportyBet's edge drops our raw server requests at times, 2026-10-01),
+// else a plain server fetch. total = home + away.
 // This is the ONE score source for every settlement path (session settle, Reports ledger, grading).
 
 import 'server-only'
 import type { GameResult } from './settle-slips'
+import { cdpFetch } from '../placement/cdp-fetch'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36'
 const FINISHED = /end|finish|\bft\b|full.?time|awarded|closed|\baet\b|\bap\b/i
@@ -17,9 +19,8 @@ function parseScore(...vals: (string | undefined)[]): [number, number] | null {
 
 export async function fetchResult(fixtureId: number): Promise<GameResult | null> {
   try {
-    const r = await fetch(`https://www.sportybet.com/api/ng/factsCenter/event?eventId=sr:match:${fixtureId}&productId=1`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, cache: 'no-store', signal: AbortSignal.timeout(8000) })
-    if (!r.ok) return null
-    const d = (await r.json())?.data as (Record<string, string> & { status?: number | string }) | undefined
+    const j = await cdpFetch<{ data?: unknown }>('https://www.sportybet.com', `/api/ng/factsCenter/event?eventId=sr:match:${fixtureId}&productId=1`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, timeoutMs: 8000 })
+    const d = j?.data as (Record<string, string> & { status?: number | string }) | undefined
     if (!d) return null
     // Either signal marks the end: the text status ("Ended"/"FT"/"AP"…) or numeric status 3/4.
     const finished = FINISHED.test(d.matchStatus || '') || (typeof d.status === 'string' && FINISHED.test(d.status)) || Number(d.status) === 3 || Number(d.status) === 4

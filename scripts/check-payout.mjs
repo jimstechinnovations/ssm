@@ -29,7 +29,7 @@ const code=share.data.shareCode
 console.log('booking code:', code, '(SportyBet accepted', legs.length, 'legs)')
 // 3. load in betslip + read payout
 const browser=await chromium.connectOverCDP('http://127.0.0.1:9222')
-const page=browser.contexts()[0].pages().find(p=>/sportybet/.test(p.url()))
+const page=browser.contexts()[0].pages().find(p=>/sportybet\.com\/(?!robots\.txt)/.test(p.url()))
 const dl=(rs)=>page.evaluate(s=>{const rx=new RegExp(s,'i');const e=[...document.querySelectorAll('span,div,a,button')].find(x=>x.children.length===0&&rx.test((x.textContent||'').trim())&&(x.offsetWidth||x.offsetHeight));if(e){e.click();return true}return false},rs)
 const okBtn=()=>page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap] [class*=dialog-btn]',{hasText:/^OK$/i}).first()
 // the betslip can load on the SIM view (no Booking Code box) — ensure the REAL view first

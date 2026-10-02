@@ -17,6 +17,7 @@
 // fetched live, never hard-coded.
 
 import 'server-only'
+import { cdpFetch } from '../placement/cdp-fetch'
 
 export interface SportyBonusPlan {
   planName: string
@@ -36,10 +37,10 @@ const TTL_MS = 10 * 60_000
 /** The live plan (cached 10 min). Throws if SportyBet can't be reached — callers fall back to a table. */
 export async function fetchSportyBonusPlan(): Promise<SportyBonusPlan> {
   if (cache && Date.now() - cache.fetchedAt < TTL_MS) return cache
-  const r = await fetch('https://www.sportybet.com/api/ng/promotion/v2/bonus/plans/valid', {
-    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' }, cache: 'no-store',
-  })
-  const j = await r.json() as { bizCode?: number; data?: { entityList?: Array<{ planName: string; qualifyingOddsLimit: number; factor: number; bonusRatios: { qualifyingSelections: number; min: number; max: number }[] }>; bonusFactorVOList?: Array<{ sportId?: string; tournamentId?: string; bonusFactor: number; isEnabled?: boolean; isDel?: boolean }> } }
+  // through the debug Chrome when one is up — SportyBet's edge drops our raw server requests at times
+  const j = await cdpFetch('https://www.sportybet.com', '/api/ng/promotion/v2/bonus/plans/valid', {
+    headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' },
+  }) as { bizCode?: number; data?: { entityList?: Array<{ planName: string; qualifyingOddsLimit: number; factor: number; bonusRatios: { qualifyingSelections: number; min: number; max: number }[] }>; bonusFactorVOList?: Array<{ sportId?: string; tournamentId?: string; bonusFactor: number; isEnabled?: boolean; isDel?: boolean }> } }
   const plan = j.data?.entityList?.[0]
   if (j.bizCode !== 10000 || !plan) throw new Error(`SportyBet bonus plan unavailable (bizCode ${j.bizCode})`)
   const sportFactor = new Map<string, number>(), tournamentFactor = new Map<string, number>()

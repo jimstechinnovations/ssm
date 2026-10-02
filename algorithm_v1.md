@@ -1,6 +1,7 @@
 # algorithm_v1 — the Decision Bot (target-driven, multi-market, logged)
 
-> Status: **BUILT (2026-09-25)** and the default engine; see [§0](#0-what-was-built-and-verified). §1–§8
+> Status: **BUILT (2026-09-25)** and the default engine; see [§0](#0-what-was-built-and-verified). Changes
+> after the first real-money runs (2026-10-02) are in [§0.5](#05-changes-after-real-money-2026-10-02). §1–§8
 > below are the original spec, kept as written, with corrections marked **[corrected]**. The worked
 > example is reproducible: `node scripts/algorithm-v1-example.mjs 10 200 5 7` (read-only; nothing placed).
 
@@ -16,13 +17,13 @@ This document does three things:
 ## 0. What was built and verified
 
 **Your decisions.** Payout band **1%** (configurable). Rule **greedy** (configurable: greedy / weighted /
-random / flip). Legs under 1.20 **allowed** (configurable). **History used**: it is the gate (only games
-where both teams have recent form), and every pick's reason cites how that pick did in the two teams' past
-meetings.
+random / flip). Legs under 1.20 **allowed** (configurable). **History used**: every pick's reason cites
+how that pick did in the two teams' past meetings. **[corrected 2026-10-01]** History is no longer a gate
+(see §0.5): it is cited data, and every scanned game is usable.
 
 | Piece | Where | What it does |
 |---|---|---|
-| Selection catalogue | `lib/pedlas/selections.ts` | 19 two-sided pairs per game (1X2↔Double Chance, totals, team totals, BTTS, odd/even, clean sheets). Each selection is a scoreline **rule**, used to price, explain and settle. Game order: kickoff → shortest name → A–Z. |
+| Selection catalogue | `lib/pedlas/selections.ts` | Two-sided pairs per game (1X2↔Double Chance, totals, team totals, BTTS, odd/even; clean sheets **dropped 2026-10-02**, see §0.5). Each selection is a scoreline **rule**, used to price, explain and settle. Game order: kickoff → shortest name → A–Z. |
 | Calibrated scoreline table | `lib/pedlas/scoreline-table.ts` | Poisson start plus iterative fitting to **every** de-vigged market, so no selection can look better than fair (worst fit on live odds: 1.6pt). |
 | Decision Bot | `lib/pedlas/decision-bot.ts` | Builds slips one by one, walking games in order, closing each slip inside [T, 1.01·T], and logging every pick. |
 | Fingerprint greedy | same | Each slip's fingerprint is the set of score combinations it wins on. Greedy scores candidates by P(win) minus the overlap with earlier slips (exact, from the tables), and prefers **fingerprint-disjoint** slips (pairs that can never both win). Candidates come from three generators: uniform, probability-weighted, and a *separator* that picks selections sharing no scoreline with slips it still overlaps. |
@@ -72,6 +73,56 @@ Confirm. A slip whose placing PC died mid-submit goes to "verify" and is checked
 never re-placed on a guess. Submits are serialised per account across PCs, with **one placer per Chrome**
 (a Chrome's tabs share one betslip). Every slip is re-checked on the betslip, inside the submit lock,
 right before Confirm, and a slip whose site payout is below target is skipped.
+
+---
+
+## 0.5 Changes after real money (2026-10-02)
+
+Source: 2,497 slips placed lifetime (₦24,970), and the 1 Oct run of 299 slips analysed leg by leg and game
+by game in [docs/learnings.md](docs/learnings.md). That run showed the model is **calibrated**: legs won
+50.1% against 50.8% predicted, and 24 slips alive against 24.9 expected. Nothing below changes the maths
+of a pick. Every change either removes a cost or removes a way the system failed to place.
+
+### What the bot no longer does (avoid / drop)
+
+| Change | Why | Where |
+|---|---|---|
+| **Clean-sheet markets dropped** (SportyBet ids 31, 32) | Highest bookmaker margin of any market we used: a leg keeps 0.917–0.924 of its stake in expectation, against 0.95–0.96 for the rest. P(≥1 win) ≤ keep × budget ÷ target, so a worse keep is lost P(win) on every slip it enters, with no offsetting gain. | `DROPPED_MARKETS` in `lib/pedlas/selections.ts`. The settle rule stays, so old slips still settle. A test guards it. |
+| **History is not a filter** | Requiring form on both teams cut 103 games to 7 on 1 Oct, and a Sofascore block then left nothing to build with. The live price is already the honest probability; history only explains. | `lib/pedlas/build-bot.ts` (`requireHistory` is accepted and ignored). |
+| **No silent skips for small drift** | At floor 100%, 46% of one run was skipped because odds moved a little between build and place. | Default `floorPct` is now **70** (UI, place route, placer CLI). A payout is still never placed below the session budget. |
+
+### What every pick now says
+
+Each leg's reason now carries its own survival odds and cost, not just how it was picked (illustrative numbers):
+
+```
+random pick (u=0.011) of 42: Home over 2.5 @4.70 · P 21.0%, keeps 0.987 · history: 0/2
+Under 0.5 @1.08 · P 90.1%, keeps 0.973, under 1.2 so no bonus · history: 3/4
+```
+
+`P` is the calibrated probability the leg wins. `keeps` is P × odds, the fraction of the stake the leg
+returns in expectation. A leg under 1.20 is flagged because it earns no bonus.
+
+### Reliability: the failures of 1 Oct, and what handles each now
+
+| Failure seen | Handling now |
+|---|---|
+| SportyBet's edge drops our server's raw requests (TLS fingerprint, not IP) | Every SportyBet call runs inside the real Chrome over CDP when it is up: booking codes, odds feed, **bonus plan, results, pre-flight**. Raw fetch is only the fallback. `lib/placement/cdp-fetch.ts`. |
+| CDP fetch touching the placer's tab; Faro's wrapped `window.fetch` | One dedicated tab parked on `sportybet.com/robots.txt` (same origin, no scripts, so a native fetch), reused across calls with a lock. Every tab-picker skips it. |
+| Server frozen while a build ran | The bot is a generator that yields to the event loop (`runDecisionBotAsync`), so the server keeps answering. The build budget is 15 minutes instead of 3, which should let one budget be one session (not yet measured on a full 200-slip build). |
+| **No internet connection** mid-run (cost the one missed slip) | The placer detects Chrome's offline page (`chrome-error://`, `navigator.onLine`, ERR_INTERNET_DISCONNECTED) or SportyBet's in-page notice. It pauses, waits for the network, reloads SportyBet and re-runs the **same** slip **without spending an attempt**. It gives up after `--net-wait-min` (20 by default) and leaves the slips queued. |
+| Sofascore 403 reported as "0 found" | Sync scripts count every request (ok / not found / blocked / failed), report them, and stop with an explicit error once most requests fail. |
+| Leaked Chrome tabs (188 processes, 0.44 GB free) | "Prepare browser" closes blank and duplicate fetch tabs, but never a SportyBet page. CDP fetch reuses one tab. |
+
+### Deliberately not changed
+
+- **Draw lean.** Draws came in at 29% against 20% priced, but the game-level test gives z = +1.4 over 45
+  games, which is not significant. Leg-level tests overstate it, because one game sits under many slips.
+  Watch it with `scripts/session-learnings.py`, and act only on a game-level result.
+- **Legs under 1.20.** Still allowed. An old bench measured P(≥1) at 0.64% without them against 0.60% with
+  them: a small gap from one bench. Re-bench before changing it.
+- **The honest ceiling.** P(≥1 win) ≤ keep × budget ÷ target still holds. None of these changes beats it.
+  They only stop us falling further below it.
 
 ---
 
@@ -194,7 +245,7 @@ outcomes between them with nothing left over.
 | Total goals | Over L ↔ Under L, L = 0.5 … 5.5 | half-lines only (whole lines can refund) |
 | Both teams score | Yes ↔ No | |
 | Odd/Even | Odd ↔ Even | |
-| Clean sheet | Home CS Yes ↔ No · Away CS Yes ↔ No | |
+| Clean sheet | Home CS Yes ↔ No · Away CS Yes ↔ No | **[dropped 2026-10-02]** worst margin of any market (§0.5) |
 | Team totals | Home Over L ↔ Under L · Away Over L ↔ Under L | |
 
 That gives **38 selections per game** in the live example (19 pairs). Excluded: Draw No Bet and

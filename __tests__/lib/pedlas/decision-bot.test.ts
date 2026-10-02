@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { selectionsFromMarkets, ruleWins, orderGames, type SbMarket, type SelectionGame } from '../../../lib/pedlas/selections'
+import { selectionsFromMarkets, ruleWins, orderGames, DROPPED_MARKETS, type SbMarket, type SelectionGame } from '../../../lib/pedlas/selections'
 import { calibrateTable, probOf, devigged } from '../../../lib/pedlas/scoreline-table'
 import { runDecisionBot } from '../../../lib/pedlas/decision-bot'
 import { settleSlip, legOutcome } from '../../../lib/pedlas/settle-slips'
@@ -42,12 +42,17 @@ function games(): SelectionGame[] {
 describe('selection catalogue', () => {
   it('every selection and its flip split every scoreline exactly (one wins, the other loses)', () => {
     const sels = games()[0].selections
-    expect(sels.length).toBeGreaterThanOrEqual(30)
+    expect(sels.length).toBeGreaterThanOrEqual(26)
     for (const s of sels) {
       const flip = sels.find(x => x.key === s.flipKey)!
       expect(flip).toBeTruthy()
       for (let h = 0; h <= 8; h++) for (let a = 0; a <= 8; a++) expect(ruleWins(s.rule, h, a)).toBe(!ruleWins(flip.rule, h, a))
     }
+  })
+  it('never offers a dropped market (clean sheets: worst margin), even when the book prices it', () => {
+    const sels = games()[0].selections
+    expect(sels.some(s => s.rule.kind === 'clean_sheet')).toBe(false)
+    expect(sels.some(s => s.marketId in DROPPED_MARKETS)).toBe(false)
   })
   it('orders games by kickoff, then shortest match name, then A→Z', () => {
     const k = '2026-10-10T14:00:00.000Z'

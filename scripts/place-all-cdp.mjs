@@ -57,7 +57,7 @@ const PORT = flag('--port', 9222)
 // target, and the session's own budget (never place for less than the budget risked to build the pool).
 // floor-pct=100 (the default) reproduces the old all-or-nothing behaviour exactly.
 const MIN_PAYOUT = flag('--min-payout', 0)
-const FLOOR_PCT = flag('--floor-pct', 100)
+const FLOOR_PCT = flag('--floor-pct', 70)   // 70 (was 100): at 100, odds drift skipped 46% of one run (docs/learnings.md)
 const BUDGET_FLOOR = flag('--budget-floor', 0)
 const EFFECTIVE_FLOOR = MIN_PAYOUT ? Math.max(BUDGET_FLOOR, MIN_PAYOUT * (FLOOR_PCT / 100)) : 0
 const floorNote = FLOOR_PCT < 100 ? ` (floor: ${FLOOR_PCT}% of target = ₦${(MIN_PAYOUT * FLOOR_PCT / 100).toLocaleString()}, or budget ₦${BUDGET_FLOOR.toLocaleString()}, whichever is higher)` : ''
@@ -657,10 +657,61 @@ async function ensureWide(page) {
     await s.detach().catch(() => {})
   } catch { /* best effort */ }
 }
+// NO-INTERNET GUARD. Found live 2026-10-01: the connection dropped mid-run and the tab sat on a "No internet
+// connection" page; every retry burned one of the slip's attempts against a dead connection, the worker
+// "crashed" (the error page destroys the page context), respawns failed for the same reason, and the slip
+// ran out of attempts — the one missed slip of that run. A dead connection is not the slip's fault: pause,
+// wait for the network, reload SportyBet and carry on with the SAME slip, spending no attempt (the
+// heartbeat keeps renewing the lease meanwhile). Only after --net-wait-min (default 20) does it stop, and
+// the unplaced slips stay queued for the next run.
+const NET_WAIT_MS = flag('--net-wait-min', 20) * 60_000
+// Chrome's own error page (chrome-error://, ERR_INTERNET_DISCONNECTED…) or SportyBet's in-page notice
+const OFFLINE_TEXT = /ERR_INTERNET_DISCONNECTED|ERR_NAME_NOT_RESOLVED|ERR_NETWORK_CHANGED|ERR_NETWORK_ACCESS_DENIED|ERR_ADDRESS_UNREACHABLE|ERR_CONNECTION_(RESET|CLOSED|REFUSED|TIMED_OUT|ABORTED|FAILED)|ERR_PROXY_CONNECTION_FAILED|ERR_TIMED_OUT|no internet|not connected to the internet|you('| a)re offline|internet connection|network (error|is unavailable|unavailable|is not available)|check your (network|internet)/i
+// errors that point at the connection rather than the slip (the Faro "something went wrong" is what a
+// failed fetch looks like through SportyBet's wrapped window.fetch)
+const NET_ERR = /net::ERR_|ERR_INTERNET|Failed to fetch|fetch failed|NetworkError|ENETUNREACH|ECONNRESET|ETIMEDOUT|ENOTFOUND|EAI_AGAIN|something went wrong, please try again later/i
+async function offlineReason(page) {
+  try {
+    if (page.isClosed()) return null
+    if (page.url().startsWith('chrome-error://')) return 'Chrome error page (no connection)'
+    const r = await Promise.race([page.evaluate((src) => {
+      const re = new RegExp(src, 'i'), vis = e => e && (e.offsetWidth || e.offsetHeight)
+      // Chrome's own offline page has no SportyBet DOM — read all of it; on SportyBet only read visible
+      // notices/dialogs, never the whole page (match descriptions or footer text must not trip it)
+      const onSite = /sportybet\.com/.test(location.host)
+      const text = onSite ? [...document.querySelectorAll('[class*=dialog],[class*=modal],[class*=popup],[class*=toast],[class*=notice],[class*=tips],[class*=network],[class*=offline],[class*=error]')].filter(vis).map(e => e.innerText || '').join(' | ') : (document.body?.innerText || '')
+      const m = re.exec(text)
+      return { online: navigator.onLine, hit: m ? m[0] : null }
+    }, OFFLINE_TEXT.source), sleep(4000).then(() => null)])
+    if (!r) return null                       // a slow page is not an offline one
+    if (!r.online) return 'the browser reports it is offline'
+    return r.hit ? `the page says "${r.hit}"` : null
+  } catch { return null }
+}
+/** If the tab shows no connection: wait (reloading SportyBet every ~15s) until it's back → true.
+ *  Already fine → false. No connection after NET_WAIT_MS → throws a fatal error (stop this run). */
+async function waitForNetwork(page, tag = '  ') {
+  let why = await offlineReason(page)
+  if (!why) return false
+  const t0 = Date.now()
+  console.log(`${tag}📡 NO CONNECTION (${why}) — pausing; no slip attempt is spent while waiting (up to ${NET_WAIT_MS / 60_000} min)`)
+  let n = 0
+  while (Date.now() - t0 < NET_WAIT_MS && !stopRequested) {
+    await sleep(15_000)
+    await page.goto(SPORTY, { waitUntil: 'domcontentloaded', timeout: 30_000 }).catch(() => {})
+    await sleep(2500)
+    why = await offlineReason(page)
+    if (!why && /sportybet\.com/.test(page.url())) { console.log(`${tag}📡 connection back after ${Math.round((Date.now() - t0) / 1000)}s — resuming`); return true }
+    if (++n % 4 === 0) console.log(`${tag}📡 still no connection after ${Math.round((Date.now() - t0) / 60_000)} min (${why ?? 'SportyBet not loading'})`)
+  }
+  throw Object.assign(new Error(`no internet connection for ${NET_WAIT_MS / 60_000} min — stopping; the unplaced slips stay queued`), { fatal: true, network: true })
+}
 async function spawn(wi, reuseBase) {
   let page
-  if (reuseBase) { page = ctx.pages().find(p => /sportybet\.com/.test(p.url())); if (!page) { page = await ctx.newPage(); await page.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {}) } }
+  // a tab stuck on Chrome's offline page IS the SportyBet tab (its url is chrome-error://) — adopt it, don't open another
+  if (reuseBase) { page = ctx.pages().find(p => /sportybet\.com\/(?!robots\.txt)/.test(p.url())) ?? ctx.pages().find(p => p.url().startsWith('chrome-error://')); if (!page) { page = await ctx.newPage(); await page.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {}) } }
   else { page = await ctx.newPage(); await page.goto(SPORTY, { waitUntil: 'domcontentloaded' }).catch(() => {}) }
+  await waitForNetwork(page, `  [w${wi}] `)
   page = await visiblePage(page)
   if (!/\/sport\/football\/sr:/.test(page.url())) await page.goto(PARK, { waitUntil: 'domcontentloaded', timeout: 60_000 }).catch(() => {}).then(() => page.waitForFunction(() => !!document.querySelector('#j_balance'), null, { timeout: 20_000 })).catch(() => {})
   const w = makeWorker(page, parallel ? `  [w${wi}] ` : '  ', parallel)
@@ -730,13 +781,16 @@ function submitHooks(wi, item) {
 // failure it retries / hands the slip back / marks it failed or for verification, and keeps going.
 async function runWorker(wi) {
   const worker = QUEUE ? workerIds[wi] : undefined
+  let carry = null   // a slip interrupted by a lost connection — re-run as-is (still claimed, no attempt spent)
   for (;;) {
     if (stopRequested) break
-    const item = await nextItem(wi); if (!item) break
+    const item = carry ?? await nextItem(wi); carry = null; if (!item) break
     const { slip, idx, tries } = item
     const sid = slip.slipId
     wstats[wi].current = sid
+    const tag = WORKERS > 1 ? `  [w${wi}] ` : '  '
     try {
+      await waitForNetwork(workersArr[wi].page, tag)   // cheap when online; never start a slip on a dead connection
       const { result: r, code, droppedFixtures, placedLegs, receipt } = await withTimeout(workersArr[wi].placeOne(slip, idx, submitHooks(wi, item)), SLIP_TIMEOUT_MS, `slip ${idx}`)
       if (r === 'placed' || r === 'skip') {
         if (r === 'placed') results.placed++; else results.skip++
@@ -753,6 +807,26 @@ async function runWorker(wi) {
         results.verify++; console.log(`  slip ${idx}: ⚠ UNCERTAIN after Confirm — sent to verification (${msg})`)
         await report(sid, 'verify', { failureReason: `uncertain after Confirm: ${msg}` }, worker)
         if (workerDead(e)) throw e
+        continue
+      }
+      // Lost connection (Chrome's offline page also destroys the page context, which looks like a worker
+      // crash): wait for the network and re-run the SAME slip without spending an attempt. Capped per slip
+      // so an error that only looks like a network one can't loop forever.
+      if (!e?.network && !e?.rejected && !e?.uncertain && !item.submitted && !stopRequested) {
+        let waited = false
+        try { waited = await waitForNetwork(workersArr[wi].page, tag) }
+        catch (ne) { if (ne?.network) { stopRequested = true; console.log(`\n⛔ ${ne.message}\n`); if (QUEUE) await report(sid, 'retry', { failureReason: ne.message }, worker); else fileQueue.unshift(item); continue } }
+        item.netRetries = item.netRetries ?? 0
+        if ((waited || NET_ERR.test(msg)) && item.netRetries < (waited ? 6 : 2)) {
+          item.netRetries++
+          console.log(`  slip ${idx}: ${waited ? 'connection was lost' : 'network-type error'} — re-running it (not counted as an attempt; ${item.netRetries})`)
+          if (!waited) await sleep(5000)
+          carry = item; continue
+        }
+      }
+      if (e?.network) {                           // gave up waiting for the network → leave it queued
+        stopRequested = true; console.log(`\n⛔ ${msg}\n`)
+        if (QUEUE) await report(sid, 'retry', { failureReason: msg }, worker); else fileQueue.unshift(item)
         continue
       }
       if (workerDead(e)) {                       // the TAB crashed (not the slip) — hand the slip back, respawn

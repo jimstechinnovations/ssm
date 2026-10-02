@@ -57,8 +57,15 @@ export async function prepareBrowser(port = MAIN_PORT): Promise<BrowserStatus & 
       // An extra window has its own profile, so it logs in with its OWN session (the .env login below).
       // Copying the main window's cookies was tried and doesn't log in (part of the login lives in local
       // storage), and sharing one refresh token between two browsers risks logging the main window out.
-      let page = ctx.pages().find(p => /sportybet\.com/.test(p.url())) ?? ctx.pages()[0]
+      let page = ctx.pages().find(p => /sportybet\.com\/(?!robots\.txt)/.test(p.url())) ?? ctx.pages()[0]
       if (!page) page = await ctx.newPage()
+      // Stray tabs leak Chrome processes and RAM (188 processes, 0.44 GB free on 2026-10-01). Close blank
+      // tabs and duplicate cdp-fetch robots.txt tabs (one is kept for reuse) — never a SportyBet page, a
+      // placer may be using it.
+      const robots = ctx.pages().filter(p => /sportybet\.com\/robots\.txt$/.test(p.url()))
+      const stray = [...ctx.pages().filter(p => /^(about:blank|chrome:\/\/new-?tab)/.test(p.url())), ...robots.slice(1)].filter(p => p !== page)
+      for (const p of stray) await p.close().catch(() => {})
+      if (stray.length) steps.push(`closed ${stray.length} stray tab(s)`)
       if (await widenWindow(ctx, page)) steps.push('widened the window so the header balance shows')
       if (!/sportybet\.com/.test(page.url())) await page.goto('https://www.sportybet.com/ng/', { waitUntil: 'commit', timeout: 60_000 }).catch(() => {})
       // wait for the header to render (logged in → Deposit/NGN, logged out → the login form)
@@ -115,7 +122,7 @@ export async function browserStatus(port = MAIN_PORT): Promise<BrowserStatus> {
     try {
       const ctx = browser.contexts()[0]
       if (!ctx) return { up: true, loggedIn: false }
-      const page = ctx.pages().find(p => /sportybet\.com/.test(p.url()))
+      const page = ctx.pages().find(p => /sportybet\.com\/(?!robots\.txt)/.test(p.url()))
       if (!page) return { up: true, loggedIn: false, mode: 'unknown' }   // don't navigate — non-disruptive
       // Read-only wait for header hydration (no bringToFront / no navigate) to avoid a stale snapshot.
       await page.waitForFunction(() => /Deposit|Bet History|My Account|NGN\s*[\d,.]/i.test(document.body.innerText), { timeout: 3500 }).catch(() => {})
@@ -189,7 +196,7 @@ export async function refreshToggleShot(port = MAIN_PORT): Promise<boolean> {
     const { chromium } = await import('playwright')
     const browser = await chromium.connectOverCDP(cdpBase(port))
     try {
-      const page = browser.contexts()[0]?.pages().find(p => /sportybet\.com/.test(p.url()))
+      const page = browser.contexts()[0]?.pages().find(p => /sportybet\.com\/(?!robots\.txt)/.test(p.url()))
       return page ? await shotToggle(page, port) : false
     } finally { await browser.close() }
   } catch { return false }

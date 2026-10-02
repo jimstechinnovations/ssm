@@ -66,8 +66,15 @@ export interface SelectionGame {
 export interface SbOutcome { id?: string; desc?: string; odds?: string; probability?: string; isActive?: number }
 export interface SbMarket { id?: string; specifier?: string; status?: number; outcomes?: SbOutcome[] }
 
-/** Markets the catalogue reads (ids as SportyBet uses them). */
-export const SELECTION_MARKET_IDS = ['1', '10', '18', '19', '20', '26', '29', '31', '32']
+/** Markets the bot no longer picks, with the reason (docs/learnings.md). The rules stay in `ruleWins`, so
+ *  slips already placed with these legs still settle correctly. */
+export const DROPPED_MARKETS: Record<string, string> = {
+  '31': 'home clean sheet: highest bookmaker margin of any market used (keep 0.917–0.924 per leg vs 0.95–0.96), measured 2026-09-26',
+  '32': 'away clean sheet: same margin reason as 31',
+}
+
+/** Markets the catalogue reads (ids as SportyBet uses them), minus DROPPED_MARKETS. */
+export const SELECTION_MARKET_IDS = ['1', '10', '18', '19', '20', '26', '29', '31', '32'].filter(id => !(id in DROPPED_MARKETS))
 
 const HALF_LINES = new Set([0.5, 1.5, 2.5, 3.5, 4.5, 5.5, 6.5])
 
@@ -108,6 +115,7 @@ export function selectionsFromMarkets(markets: SbMarket[]): Selection[] {
   const gg = mk('29'); add(gg, out(gg, /^yes$/i), 'Both score: Yes', { kind: 'btts', yes: true }, gg, out(gg, /^no$/i), 'Both score: No', { kind: 'btts', yes: false })
   const oe = mk('26'); add(oe, out(oe, /^odd$/i), 'Total goals odd', { kind: 'odd_even', odd: true }, oe, out(oe, /^even$/i), 'Total goals even', { kind: 'odd_even', odd: false })
   for (const [id, team] of [['31', 'home'], ['32', 'away']] as const) {
+    if (id in DROPPED_MARKETS) continue
     const m = mk(id); const T = team === 'home' ? 'Home' : 'Away'
     add(m, out(m, /^yes$/i), `${T} clean sheet: Yes`, { kind: 'clean_sheet', team, yes: true }, m, out(m, /^no$/i), `${T} clean sheet: No`, { kind: 'clean_sheet', team, yes: false })
   }

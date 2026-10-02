@@ -126,11 +126,11 @@ export async function POST(request: Request): Promise<Response> {
         dateFrom: req.date_from, dateTo: req.date_to, budget: perBookBudget, stake: minStake, target: req.target_win,
         minKickoffGapMinutes: windowMin, band: (req.band_pct ?? 1) / 100, rule: req.rule ?? 'greedy',
         allowSubMinLegs: req.allow_sub_min_legs ?? true, seed, requireHistory, excludeLeagues: req.exclude_leagues, boost,
-        // skip's search is heavier (more candidates per slip tried before one reaches the band on fewer
-        // legs) and this whole build runs SYNCHRONOUSLY on the server's single JS thread — proven live
-        // 2026-10-01 to otherwise freeze every other request for 10+ minutes. 180s caps that exposure;
-        // the bot returns whatever slips it has (never hangs) and says so in the note if it's cut short.
-        skip: req.skip, maxLegs: req.max_legs, deadlineMs: req.skip ? 180_000 : undefined,
+        // The build no longer blocks the server (runDecisionBotAsync yields between steps), so it can take
+        // the time a full budget needs: on 2026-10-01 a 180 s cap split one ₦2,000 budget into six
+        // mini-sessions (each stopped at 30–79 slips). 15 min is a safety net, not a pacing tool; a build
+        // cut short still returns its slips and says so in the note.
+        skip: req.skip, maxLegs: req.max_legs, deadlineMs: 15 * 60_000,
       })
       if (!bot.slips || !bot.result) { bookResults.push({ bookId: id, error: bot.error, detail: bot.detail }); continue }
       const saved = await saveSessionSlips(session.id, id, bot.slips)
