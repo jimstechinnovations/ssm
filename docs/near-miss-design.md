@@ -101,6 +101,12 @@ average is dominated by rare jackpot days.
 
 ## 4. Honesty notes
 
+- **[corrected 2026-10-02] The "plain 0.818" above is too high.** It used our model's leg probabilities
+  (capped at odds × P ≤ 0.97). Scored at the book's own prices, the bot's ₦10 → ₦51k slips return about
+  **0.35–0.48 per ₦1** (`algorithm_v1.md` §0.7 bench). The floor's ≈ 0.93–0.95 is therefore an even
+  bigger improvement on a losing day than this table shows, and stake size (510× instead of 5,100×) is
+  the bigger lever for the jackpot side.
+
 - **Long shots are overstated in our model.** Our stored leg P comes from the fitted scoreline table,
   which overstates big underdogs: 14% of legs had odds × P above 1, up to 1.40 on a "Home win @ 26".
   Uncapped, Flexi's odds-weighted formula turned that error into a fake 0.99 return. The study caps
