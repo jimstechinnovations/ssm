@@ -169,6 +169,86 @@ when the plan shows one-sided early games.
 
 ---
 
+## 0.7 Honest leg ratings, a price panel, the floor, and stake size (2026-10-02)
+
+Everything here was measured on the live board on 2 Oct. Nothing in this section has been staked yet.
+
+### Leg ratings: the bot was chasing its own model's errors
+
+The bot used to rate each leg with the fitted scoreline table, which overrates big underdogs ("Home win
+@35" at 4.0% when the fair price is about 2.7%). Greedy then preferred exactly those legs: 276 of the 299
+slips placed on 1 Oct held at least one.
+
+- **Fix:** a leg's P is now the book's own fair probability. `BotConfig.legProb` is `'panel'` by
+  default, falling back to `'book'`. The table is kept only for how two picks on the same game overlap.
+- **Bench** (same live board, ₦500 → ₦51k, skip mode, max 8 legs, all scored at the book's prices):
+
+| Ratings | Headline it claimed | Real chance | Back per ₦1 | Long shots (odds ≥ 10) |
+|---|---:|---:|---:|---:|
+| old model | 0.69% | 0.35% | 0.35 | 32 |
+| book | 0.46% | **0.46%** | **0.48** | 1 |
+
+### The reference price panel (`lib/books/reference.ts`, `pinnacle.ts`, `kambi.ts`, `panel.ts`)
+
+- **Sources:** Pinnacle (sharp, weight 2) and Kambi (the Unibet / 888 / LeoVegas platform, weight 1),
+  both public read-only feeds. Each is de-vigged with the power method, matched to SportyBet games by
+  team names plus kickoff time, and combined into a consensus.
+- **Guard:** a pairing whose 1X2 is more than 12 points from SportyBet's own is dropped as a wrong
+  match. Before the guard, the biggest "overpays" were exactly those (Truro City "Away win @14": 27% vs
+  6.2%).
+- **What it found** (`scripts/sharp-probe.ts`, 3,406 picks priced):
+  - SportyBet's own probability equals Pinnacle's (median ratio 1.000);
+  - its odds sit about 7% under fair (median odds × P = 0.933; top tenth ≥ 0.985);
+  - Pinnacle and Kambi differ by a median 1.4 points;
+  - picks overpaid by more than 2% with both sources agreeing: **1**.
+- **Conclusion:** no "value" picking edge on SportyBet's pre-match board. The panel's job is honest
+  ratings, catching stale lines, and refusing wrong pairings.
+
+### Stake size is the biggest lever
+
+SportyBet's bonus is dynamic: it shrinks for low-margin legs, so the margin can't be "bought back" with
+the bonus. With honest prices and the exact bonus, the best return per ₦1 a slip can reach falls as the
+payout multiple rises:
+
+| Multiple (target ÷ stake) | 5,100× | 1,000× | 510× | 100× | 20× |
+|---|---:|---:|---:|---:|---:|
+| Best back per ₦1 | 0.72 | 0.78 | 0.82 | 0.87 | 0.95 |
+
+The chance of at least one win ≈ keep × budget ÷ target, so for the same budget and the same ₦51k target,
+₦100 slips (510×, about 6 cheap legs) beat ₦10 slips (5,100×, 8 expensive legs). With ₦2,000:
+
+| Stake | Slips | Keep | Chance of ≥ 1 win |
+|---:|---:|---:|---:|
+| ₦10 | 200 | ≈ 0.45 | ≈ 1.8% |
+| ₦100 | 20 | ≈ 0.75–0.82 | ≈ 2.9–3.2% |
+
+### The floor (`lib/pedlas/floor.ts`; design in `docs/near-miss-design.md`)
+
+- **What it is:** a share of the budget (0–50%, the New session "Floor" control) buys SportyBet Flexi
+  "at least k of 8" tickets on likely, low-margin legs, away from the jackpot slips' games. Each returns
+  ≈ ₦0.95 per ₦1 and lands about 45–75% of the time.
+- **Settlement:** at least k right (`settleSlip(..., { minCorrect })`).
+- **Survival:** floor tickets are left out of the survival maths.
+- **Placer:**
+  - switches the betslip to Flexi and sets k through the betslip's own selector;
+  - verifies through SportyBet's own state (the on-screen label lags) and against the built payout (±5%);
+  - before *every* slip, makes a jackpot slip a plain multiple, or refuses;
+  - skips a floor ticket that has lost a leg to suspension, because "k of N" would change.
+- **Grounded on S-06AF70** (dry run, nothing staked): 20 of 20 slips loaded. The 5 floor tickets showed
+  "6+ of 8" at the built price to the kobo (₦14.64 vs ₦14.63, ₦17.26 vs ₦17.27, …). With the betslip
+  forced into Flexi, the next jackpot slips still went in as plain multiples at full price.
+
+### Reliability fixes found along the way
+
+- **`cdpFetch`:** every in-browser fetch is time-boxed, unfreezes the tab and retries once, then falls
+  back to a plain fetch. Chrome froze the background fetch tab and two runs hung for 10+ minutes.
+- **Chrome launch:** `TabFreeze`, `HeuristicMemorySaver` and `IntensiveWakeUpThrottling` are now off.
+  Chrome honours only one `--disable-features` flag, so they joined the existing one.
+- **New session** now sends skip mode with an 8-leg cap. It was benched +26% on 1 Oct but only ever set
+  through the API by hand.
+
+---
+
 ## 1. The one rule that never changes
 
 A bookmaker prices every selection with a margin. For a two-sided market with odds `a` and `b`:

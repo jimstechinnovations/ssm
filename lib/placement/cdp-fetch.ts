@@ -24,7 +24,7 @@ export interface CdpFetchInit {
   timeoutMs?: number
 }
 
-type Tab = { browser: import('playwright').Browser; page: import('playwright').Page }
+type Tab = { browser: import('playwright').Browser; page: import('playwright').Page; cdp?: import('playwright').CDPSession }
 const tabs = new Map<string, Tab>()                    // `${port}|${origin}` → the dedicated tab
 const opening = new Map<string, Promise<Tab>>()        // in-flight opens, so concurrent callers share one
 
@@ -47,7 +47,11 @@ async function getTab(origin: string, port: number): Promise<Tab> {
     // re-adopt a parked tab left by an earlier server process instead of opening another
     let page = ctx.pages().find(pg => pg.url() === `${origin}/robots.txt`)
     if (!page) { page = await ctx.newPage(); await page.goto(`${origin}/robots.txt`, { waitUntil: 'domcontentloaded', timeout: 20_000 }) }
-    const t = { browser, page }
+    // Chrome FREEZES background/minimized tabs, and a frozen page never answers evaluate() — that hung two
+    // runs for 10+ minutes on 2026-10-02. Keep this tab's lifecycle 'active' (re-asserted on a timeout).
+    const cdp = await ctx.newCDPSession(page).catch(() => undefined)
+    await cdp?.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => {})
+    const t = { browser, page, cdp }
     tabs.set(key, t)
     return t
   })().finally(() => opening.delete(key))
@@ -61,14 +65,24 @@ export async function cdpFetch<T = unknown>(origin: string, path: string, init: 
   const timeoutMs = init.timeoutMs ?? 10_000
   if (await cdpUp(port)) {
     try {
-      const { page } = await getTab(origin, port)
+      const tab = await getTab(origin, port)
       // forbidden headers (User-Agent…) are dropped by the browser anyway — it sends its own real ones
       const headers = Object.fromEntries(Object.entries(init.headers ?? {}).filter(([k]) => k.toLowerCase() !== 'user-agent'))
-      return await page.evaluate(async ({ path, method, headers, body, timeoutMs }) => {
-        const r = await fetch(path, { method, headers, body, signal: AbortSignal.timeout(timeoutMs) })
-        if (!r.ok) throw new Error(`HTTP ${r.status}`)
-        return r.json()
-      }, { path, method: init.method ?? 'GET', headers, body: init.body, timeoutMs })
+      const run = () => Promise.race([
+        tab.page.evaluate(async ({ path, method, headers, body, timeoutMs }) => {
+          const r = await fetch(path, { method, headers, body, signal: AbortSignal.timeout(timeoutMs) })
+          if (!r.ok) throw new Error(`HTTP ${r.status}`)
+          return r.json()
+        }, { path, method: init.method ?? 'GET', headers, body: init.body, timeoutMs }),
+        // a frozen page never settles evaluate(): never wait on the browser longer than the fetch itself
+        new Promise<never>((_, rej) => setTimeout(() => rej(new Error('TAB_TIMEOUT')), timeoutMs + 5_000)),
+      ]) as Promise<T>
+      try { return await run() }
+      catch (e) {
+        if (!(e instanceof Error) || e.message !== 'TAB_TIMEOUT') throw e
+        await tab.cdp?.send('Page.setWebLifecycleState', { state: 'active' }).catch(() => {})   // unfreeze, then one retry
+        return await run()
+      }
     } catch (e) {
       // an HTTP error from the site is a real answer — don't retry it raw; a broken tab/connection is not
       if (e instanceof Error && /HTTP \d{3}/.test(e.message)) throw e

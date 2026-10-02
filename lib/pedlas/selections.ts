@@ -49,6 +49,9 @@ export interface Selection {
   flipKey: string        // key of the complementary selection
   margin: number         // the pair's overround (1/a + 1/b − 1)
   probability?: number   // SportyBet's own (margin-free) outcome probability — used by its bonus formula
+  /** The reference panel's consensus for this pick (Pinnacle + Kambi, lib/books/reference.ts): n sources,
+   *  spread = how far they disagree. Attached at build time when the panel prices this market. */
+  sharp?: { p: number; n: number; spread: number; by: Record<string, number> }
 }
 
 export interface SelectionGame {

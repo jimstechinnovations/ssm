@@ -123,7 +123,7 @@ if (LIVE) {
   placerArgs = ['scripts/place-all-cdp.mjs', '--queue', '--session', session.code, '--base', BASE, '--min-payout', String(session.targetWin), ...floorArgs, ...passthrough]
 } else {
   const bookFile = `session-${session.code}.json`
-  writeFileSync(bookFile, JSON.stringify({ book: { slips: slips.map(s => ({ legs: s.legs, stake: s.stake, slipId: s.slipId, combinedOdds: s.combinedOdds, payout: s.potentialPayout })), stakePerSlip: slips[0].stake } }, null, 2))
+  writeFileSync(bookFile, JSON.stringify({ book: { slips: slips.map(s => ({ legs: s.legs, stake: s.stake, slipId: s.slipId, combinedOdds: s.combinedOdds, payout: s.potentialPayout, decision: s.decision ?? null })), stakePerSlip: slips[0].stake } }, null, 2))
   console.log(`wrote ${bookFile}. 🟢 DRY-RUN via place-all-cdp (loads every slip on the betslip, never clicks Confirm, changes nothing in the queue)…`)
   placerArgs = ['scripts/place-all-cdp.mjs', bookFile, '--report', reportUrl, '--session', session.code, '--dry', '--min-payout', String(session.targetWin), ...floorArgs, ...passthrough]
 }

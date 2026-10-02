@@ -68,6 +68,11 @@ const CreateSchema = z.object({
   /** Decision Bot: let a slip skip games instead of using every game in order — fewer, higher-odds legs
    *  (lower combined margin) at a fixed target, raising keep and so P(>=1 win). Needs max_legs. Default off. */
   skip: z.boolean().optional(),
+  /** Decision Bot: share of the budget (0–0.5) spent on FLOOR tickets — SportyBet Flexi "k of 8" on likely,
+   *  low-margin legs, so a day with no jackpot still returns part of the budget. Default 0 (off). */
+  floor_share: z.number().min(0).max(0.5).optional(),
+  /** Decision Bot: rate legs against the reference panel (Pinnacle + Kambi). Default true. */
+  use_panel: z.boolean().optional(),
   /** Decision Bot: cap on legs per slip. Required for `skip` (otherwise a slip could use all ~80 games). */
   max_legs: z.number().int().min(2).max(40).optional(),
 }).refine(d => {
@@ -131,6 +136,7 @@ export async function POST(request: Request): Promise<Response> {
         // mini-sessions (each stopped at 30–79 slips). 15 min is a safety net, not a pacing tool; a build
         // cut short still returns its slips and says so in the note.
         skip: req.skip, maxLegs: req.max_legs, deadlineMs: 15 * 60_000,
+        floorShare: req.floor_share, usePanel: req.use_panel,
       })
       if (!bot.slips || !bot.result) { bookResults.push({ bookId: id, error: bot.error, detail: bot.detail }); continue }
       const saved = await saveSessionSlips(session.id, id, bot.slips)

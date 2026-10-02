@@ -52,7 +52,8 @@ export async function POST(request: Request, ctx: { params: Promise<{ id: string
         await touchSession(session.id)
         return Response.json({
           stop: false,
-          slips: rows.map(r => ({ id: r.id, slipId: r.slip_id, stake: Number(r.stake), combinedOdds: r.combined_odds, legs: r.legs ?? [], attempts: r.attempts })),
+          // decision + payout: the placer needs a floor ticket's Flexi threshold (k) and its exact expected payout
+          slips: rows.map(r => ({ id: r.id, slipId: r.slip_id, stake: Number(r.stake), combinedOdds: r.combined_odds, payout: r.potential_payout != null ? Number(r.potential_payout) : null, decision: r.decision ?? null, legs: r.legs ?? [], attempts: r.attempts })),
         })
       }
       case 'renew': {

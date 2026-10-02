@@ -44,6 +44,7 @@ export default function NewSessionPage() {
   const [bandPct, setBandPct] = useState(1)
   const [allowSubMin, setAllowSubMin] = useState(true)
   const [seed, setSeed] = useState<number | ''>('')
+  const [floorShare, setFloorShare] = useState(0)   // share of the budget on floor tickets (docs/near-miss-design.md)
   const [building, setBuilding] = useState(false)
   const [result, setResult] = useState<SessionResult | null>(null)
   const [error, setError] = useState<{ title: string; detail?: string } | null>(null)
@@ -74,7 +75,8 @@ export default function NewSessionPage() {
       if (maxDays) body.max_window_days = maxDays
       if (skipFriendlies) body.exclude_leagues = ['friendl']
       body.engine = engine
-      if (engine === 'decision_bot') { body.rule = rule; body.band_pct = bandPct; body.allow_sub_min_legs = allowSubMin; if (seed !== '') body.seed = seed }
+      // skip + an 8-leg cap: fewer, higher-odds legs from the whole day (benched +26% win chance, 2026-10-01)
+      if (engine === 'decision_bot') { body.rule = rule; body.band_pct = bandPct; body.allow_sub_min_legs = allowSubMin; body.skip = true; body.max_legs = 8; body.floor_share = floorShare; if (seed !== '') body.seed = seed }
       const r = await fetch('/api/sessions', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) })
       const j = await r.json()
       if (!r.ok) {
@@ -137,6 +139,23 @@ export default function NewSessionPage() {
                 <input type="number" min={100} step={10000} value={target} onChange={e => setTarget(+e.target.value)} className={inputCls} />
               </Field>
             </div>
+
+            {engine === 'decision_bot' && (
+              <div className="mt-4">
+                <Field label="Floor (money back on a losing day)" hint={floorShare === 0
+                  ? 'Off: every naira chases the target. A day without a winning slip returns nothing.'
+                  : `${naira(budget * floorShare)} on ${Math.floor(budget * floorShare / Math.max(1, minStake))} Flexi tickets ("at least k of 8" on likely legs). On a day with no jackpot, about ${naira(budget * floorShare * 0.9)} comes back on average; the jackpot chance drops to about ${Math.round(100 * (1 - floorShare))}% of what the full budget would buy. Measured on our real games: 89% of floor stakes came back.`}>
+                  <div className="flex flex-wrap gap-2">
+                    {[0, 0.1, 0.25, 0.5].map(f => (
+                      <button key={f} type="button" onClick={() => setFloorShare(f)}
+                        className={cx('rounded-lg border px-3 py-1.5 text-sm', floorShare === f ? 'border-zinc-900 bg-zinc-900 text-white dark:border-white dark:bg-white dark:text-zinc-900' : 'border-zinc-300 text-zinc-700 hover:bg-zinc-100 dark:border-zinc-700 dark:text-zinc-300 dark:hover:bg-zinc-800')}>
+                        {f === 0 ? 'None' : `${Math.round(f * 100)}%`}
+                      </button>
+                    ))}
+                  </div>
+                </Field>
+              </div>
+            )}
 
             <button onClick={() => setAdvanced(v => !v)} className="mt-4 text-xs font-medium text-zinc-500 hover:text-zinc-800 dark:hover:text-zinc-200">
               {advanced ? '▾' : '▸'} Advanced

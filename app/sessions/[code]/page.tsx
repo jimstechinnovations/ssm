@@ -21,7 +21,7 @@ import { CoverageTab } from '@/components/CoverageTab'
 import { Page, PageHeader, Card, Stat, Button, LinkButton, Banner, Badge, StatusBadge, Progress, Tabs, Modal, Empty, naira, pct, ago, kickoff, cx, STATUS, inputCls } from '@/components/ui'
 
 interface Actual { source: 'site' | 'reconciled' | 'built'; stake: number; odds: number; payout: number; legCount: number }
-interface Slip { id: string; slipId: number; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null; returned: number | null; actual?: Actual }
+interface Slip { id: string; slipId: number; decision?: { product?: string; k?: number; n?: number } | null; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null; returned: number | null; actual?: Actual }
 interface Summary { slips: number; pending: number; placed: number; failed: number; skipped: number; verify: number; inFlight: number; won: number; lost: number; open: number; staked: number; settledStaked: number; returned: number; net: number }
 interface Worker { workerId: string; host: string | null; account: string | null; live: boolean; state: string; currentSlip: number | null; placed: number; failed: number; lastSeenAgoMs: number }
 interface VerifySlip { slipId: number; stake: number; legs: { game: string; outcome?: string }[]; submitStartedAt: string | null; lastError: string | null }
@@ -350,7 +350,7 @@ function SlipsTab(p: { slips: Slip[]; summary: Summary; total: number; page: num
                 return (
                   <tr key={s.id} onClick={() => p.onOpen(s.slipId)} className="cursor-pointer border-t border-zinc-100 transition hover:bg-zinc-50 dark:border-zinc-800 dark:hover:bg-zinc-800/40">
                     <td className="px-4 py-2.5 font-mono text-xs text-zinc-500">{s.slipId}</td>
-                    <td className="px-4 py-2.5 tabular-nums">{a?.legCount ?? s.legCount}{changed && a!.legCount !== s.legCount && <span className="ml-1 text-xs text-zinc-400 line-through">{s.legCount}</span>}</td>
+                    <td className="px-4 py-2.5 tabular-nums">{a?.legCount ?? s.legCount}{changed && a!.legCount !== s.legCount && <span className="ml-1 text-xs text-zinc-400 line-through">{s.legCount}</span>}{s.decision?.product === 'flexi' && <Badge tone="blue" className="ml-1.5" >Flexi {s.decision.k}/{s.decision.n ?? s.legCount}</Badge>}</td>
                     <td className="px-4 py-2.5 tabular-nums">{(a?.odds ?? s.combinedOdds)?.toFixed?.(1)}</td>
                     <td className="px-4 py-2.5 tabular-nums">
                       <span className="font-medium text-zinc-900 dark:text-zinc-100">{naira(a?.payout ?? s.potentialPayout)}</span>

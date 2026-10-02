@@ -29,14 +29,30 @@ export function legOutcome(leg: SlipLeg, r: GameResult | null | undefined): bool
  * as any FINISHED game contradicts its leg, the slip is LOST (regardless of games still to play). If every
  * real leg is finished and correct → won. Otherwise pending.
  */
-export function settleSlip(legs: SlipLeg[], results: Map<number, GameResult | null>): Verdict {
+export function settleSlip(legs: SlipLeg[], results: Map<number, GameResult | null>, opts: { minCorrect?: number } = {}): Verdict {
+  const real = live(legs)
+  // FLEXI ticket (floor layer): wins with at least `minCorrect` legs right — lost only once more legs have
+  // failed than it forgives, won as soon as `minCorrect` are right (the payout no longer depends on the rest).
+  if (opts.minCorrect != null && opts.minCorrect < real.length) {
+    let right = 0, wrong = 0
+    for (const leg of real) { const w = legOutcome(leg, results.get(leg.fixtureId)); if (w === true) right++; else if (w === false) wrong++ }
+    if (right >= opts.minCorrect) return 'won'
+    if (wrong > real.length - opts.minCorrect) return 'lost'
+    return 'pending'
+  }
   let anyPending = false
-  for (const leg of live(legs)) {
+  for (const leg of real) {
     const won = legOutcome(leg, results.get(leg.fixtureId))
     if (won === null) { anyPending = true; continue }
     if (!won) return 'lost'                               // ← early cut
   }
   return anyPending ? 'pending' : 'won'
+}
+
+/** The Flexi threshold stored on a floor ticket's decision (undefined for a normal slip). */
+export const flexiMinCorrect = (decision: unknown): number | undefined => {
+  const d = decision as { product?: string; k?: number } | null | undefined
+  return d?.product === 'flexi' && typeof d.k === 'number' ? d.k : undefined
 }
 
 /** The slip's (actually-placed) legs already decided against it (for a "cut by" note). */

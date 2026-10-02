@@ -23,7 +23,8 @@ export async function GET(_request: Request, ctx: { params: Promise<{ id: string
   if (!session) return Response.json({ error: 'Unknown session' }, { status: 404 })
 
   const slips = await listSessionSlips(session.id, { withLegs: true })
-  const placed = slips.filter(s => ['placed', 'won', 'lost'].includes(s.status) && (s.legs as Leg[])?.length)
+  // floor tickets (Flexi "k of N") survive a wrong leg — they're not part of the jackpot survival curve
+  const placed = slips.filter(s => ['placed', 'won', 'lost'].includes(s.status) && (s.legs as Leg[])?.length && (s.decision as { product?: string } | null)?.product !== 'flexi')
   if (placed.length === 0) return Response.json({ error: 'no placed slips to analyse' }, { status: 409 })
   // Each slip = its legs ACTUALLY placed, keyed by game (dropped/suspended legs weren't staked).
   const legMaps = placed.map(s => {

@@ -218,6 +218,59 @@ function makeWorker(page, tag, parallel) {
   }).catch(() => null)
   const codeBoxVisible = () => page.locator('input[placeholder="Booking Code"]:visible').count().then(n => n > 0)
 
+  // ── betslip MODE (plain multiple / Flexi "k of N" / One Cut), read from SportyBet's own betslip state ──
+  // A floor ticket must go in as Flexi with exactly its k; every other slip must go in as a plain multiple.
+  // The mode PERSISTS on the betslip between slips, so it is checked — and corrected — before every slip,
+  // and anything that doesn't match is refused rather than placed as the wrong bet.
+  const betslipMode = () => page.evaluate(() => {
+    const el = [...document.querySelectorAll('#j_betslip, #j_betslip *')].find(e => e.__vue__ && e.__vue__.$store) || [...document.querySelectorAll('*')].find(e => e.__vue__ && e.__vue__.$store)
+    if (!el) return null
+    const g = el.__vue__.$store.getters, st = el.__vue__.$store.state.betslip || {}
+    return { isFlexi: !!g['betslip/isFlexi'], flexiSelect: st.flexiSelect, oneCut: !!g['betslip/useOneBetCut'], legs: (g['betslip/getSelectList'] || []).length }
+  }).catch(() => null)
+  const toggleLeaf = (label) => page.evaluate((label) => {
+    const bs = document.querySelector('#j_betslip') || document.body
+    const el = [...bs.querySelectorAll('*')].find(e => e.children.length === 0 && (e.textContent || '').trim() === label && (e.offsetWidth || e.offsetHeight))
+    if (el) { el.click(); return true } return false
+  }, label).catch(() => false)
+  /** Make the betslip a plain multiple (Flexi off, One Cut off) — or refuse. */
+  const ensurePlainMode = async () => {
+    for (let a = 0; a < 3; a++) {
+      const m = await betslipMode()
+      if (!m) return               // state unreadable (old betslip build) — nothing switched it, nothing to undo
+      if (!m.isFlexi && !m.oneCut) return
+      if (m.isFlexi) await toggleLeaf('Flexi')
+      if (m.oneCut) await toggleLeaf('One Cut')
+      await page.waitForTimeout(700)
+    }
+    throw new Error('betslip stuck in Flexi/One Cut mode — NOT placing a normal slip as a different bet')
+  }
+  /** Switch the betslip to Flexi "at least k of N" (a floor ticket) and verify it shows exactly that. */
+  const ensureFlexiMode = async (k, n) => {
+    for (let a = 0; a < 3; a++) {
+      let m = await betslipMode()
+      if (!m) throw new Error('cannot read the betslip mode — NOT placing a Flexi ticket blind')
+      if (m.oneCut) { await toggleLeaf('One Cut'); await page.waitForTimeout(600) }
+      if (!m.isFlexi) { await toggleLeaf('Flexi'); await page.waitForTimeout(900) }
+      // drive the selector the way its own UI does: the widget keeps the label in `n` and updates the store
+      // through updateFlexiSelectorWithLoading — calling only updateFlexiSelector set the store (odds right)
+      // but left the label on the old "k+ of N" (seen 2026-10-02). The STORE is what prices and places.
+      await page.evaluate((k) => {
+        const vm = [...document.querySelectorAll('*')].map(e => e.__vue__).find(v => v && typeof v.updateFlexiSelector === 'function')
+        if (!vm) return
+        if ('n' in vm) vm.n = k
+        ;(typeof vm.updateFlexiSelectorWithLoading === 'function' ? vm.updateFlexiSelectorWithLoading : vm.updateFlexiSelector).call(vm, k)
+      }, k).catch(() => {})
+      await page.waitForTimeout(1200)
+      m = await betslipMode()
+      if (m && m.isFlexi && !m.oneCut && m.flexiSelect === k) {
+        if (!(await bodyHas(new RegExp(`${k}\+ of ${n}\b`)))) log(`  ℹ Flexi set to ${k} of ${n} in the betslip's state (its label lags) — the payout check below confirms the price`)
+        return
+      }
+    }
+    throw new Error(`could not set the betslip to Flexi "${k}+ of ${n}" — NOT placing`)
+  }
+
   const clickLeaf = (reSource) => page.evaluate((rs) => {
     const rx = new RegExp(rs, 'i')
     const els = [...document.querySelectorAll('span,div,a,button')].filter(e => e.children.length === 0 && rx.test((e.textContent || '').trim()) && (e.offsetWidth || e.offsetHeight))
@@ -412,6 +465,12 @@ function makeWorker(page, tag, parallel) {
     if (!stakeOk) throw new Error(`could not set stake to ${stake}`)
     tr('set stake')
 
+    // ── the bet TYPE: a floor ticket goes in as Flexi "k of N"; every other slip as a plain multiple ──
+    const flexi = slip.decision?.product === 'flexi' ? { k: Number(slip.decision.k), n: slip.legs.length, payout: Number(slip.payout ?? 0) } : null
+    if (flexi) await ensureFlexiMode(flexi.k, flexi.n)
+    else await ensurePlainMode()
+    tr('bet type')
+
     const betslipText = await page.evaluate(() => { const p = [...document.querySelectorAll('[class*=betslip]')].filter(e => e.offsetHeight).sort((a, b) => b.innerText.length - a.innerText.length)[0]; return p ? p.innerText : '' })
     let loadedLegs = (betslipText.match(/Over\/Under/g) || []).length
     // EXACT games on the betslip, from the site's own betslip storage (not page text). Any game that is
@@ -428,6 +487,7 @@ function makeWorker(page, tag, parallel) {
     // the slip is fully empty (0 legs — every game suspended / betslip didn't load) or somehow LONGER
     // than built (impossible → wrong betslip).
     if (loadedLegs > slip.legs.length || loadedLegs < 1) throw new Error(`empty/invalid betslip: ${loadedLegs} legs vs ${slip.legs.length} — NOT placing`)
+    if (flexi && loadedLegs < slip.legs.length) throw new Error(`SKIP: floor ticket lost ${slip.legs.length - loadedLegs} leg(s) to suspension — "at least ${flexi.k} of ${flexi.n}" would become a different bet`)
     if (loadedLegs < slip.legs.length) log(`  ℹ ${slip.legs.length - loadedLegs} leg(s) suspended — placing ${loadedLegs}-leg combo anyway`)
     // Lenient staleness guard: at least one of this slip's own teams must be on the betslip (else it's a
     // stale/old betslip, not this code's selections). Checks the first few legs so a dropped game 1 is OK.
@@ -438,7 +498,8 @@ function makeWorker(page, tag, parallel) {
     tr('verify games'); if (DRY) {
       // prove the receipt capture on the real betslip: the numbers the site would stake at Confirm
       const r = await readReceipt()
-      const guard = MIN_PAYOUT && r?.sitePayout != null ? (r.sitePayout >= EFFECTIVE_FLOOR ? ' · ≥ floor ✓' : ' · BELOW floor — a live run would skip it') : ''
+      const guard = flexi && r?.sitePayout != null ? (r.sitePayout >= flexi.payout * 0.95 ? ` · Flexi ${flexi.k}+ of ${flexi.n} ✓ (built ₦${flexi.payout})` : ` · Flexi payout BELOW 95% of built ₦${flexi.payout} — a live run would skip it`)
+        : MIN_PAYOUT && r?.sitePayout != null ? (r.sitePayout >= EFFECTIVE_FLOOR ? ' · ≥ floor ✓' : ' · BELOW floor — a live run would skip it') : ''
       log(`  [dry] betslip shows odds ${r?.siteOdds ?? '?'} · stake ₦${r?.siteStake ?? '?'} · potential win ₦${r?.sitePayout ?? '?'} (built ₦${slip.payout ?? '?'})${guard} — skipping Place/Confirm`)
       return { result: 'dry', code, receipt: r }
     }
@@ -495,7 +556,9 @@ function makeWorker(page, tag, parallel) {
 
     // ── payout guard: what the SITE will pay must still reach the target ──
     const pre = await readReceipt()
-    if (MIN_PAYOUT && pre?.sitePayout != null && pre.sitePayout < EFFECTIVE_FLOOR) throw new Error(`SKIP: payout on the site is ₦${pre.sitePayout.toLocaleString()} — below the ₦${EFFECTIVE_FLOOR.toLocaleString()} floor${floorNote} (odds moved since the build)`)
+    // a floor ticket must pay what it was priced at (±5%); the jackpot target floor doesn't apply to it
+    if (flexi && pre?.sitePayout != null && pre.sitePayout < flexi.payout * 0.95) throw new Error(`SKIP: Flexi ticket pays ₦${pre.sitePayout} on the site — below 95% of the built ₦${flexi.payout} (odds moved)`)
+    if (!flexi && MIN_PAYOUT && pre?.sitePayout != null && pre.sitePayout < EFFECTIVE_FLOOR) throw new Error(`SKIP: payout on the site is ₦${pre.sitePayout.toLocaleString()} — below the ₦${EFFECTIVE_FLOOR.toLocaleString()} floor${floorNote} (odds moved since the build)`)
 
     // ── serialize the actual submission so concurrent workers never collide ──
     const release = await acquireSubmit()
@@ -535,7 +598,7 @@ function makeWorker(page, tag, parallel) {
             if (foreign.length || missing.length) throw Object.assign(new Error(`betslip changed before Confirm (${foreign.length} foreign, ${missing.length} missing) — NOT submitting`), { rejected: true })
           }
         }
-        if (!begun && MIN_PAYOUT && receipt?.sitePayout != null && receipt.sitePayout < EFFECTIVE_FLOOR) throw Object.assign(new Error(`SKIP: after odds changes the site pays ₦${receipt.sitePayout.toLocaleString()} — below the ₦${EFFECTIVE_FLOOR.toLocaleString()} floor${floorNote}`), { rejected: true })
+        if (!begun && !flexi && MIN_PAYOUT && receipt?.sitePayout != null && receipt.sitePayout < EFFECTIVE_FLOOR) throw Object.assign(new Error(`SKIP: after odds changes the site pays ₦${receipt.sitePayout.toLocaleString()} — below the ₦${EFFECTIVE_FLOOR.toLocaleString()} floor${floorNote}`), { rejected: true })
         if (!begun && hooks.beforeConfirm) await hooks.beforeConfirm()
         begun = true
         await clickBtn('^confirm$')

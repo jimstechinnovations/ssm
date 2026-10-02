@@ -13,7 +13,10 @@ import { orderGames } from './selections'
 import { getTeamRecent, getH2H } from './history-store'
 import { formFromMatchResults } from '../football-history/apifootball'
 import { fetchSportyBonusPlan, sportyBonus, type SportyBonusPlan } from '../books/sportybet-bonus'
-import type { Selection } from './selections'
+import type { Selection, SelectionGame } from './selections'
+import { buildFloor } from './floor'
+import { loadPanel } from '../books/panel'
+import { consensus } from '../books/reference'
 
 export interface BotBuildOptions {
   dateFrom: string
@@ -35,6 +38,12 @@ export interface BotBuildOptions {
   skip?: boolean                // let a slip skip games (fewer, higher-odds legs) — needs maxLegs
   maxLegs?: number
   deadlineMs?: number           // wall-clock build budget — see BotConfig.deadlineMs (never hangs the server)
+  /** Share of the budget (0–0.5) spent on FLOOR tickets — Flexi "k of 8" on likely, low-margin legs that
+   *  return part of the budget on a day with no jackpot (lib/pedlas/floor.ts, docs/near-miss-design.md). */
+  floorShare?: number
+  /** Attach the reference panel's prices (Pinnacle + Kambi) to every pick. Default true; a source that
+   *  can't be reached is simply left out. */
+  usePanel?: boolean
 }
 
 /** A stored slip plus the bot's slip-level decision (persisted to pedla_placements.decision). */
@@ -56,6 +65,19 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
   try { games = (await adapter.fetchSelectionGames({ dateFrom: o.dateFrom, dateTo: o.dateTo, scanLimit: 400, minKickoffGapMinutes: o.minKickoffGapMinutes })).games }
   catch (e) { return { error: `Failed to fetch ${adapter.label} odds`, detail: e instanceof Error ? e.message : String(e) } }
   tDiag(`fetchSelectionGames (${games.length} games)`)
+  // The reference panel: each pick gets the consensus of Pinnacle + Kambi where they price it. The bot
+  // rates a leg at that consensus when both sources agree (BotConfig.legProb 'panel'), else at SportyBet's
+  // own fair price. Never blocks a build: if the panel can't load, every pick keeps the book's price.
+  let panelNote = 'reference panel off'
+  if (o.usePanel !== false) {
+    try {
+      const panel = await loadPanel(games)
+      let priced = 0
+      for (const g of games) for (const s of g.selections) { const c = consensus(panel.games.get(g.fixtureId), s.rule); if (c) { s.sharp = c; priced++ } }
+      panelNote = `reference panel: ${panel.sources.map(x => `${x.source} matched ${x.matched}/${games.length}`).join(', ')} · ${priced} picks priced${panel.errors.length ? ` · ${panel.errors.join('; ')}` : ''}`
+    } catch (e) { panelNote = `reference panel unavailable (${e instanceof Error ? e.message : e}) — book prices used` }
+    tDiag(panelNote)
+  }
   if (o.excludeLeagues?.length) {
     const rx = new RegExp(o.excludeLeagues.map(s => s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')).join('|'), 'i')
     games = games.filter(g => !rx.test(g.league))
@@ -101,8 +123,10 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
   const tournamentOf = new Map(pool.flatMap(g => g.selections.map(sel => [sel, g.tournamentId] as const)))
   const bonusFn = plan ? (sels: Selection[]) => sportyBonus(sels.map(x => ({ odds: x.odds, probability: x.probability, margin: x.margin, tournamentId: tournamentOf.get(x) })), plan!).perStake : undefined
 
+  const floorShare = Math.min(0.5, Math.max(0, o.floorShare ?? 0))
+  const jackpotBudget = Math.round(o.budget * (1 - floorShare))
   const result = await runDecisionBotAsync(pool, {   // non-blocking: the server keeps answering while it builds
-    stake, target: o.target, budget: o.budget, band: o.band, rule: o.rule, allowSubMinLegs: o.allowSubMinLegs,
+    stake, target: o.target, budget: jackpotBudget, band: o.band, rule: o.rule, allowSubMinLegs: o.allowSubMinLegs,
     seed: o.seed, boost: o.boost ?? adapter.boostFor, bonusFn, maxPayout: Math.min(o.maxPayout ?? adapter.maxPayout, adapter.maxPayout),
     skip: o.skip, maxLegs: o.maxLegs, deadlineMs: o.deadlineMs,
   })
@@ -129,6 +153,33 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
       decision: { engine: 'decision_bot', rule: result.config.rule, seed: result.config.seed, why: s.why, pWin: s.pWin, keep: s.keep, bonusApplies: s.bonusApplies, band: result.config.band },
     }
   })
+  // ── the FLOOR layer: Flexi tickets on likely, low-margin legs, away from the jackpot slips' games ──
+  let floorMeta: Record<string, unknown> | undefined
+  if (floorShare > 0) {
+    const jackpotGames = new Set(result.slips.flatMap(s => s.legs.map(l => result.games[l.game].fixtureId)))
+    const panelP = (_g: SelectionGame, s: Selection) => s.sharp && s.sharp.n >= 2 && s.sharp.spread <= 0.04 ? s.sharp.p : s.probability
+    const fl = buildFloor(pool, { budget: o.budget - jackpotBudget, stake, avoidFixtures: jackpotGames, probOf: panelP })
+    let id = slips.length
+    for (const t of fl.tickets) {
+      const legs: PedlasLeg[] = t.legs.map(l => {
+        const total = l.sel.rule.kind === 'total' ? l.sel.rule : null
+        return {
+          fixtureId: l.game.fixtureId, game: l.game.game, league: l.game.league, kickoff: l.game.kickoff,
+          line: total?.line ?? 0, side: total?.side ?? 'Under',
+          market: `SB_${l.sel.marketId}${l.sel.specifier ? `_${l.sel.specifier}` : ''}`, outcome: l.sel.name, odds: l.sel.odds,
+          rule: l.sel.rule, marketId: l.sel.marketId, specifier: l.sel.specifier, outcomeId: l.sel.outcomeId, p: l.p,
+          why: `floor leg: ${l.sel.name} @${l.sel.odds} · P ${(100 * l.p).toFixed(1)}%, keeps ${(l.p * l.sel.odds).toFixed(3)}${l.sel.sharp ? ` · panel ${Object.entries(l.sel.sharp.by).map(([k, v]) => `${k} ${(100 * v).toFixed(1)}%`).join(', ')}` : ''}`,
+        }
+      })
+      slips.push({
+        slipId: ++id, vector: [], legs, legCount: legs.length, combinedOdds: t.odds, trueProb: t.pWin,
+        boostPct: 0, stake, payout: t.payout, uncappedPayout: t.payout, capped: false, evMultiple: t.key, rankScore: 0,
+        decision: { engine: 'floor', product: 'flexi', k: t.k, n: t.n, flexiOdds: t.odds, key: t.key, pWin: t.pWin, why: t.why },
+      })
+    }
+    const avg = (f: (t: typeof fl.tickets[number]) => number) => fl.tickets.length ? fl.tickets.reduce((x, t) => x + f(t), 0) / fl.tickets.length : 0
+    floorMeta = { share: floorShare, budget: o.budget - jackpotBudget, tickets: fl.tickets.length, avgKey: avg(t => t.key), avgPayout: avg(t => t.payout), avgWinChance: avg(t => t.pWin), notes: fl.notes }
+  }
   const legCounts = slips.map(s => s.legCount)
   const meta = {
     engine: 'decision_bot',
@@ -139,7 +190,8 @@ export async function buildDecisionBotForAdapter(adapter: BookAdapter, o: BotBui
     bonusSlips: result.slips.filter(s => s.bonusApplies).length, calibrationMaxError: result.calibrationMaxError,
     order: result.games.slice(0, Math.max(...legCounts)).map(g => g.game),
     bonusPlan: plan ? plan.planName : 'fallback leg-count table (live plan unavailable)',
-    note: [`Decision Bot (${result.config.rule}, band ${(100 * result.config.band).toFixed(1)}%, seed ${result.config.seed}${result.config.skip ? `, skip on, maxLegs ${result.config.maxLegs}` : ''})`, plan ? `bonus priced with SportyBet's live plan ${plan.planName}` : 'bonus from the fallback table', ...result.notes].join(' · '),
+    floor: floorMeta, panel: panelNote,
+    note: [`Decision Bot (${result.config.rule}, band ${(100 * result.config.band).toFixed(1)}%, seed ${result.config.seed}${result.config.skip ? `, skip on, maxLegs ${result.config.maxLegs}` : ''})`, plan ? `bonus priced with SportyBet's live plan ${plan.planName}` : 'bonus from the fallback table', panelNote, ...(floorMeta ? [`floor: ${floorMeta.tickets} Flexi tickets (${Math.round(100 * floorShare)}% of the budget), each returns ≈ ₦${(floorMeta.avgKey as number).toFixed(2)} per ₦1`] : []), ...result.notes].join(' · '),
   }
   return { slips, result, meta }
 }

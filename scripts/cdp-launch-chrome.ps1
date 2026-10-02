@@ -22,7 +22,10 @@ $antiThrottle = @(
   "--disable-background-timer-throttling",
   "--disable-backgrounding-occluded-windows",
   "--disable-renderer-backgrounding",
-  "--disable-features=CalculateNativeWinOcclusion"
+  # ONE --disable-features flag (Chrome honours only the last one). TabFreeze / HeuristicMemorySaver /
+  # IntensiveWakeUpThrottling: Chrome froze the background fetch tab and evaluate() never returned —
+  # two 10-minute hangs on 2026-10-02.
+  "--disable-features=CalculateNativeWinOcclusion,TabFreeze,HeuristicMemorySaver,IntensiveWakeUpThrottling"
 )
 $chrome = @(
   "$env:ProgramFiles\Google\Chrome\Application\chrome.exe",

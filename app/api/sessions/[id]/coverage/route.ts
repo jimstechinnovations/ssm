@@ -43,8 +43,10 @@ export async function GET(request: Request, ctx: { params: Promise<{ id: string 
   if (!rows.some(r => r.code === session.code && PLACED.includes(r.status))) { sessions = [session]; rows = rows.filter(r => r.code === session.code) }
   const placed = rows.filter(r => PLACED.includes(r.status))
   const mode: 'live' | 'plan' = placed.length ? 'live' : 'plan'
+  // floor tickets (Flexi "k of N") aren't jackpot slips — one wrong leg doesn't end them — so they're
+  // left out of the survival maths here
   const family = (mode === 'live' ? placed : rows.filter(r => r.status !== 'failed' && r.code === session.code))
-    .filter(r => (r.legs as Leg[] | undefined)?.length)
+    .filter(r => (r.legs as Leg[] | undefined)?.length && (r.decision as { product?: string } | null)?.product !== 'flexi')
   if (!family.length) return Response.json({ error: 'no slips to analyse' }, { status: 409 })
 
   const slips: CovSlip[] = family.map(r => ({

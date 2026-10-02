@@ -17,7 +17,7 @@
 // reported P(≥1 win) respects the ceiling Σ keep·stake/payout (algorithm_v1 §1). Pure: no I/O.
 
 import { ruleWins, orderGames, type Selection, type SelectionGame } from './selections'
-import { calibrateTable, probOf, scorelineSampler, type ScorelineTable } from './scoreline-table'
+import { calibrateTable, devigged, probOf, scorelineSampler, type ScorelineTable } from './scoreline-table'
 import { boostFor, type BoostFn } from './boost'
 
 export type BotRule = 'greedy' | 'weighted' | 'random' | 'flip'
@@ -47,6 +47,22 @@ export interface BotConfig {
    *  game one slip skips is covered by others. Overlap maths aligns legs BY GAME, so it stays exact. */
   skip?: boolean
   evalDays?: number          // simulated outcomes used to measure P(≥1 win)
+  /** Where each leg's probability comes from (default 'panel'):
+   *  - 'panel': the reference panel's consensus (Pinnacle + Kambi) when BOTH price the pick and agree within
+   *    4 points; otherwise as 'book'. SportyBet tracks Pinnacle closely (median ratio 1.000 on 2,992 picks,
+   *    2026-10-02), so this mostly confirms the book — and catches the picks SportyBet prices stale.
+   *  - 'book': SportyBet's own margin-free outcome probability from the feed (else the pair's de-vigged
+   *    price). The scoreline table is used only for how two picks on the SAME game overlap.
+   *  - 'model': the calibrated scoreline table (the pre-2026-10-02 behaviour, kept for benching).
+   *  Why: the table overstated big underdogs (e.g. "Home win @35" at 4.0% vs a fair ~2.7%; 14% of placed
+   *  legs had odds × P > 1). The bot then preferred exactly those legs — 276 of the 299 slips placed on
+   *  1 Oct held at least one — and the headline was 15% too high (4.82% vs 4.18% at book prices). */
+  legProb?: 'panel' | 'book' | 'model'
+  /** Value generator (skip mode): only picks keeping at least this much per ₦1 after the book's margin
+   *  (odds × P) are offered, cheapest first. Default 0.95. On 2026-10-02 the bot's legs averaged 0.899
+   *  while 286 picks on the board kept ≥ 0.98 — candidates were drawn by chance/probability, never by
+   *  margin, so cheap legs only turned up by luck. */
+  valueFloor?: number
 }
 
 /** Per-game history the bot cites (and gates on). */
@@ -62,7 +78,7 @@ export interface BotLeg {
   game: number               // index in the ordered game list
   fixtureId: number
   selection: Selection
-  p: number                  // calibrated probability
+  p: number                  // the leg's probability: the book's own fair price (BotConfig.legProb)
   why: string
 }
 
@@ -117,7 +133,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     band: cfg.band ?? 0.01, rule: cfg.rule ?? 'greedy', allowSubMinLegs: cfg.allowSubMinLegs ?? true,
     minLegOdds: cfg.minLegOdds ?? 1.20, seed: cfg.seed ?? 1, maxLegs: cfg.maxLegs ?? 40,
     maxPayout: cfg.maxPayout ?? Infinity, candidates: cfg.candidates ?? 24, skip: cfg.skip ?? false,
-    deadlineMs: cfg.deadlineMs ?? 90_000,
+    deadlineMs: cfg.deadlineMs ?? 90_000, legProb: cfg.legProb ?? 'panel', valueFloor: cfg.valueFloor ?? 0.95,
     evalDays: cfg.evalDays ?? 20000,
   }
   const boost = cfg.boost ?? boostFor
@@ -134,9 +150,13 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
   for (const g of games) { tables.push(calibrateTable(g.selections)); yield }   // up to 80 calibrations — pause between them
   if (process.env.BOT_DIAG) console.log(`[decision-bot] calibrateTable x${games.length}: ${((Date.now() - tDiag0) / 1000).toFixed(1)}s`)
   const calibrationMaxError = tables.reduce((m, t) => Math.max(m, t.maxError), 0)
+  // a leg's probability: the BOOK's own fair price (see BotConfig.legProb), never better than the book
+  const legP = (gi: number, s: Selection) => config.legProb === 'model' ? probOf(tables[gi], s)
+    : config.legProb === 'panel' && s.sharp && s.sharp.n >= 2 && s.sharp.spread <= 0.04 ? s.sharp.p
+    : s.probability != null && s.probability > 0 && s.probability < 1 ? s.probability : devigged(s, games[gi].selections)
   const opts = games.map((g, gi) => g.selections
     .filter(s => config.allowSubMinLegs || s.odds >= config.minLegOdds)
-    .map(s => ({ s, p: probOf(tables[gi], s) })))
+    .map(s => ({ s, p: legP(gi, s) })))
   const h2hWins = (gi: number, s: Selection) => {
     const h = games[gi].history?.h2h ?? []
     return h.length ? `${h.filter(m => ruleWins(s.rule, m.h, m.a)).length}/${h.length} past meetings` : 'no past meetings'
@@ -213,7 +233,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     const nonQualifying = b.legs.length - qualifying
     return {
       slipId, combinedOdds: odds, bonusApplies: bonus > 0, bonus, payout: Math.round(pay * 100) / 100, pWin, keep: pWin * pay / config.stake,
-      // Every leg states its own odds of surviving: P (calibrated), what it keeps after the book's margin
+      // Every leg states its own odds of surviving: P (the book's fair price), what it keeps after the book's margin
       // (P × odds — below 1 is the vig), and whether it counts toward the bonus. History is cited last
       // (format read by scripts/session-learnings.py — keep "history: x/y past meetings").
       legs: b.legs.map(l => ({ game: l.gi, fixtureId: games[l.gi].fixtureId, selection: l.s, p: l.p,
@@ -227,6 +247,14 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
   const shuffled = (gi: number, rng: () => number, label: string) => {
     const a = opts[gi].map(o => ({ ...o, u: rng() })).sort((x, y) => x.u - y.u)
     return a.map(o => ({ s: o.s, p: o.p, why: `${label} pick (u=${o.u.toFixed(3)}) of ${a.length}: ${o.s.name} @${o.s.odds}` }))
+  }
+  // VALUE: the cheapest picks first — what each keeps after the book's margin (odds × P), drawn with
+  // randomness so candidates differ (weight e^(40·(keep−1)): 1.00 → 1, 0.95 → 0.14, 0.90 → 0.02). In skip
+  // mode, picks below valueFloor are left out, so the slip skips games that only offer expensive picks.
+  const value = (gi: number, rng: () => number) => {
+    const a = opts[gi].filter(o => !config.skip || o.s.odds * o.p >= config.valueFloor)
+      .map(o => ({ ...o, k: Math.pow(rng(), 1 / Math.exp(40 * (o.s.odds * o.p - 1))) })).sort((x, y) => y.k - x.k)
+    return a.map(o => ({ s: o.s, p: o.p, why: `low-margin pick: ${o.s.name} @${o.s.odds} keeps ${(o.s.odds * o.p).toFixed(3)} per ₦1 (P=${(100 * o.p).toFixed(1)}%)` }))
   }
   const weighted = (gi: number, rng: () => number) => {
     // Efraimidis–Spirakis: key = u^(1/w) — sampling without replacement ∝ p
@@ -261,11 +289,15 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     if (a.key === b.key) return probOfKey(gi, a)
     const k = a.key < b.key ? `${gi}:${a.key}&${b.key}` : `${gi}:${b.key}&${a.key}`
     let v = jointCache.get(k)
-    if (v == null) { const ma = maskOf(gi, a), mb = maskOf(gi, b), p = tables[gi].p; v = 0; for (let i = 0; i < NCELL; i++) if (ma[i] && mb[i]) v += p[i]; jointCache.set(k, v) }
+    if (v == null) {
+      const ma = maskOf(gi, a), mb = maskOf(gi, b), p = tables[gi].p; v = 0; for (let i = 0; i < NCELL; i++) if (ma[i] && mb[i]) v += p[i]
+      v = Math.min(v, probOfKey(gi, a), probOfKey(gi, b))   // the table's overlap, never above either pick's own (book) P; disjoint stays exactly 0
+      jointCache.set(k, v)
+    }
     return v
   }
   const pCache = new Map<string, number>()
-  function probOfKey(gi: number, s: Selection) { const k = `${gi}:${s.key}`; let v = pCache.get(k); if (v == null) { v = probOf(tables[gi], s); pCache.set(k, v) } return v }
+  function probOfKey(gi: number, s: Selection) { const k = `${gi}:${s.key}`; let v = pCache.get(k); if (v == null) { v = legP(gi, s); pCache.set(k, v) } return v }
   // Legs are aligned BY GAME (not by position), so slips that skip different games are still exact:
   // a game both slips bet → the joint from the table; a game only one bets → that leg's own p.
   const pBoth = (a: { gi: number; s: Selection }[], b: { gi: number; s: Selection }[]) => {
@@ -317,14 +349,16 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
       const familyMaps = family.map(f => new Map(f.map(l => [l.gi, l.s])))
       for (let c = 0; c < config.candidates * 3 && built < config.candidates; c++) {
         if ((c & 15) === 0) { yield; if (Date.now() - t0 > config.deadlineMs) { timedOut = true; break } }   // checked every 16 candidates (Date.now() itself isn't free at this volume)
-        // Three candidate generators give greedy a diverse pool: uniform (ignores likelihood), weighted by
-        // P (high survival, but drifts to low odds ⇒ more legs), and a FINGERPRINT SEPARATOR that, at each
+        // Four candidate generators give greedy a diverse pool: uniform (ignores likelihood), weighted by
+        // P (high survival, but drifts to low odds ⇒ more legs), a FINGERPRINT SEPARATOR that, at each
         // game, prefers the pick that shares no scoreline with the earlier slips this candidate still
-        // overlaps — so it becomes disjoint from them — weighted by P to keep survival high.
-        const gen = c % 3
+        // overlaps — so it becomes disjoint from them — and VALUE (the lowest-margin picks), which reaches
+        // the same payout at a higher win chance. Greedy then picks by real P(≥1 win) gained.
+        const gen = c % 4
         const b = gen === 0 ? buildSlip(gi => shuffled(gi, rng, 'random'), rng)
           : gen === 1 ? buildSlip(gi => weighted(gi, rng), rng)
-            : buildSlip((gi, legs) => separator(gi, legs, familyMaps, rng), rng)
+            : gen === 2 ? buildSlip((gi, legs) => separator(gi, legs, familyMaps, rng), rng)
+              : buildSlip(gi => value(gi, rng), rng)
         if (!b) continue
         const key = keyOf(b.legs); if (seen.has(key)) continue
         built++

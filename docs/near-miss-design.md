@@ -1,6 +1,6 @@
 # Near-miss products: getting money back when slips lose
 
-Status: **researched and measured, not built** (2026-10-02). The question: can SportyBet's near-miss
+Status: **built** (2026-10-02): builder, session option, placer, settlement and UI, with a dry run on the real betslip (`algorithm_v1.md` §0.7). Not yet staked. The question: can SportyBet's near-miss
 products return a meaningful amount of the budget on a losing day, while keeping a shot at the jackpot?
 
 Everything below is grounded in SportyBet's own code and in our own slips:

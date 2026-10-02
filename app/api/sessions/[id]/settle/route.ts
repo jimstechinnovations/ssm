@@ -10,7 +10,7 @@
 
 import { getSession, updateSession, listPlacedSlipsWithLegs, settleSessionSlip, sessionSummary, effectivePayout } from '@/lib/sessions/store'
 import { fetchResults } from '@/lib/pedlas/results'
-import { settleSlip, cutLegs, type SlipLeg } from '@/lib/pedlas/settle-slips'
+import { settleSlip, flexiMinCorrect, cutLegs, type SlipLeg } from '@/lib/pedlas/settle-slips'
 import { getBookConfig, bookBoost } from '@/lib/books/config-store'
 import { getBook } from '@/lib/books/registry'
 import { boostFromTable, reconciledPayout } from '@/lib/pedlas/boost'
@@ -63,7 +63,7 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
   let won = 0, lost = 0, pending = 0
   for (const s of unsettled) {
     const legs = s.legs as (SlipLeg & { suspended?: boolean; odds?: number })[]
-    const verdict = settleSlip(legs, results)
+    const verdict = settleSlip(legs, results, { minCorrect: flexiMinCorrect(s.decision) })   // floor tickets: at least k of N
     if (verdict === 'pending') { pending++; continue }
     const dropped = legs.some(l => l.suspended)
     // Credit what the BOOK will pay: the site's own Potential Win captured at Confirm (exact — it already
