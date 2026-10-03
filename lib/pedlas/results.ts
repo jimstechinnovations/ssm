@@ -20,11 +20,21 @@ function parseScore(...vals: (string | undefined)[]): [number, number] | null {
 export async function fetchResult(fixtureId: number): Promise<GameResult | null> {
   try {
     const j = await cdpFetch<{ data?: unknown }>('https://www.sportybet.com', `/api/ng/factsCenter/event?eventId=sr:match:${fixtureId}&productId=1`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, timeoutMs: 8000 })
-    const d = j?.data as (Record<string, string> & { status?: number | string }) | undefined
+    const d = j?.data as (Record<string, string> & { status?: number | string; gameScore?: unknown }) | undefined
     if (!d) return null
+    // BETS SETTLE ON THE 90-MINUTE SCORE. A cup game that goes to extra time keeps counting goals in setScore
+    // (Kashiwa 3-3 Gamba went 4-3 in extra time on 2026-10-03 and revived two slips SportyBet had already
+    // lost). gameScore lists the score of each period — ["1:1","2:2","1:0"] = 1st half, 2nd half, extra time
+    // — so regular time is the sum of the first two, and a game that has reached a third period is decided.
+    const periods = Array.isArray(d.gameScore) ? (d.gameScore as unknown[]).map(x => parseScore(String(x))) : []
+    const beyondRegular = periods.length > 2 || /extra|penalt|\baet\b|\bap\b/i.test(d.matchStatus || '')
+    if (beyondRegular && periods.length >= 2 && periods[0] && periods[1]) {
+      const h = periods[0][0] + periods[1][0], a = periods[0][1] + periods[1][1]
+      return { finished: true, total: h + a, home: h, away: a }
+    }
     // Either signal marks the end: the text status ("Ended"/"FT"/"AP"…) or numeric status 3/4.
     const finished = FINISHED.test(d.matchStatus || '') || (typeof d.status === 'string' && FINISHED.test(d.status)) || Number(d.status) === 3 || Number(d.status) === 4
-    const score = parseScore(d.setScore, d.productStatus, d.gameScore)
+    const score = parseScore(d.setScore, d.productStatus, String(d.gameScore ?? ''))
     // A score we cannot read must NEVER settle as 0-0 (that would wrongly win every Under leg) —
     // treat it as not finished so the slip stays pending until a real score is available.
     if (score == null) return { finished: false, total: 0 }
