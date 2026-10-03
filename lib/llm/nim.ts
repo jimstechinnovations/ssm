@@ -4,7 +4,7 @@
 // Reads config lazily from process.env so the rest of the system (and tests) work
 // with no key configured — callers fall back to the deterministic path.
 //   NVIDIA_API_KEY   (required to enable NIM)
-//   NVIDIA_MODEL     (default meta/llama-3.3-70b-instruct)
+//   NVIDIA_MODEL     (default nvidia/nemotron-3-ultra-550b-a55b; tried first, then FALLBACK_MODELS)
 //   NVIDIA_BASE_URL  (default https://integrate.api.nvidia.com/v1)
 //
 // Determinism aids: temperature 0 by default + an in-memory response cache keyed by
@@ -12,7 +12,13 @@
 
 import 'server-only'
 
-const DEFAULT_MODEL = 'meta/llama-3.3-70b-instruct'
+const DEFAULT_MODEL = 'nvidia/nemotron-3-ultra-550b-a55b'
+// NVIDIA retires models without warning: meta/llama-3.3-70b-instruct went 410 Gone on 2026-08-26 and every
+// call failed silently into the deterministic fallback for over a month. A retired (404/410) model is skipped
+// and the next one tried; the first that answers is remembered for the life of the process. Timed 2026-10-03:
+// nemotron-3-ultra 7s, gpt-oss-20b 29s, both sound.
+const FALLBACK_MODELS = ['nvidia/nemotron-3-ultra-550b-a55b', 'openai/gpt-oss-20b']
+let workingModel: string | null = null
 const DEFAULT_BASE_URL = 'https://integrate.api.nvidia.com/v1'
 
 export interface NimMessage {
@@ -33,7 +39,12 @@ export function nimConfigured(): boolean {
 }
 
 export function nimModel(): string {
-  return process.env.NVIDIA_MODEL?.trim() || DEFAULT_MODEL
+  return workingModel ?? (process.env.NVIDIA_MODEL?.trim() || DEFAULT_MODEL)
+}
+
+/** Models to try, in order: the one that last worked, the configured one, then the fallbacks. */
+function modelChain(): string[] {
+  return [...new Set([workingModel, process.env.NVIDIA_MODEL?.trim(), DEFAULT_MODEL, ...FALLBACK_MODELS].filter((m): m is string => !!m))]
 }
 
 function nimBaseUrl(): string {
@@ -75,10 +86,23 @@ export async function nimChat(messages: NimMessage[], opts: NimOptions = {}): Pr
   const apiKey = process.env.NVIDIA_API_KEY?.trim()
   if (!apiKey) throw new Error('nimChat: NVIDIA_API_KEY is not set')
 
-  const model = nimModel()
   const temperature = opts.temperature ?? 0
   const max_tokens = opts.maxTokens ?? 2048
+  let lastError: Error | null = null
+  for (const model of modelChain()) {
+    try {
+      const content = await nimChatModel(apiKey, model, messages, temperature, max_tokens, opts)
+      workingModel = model
+      return content
+    } catch (e) {
+      lastError = e instanceof Error ? e : new Error(String(e))
+      if (!/nimChat: (404|410)/.test(lastError.message)) throw lastError   // only a retired/unknown model moves on
+    }
+  }
+  throw lastError ?? new Error('nimChat: no model available')
+}
 
+async function nimChatModel(apiKey: string, model: string, messages: NimMessage[], temperature: number, max_tokens: number, opts: NimOptions): Promise<string> {
   const body: Record<string, unknown> = { model, messages, temperature, max_tokens }
   if (opts.json) body.response_format = { type: 'json_object' }
 

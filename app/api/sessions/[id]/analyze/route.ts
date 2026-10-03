@@ -44,6 +44,9 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
   const concentrated = [...games].map(g => ({ ...g, top: Number(/×(\d+)/.exec(g.picks[0] ?? '')?.[1] ?? 0) })).sort((a, b) => b.top - a.top).slice(0, 5)
 
   const facts = {
+    currency: 'NGN (₦) — always write amounts in ₦, never £ or $',
+    // stake makeup: jackpot slips vs floor tickets (Flexi "k of N" — a small payout that lands often)
+    slipsByStake: Object.entries(slips.reduce((m: Record<string, number>, sl) => { const d = (sl as { decision?: { product?: string } | null }).decision; const k = `${d?.product === 'flexi' ? 'floor ticket (Flexi, small payout, lands often)' : 'jackpot slip (pays ≈ the target)'} at ₦${Number((sl as { stake?: number }).stake ?? 0)}`; m[k] = (m[k] ?? 0) + 1; return m }, {})).map(([kind, count]) => ({ kind, count })),
     engine, slips: slips.length, games: games.length, withHistory: withHist.length, budget: session.budget, target: session.targetWin,
     pAnyWin: pAny, returnsPer100: keep != null ? Math.round(keep * 100) : null,
     mostConcentratedGames: concentrated.map(g => ({ game: g.game, picks: g.picks, avgGoals: g.avgGoals, fivePlusPct: g.fivePlusPct })),
@@ -57,9 +60,9 @@ export async function POST(_request: Request, ctx: { params: Promise<{ id: strin
 
   try {
     const summary = await nimChat([
-      { role: 'system', content: 'You are an honest betting-risk analyst. NEVER claim an edge or predict profit — these markets are priced with a margin and models do not beat them. Be concise (3-4 sentences), concrete, and grounded ONLY in the data given.' },
+      { role: 'system', content: 'You are an honest betting-risk analyst. NEVER claim an edge or predict profit — these markets are priced with a margin and models do not beat them. Be concise (3-4 sentences), concrete, and grounded ONLY in the data given — never invent stakes, odds or amounts. Currency is Nigerian naira (₦).' },
       { role: 'user', content: `A betting session spreads a budget over many accumulator slips. Data:\n${JSON.stringify(facts, null, 2)}\nGive a short, honest read: which games carry the most slips on one result (and what their history says), how realistic the chance of ≥1 win is, and one caveat. No edge claims.` },
-    ], { temperature: 0, maxTokens: 400, timeoutMs: 45_000 })
+    ], { temperature: 0, maxTokens: 1200, timeoutMs: 60_000 })
     return Response.json({ summary: summary.trim() || deterministic, source: 'nim', model: nimModel() })
   } catch (e) {
     return Response.json({ summary: deterministic, source: 'deterministic', note: e instanceof Error ? e.message.slice(0, 120) : 'nim error' })
