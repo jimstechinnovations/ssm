@@ -12,9 +12,9 @@ import type { Selection } from '../lib/pedlas/selections'
 
 const budget = Number(process.argv[2] ?? 2200), stake = Number(process.argv[3] ?? 100), target = Number(process.argv[4] ?? 51000)
 const VARIANTS: { name: string; maxLegOdds?: number; coverWeight?: number }[] = [
-  { name: 'as now' },
-  { name: 'cap 3.5', maxLegOdds: 3.5 },
-  { name: 'coverage', coverWeight: 3 },
+  { name: 'old (no cap, no coverage)', maxLegOdds: Infinity, coverWeight: 0 },
+  { name: 'cap 3.5', maxLegOdds: 3.5, coverWeight: 0 },
+  { name: 'coverage', maxLegOdds: Infinity, coverWeight: 3 },
   { name: 'cap 3.5 + coverage', maxLegOdds: 3.5, coverWeight: 3 },
 ]
 

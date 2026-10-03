@@ -249,6 +249,45 @@ The chance of at least one win ≈ keep × budget ÷ target, so for the same bud
 
 ---
 
+## 0.8 Leg-odds cap and per-game coverage — defaults since 2026-10-03
+
+**Why.**
+- **Long shots are priced right but cost too much.** On 1 Oct, picks at odds 12+ won 7.1% against 4.0%
+  priced, and every odds band matched its price within luck. But SportyBet's margin grows with the odds.
+  At fair (Pinnacle + Kambi) prices, a leg returns per ₦1:
+
+| Odds of the leg | 1.0–1.6 | 1.6–3.5 | 3.5–6 | 6+ |
+|---|---:|---:|---:|---:|
+| Return per ₦1 | ₦0.96–0.97 | ₦0.90–0.94 | ₦0.86 | ₦0.80 |
+
+  Legs at 6+ were 24% of the 1 Oct legs and **39% of all lost legs**.
+- **The operator's coverage idea.** Across the family, the picks on one game should together cover the
+  likely results. Under 4.5 on some slips covers 0–4 goals; Over 1.5 on others covers 2+. Whatever the
+  score, some slip survives that game.
+
+**What changed** (`lib/pedlas/decision-bot.ts`):
+- `maxLegOdds` (default **3.5**): no leg priced above it.
+- `coverWeight` (default **3**): the bot tracks, per game, the scorelines the family's picks already
+  cover. A fifth candidate generator prefers picks that cover new results, and greedy ranks candidates by
+  `gain × (1 + 3 × new cover)`. Each slip's reason still quotes its real win chance, not the boosted one.
+
+**Bench** (`scripts/bench-cover.ts`):
+- Setup: live board of 3 Oct (243 games), ₦2,200 as 22 slips of ₦100 → ₦51,000.
+- Scoring: fair prices, with the survivors simulator over 20,000 days.
+
+| Version | Win chance | ≥ 1 slip alive with 90% through | Slips alive halfway | Legs at 6+ |
+|---|---:|---:|---:|---:|
+| Old (no cap, no coverage) | 2.65% | 40 of 80 games | 1.9 | 10 |
+| Cap 3.5 | 2.58% | 49 | 2.9 | 0 |
+| Coverage only | 2.43% | 50 | 2.9 | 12 |
+| **Cap 3.5 + coverage** | **2.62%** | **48** | **3.4** | **0** |
+
+The win chance is the same within simulation noise (about ±0.1 points). Survival is much better: about 80%
+more slips alive halfway. There are no long shots. One board and one seed so far: re-run the bench on
+future boards and keep the result in `docs/learnings.md`.
+
+---
+
 ## 1. The one rule that never changes
 
 A bookmaker prices every selection with a margin. For a two-sided market with odds `a` and `b`:

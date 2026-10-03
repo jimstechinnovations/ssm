@@ -52,7 +52,7 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
       total: jack.filter(placedish).length, aliveNow, aliveAtFullTime: c?.aliveAtFullTime ?? 0, chancePct,
       aliveChange: prev ? aliveNow - prev.aliveNow : 0, chanceChangePct: prev ? r2(chancePct - prev.chancePct) : 0,
     },
-    newlyCut: prev ? cutNow.filter(t => !prevCut.has(t.game)).map(t => ({ game: t.game, score: t.score ?? '', slipsCut: t.cut })) : [],
+    newlyCut: prev ? cutNow.filter(t => !prevCut.has(t.game)).map(t => ({ game: t.game, score: t.score ?? '', slipsCut: t.cut, wasBeatenInPlay: (prev.inPlayKeys ?? []).some(k => k.endsWith(`|${t.game}`)) })) : [],
     newlyBeatenInPlay: prev ? ek.filter(k => !prevEk.has(`${k.key}|${k.game}`)).map(k => ({ game: k.game, score: k.score, pick: k.pick })) : [],
     live: (c?.now.journey ?? []).filter(g => g.status === 'live' && g.riding > 0).map(g => ({ game: g.game, score: g.liveScore ?? '', minute: g.minute ?? null, slipsRiding: g.riding })),
     nextUp: (c?.now.journey ?? []).filter(g => g.status === 'pending' && g.riding > 0).sort((a, b) => b.riding - a.riding || a.kickoff.localeCompare(b.kickoff)).slice(0, 3)

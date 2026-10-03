@@ -65,12 +65,12 @@ export interface BotConfig {
   valueFloor?: number
   /** Never use a leg priced above this (default: no cap). SportyBet's margin grows with the odds: at fair
    *  (Pinnacle + Kambi) prices a leg at 1.0–1.6 keeps ₦0.96–0.97 per ₦1, 3.5–6 keeps ₦0.86, 6+ keeps ₦0.80
-   *  (2026-10-02); on 1 Oct legs at 6+ were 24% of legs and 39% of the losses. */
+   *  (2026-10-02); on 1 Oct legs at 6+ were 24% of legs and 39% of the losses. Default 3.5. */
   maxLegOdds?: number
   /** Reward for COVERING scorelines no earlier slip covers on the same game (default 0 = off). The operator's
    *  idea (2026-10-03): across the family, picks on one game should together cover the likely results — e.g.
    *  Under 4.5 on some slips (0–4 goals) and Over 1.5 on others (2+): whatever the score, some slip survives
-   *  that game. Greedy multiplies a candidate's gain by (1 + coverWeight × the average new mass it covers). */
+   *  that game. Greedy multiplies a candidate's gain by (1 + coverWeight × the average new mass it covers). Default 3. */
   coverWeight?: number
 }
 
@@ -142,7 +142,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     band: cfg.band ?? 0.01, rule: cfg.rule ?? 'greedy', allowSubMinLegs: cfg.allowSubMinLegs ?? true,
     minLegOdds: cfg.minLegOdds ?? 1.20, seed: cfg.seed ?? 1, maxLegs: cfg.maxLegs ?? 40,
     maxPayout: cfg.maxPayout ?? Infinity, candidates: cfg.candidates ?? 24, skip: cfg.skip ?? false,
-    deadlineMs: cfg.deadlineMs ?? 90_000, legProb: cfg.legProb ?? 'panel', valueFloor: cfg.valueFloor ?? 0.95, maxLegOdds: cfg.maxLegOdds ?? Infinity, coverWeight: cfg.coverWeight ?? 0,
+    deadlineMs: cfg.deadlineMs ?? 90_000, legProb: cfg.legProb ?? 'panel', valueFloor: cfg.valueFloor ?? 0.95, maxLegOdds: cfg.maxLegOdds ?? 3.5, coverWeight: cfg.coverWeight ?? 3,   // defaults since 2026-10-03 (scripts/bench-cover.ts: same win chance, ~80% more slips alive halfway, no long shots)
     evalDays: cfg.evalDays ?? 20000,
   }
   const boost = cfg.boost ?? boostFor
