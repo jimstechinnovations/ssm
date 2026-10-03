@@ -69,7 +69,7 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
     newlyBeatenInPlay: prev ? ek.filter(k => !prevEk.has(`${k.key}|${k.game}`)).map(k => ({ game: k.game, score: k.score, pick: k.pick })) : [],
     live: (c?.now.journey ?? []).filter(g => g.status === 'live' && g.riding > 0).map(g => ({ game: g.game, score: g.liveScore ?? '', minute: g.minute ?? null, slipsRiding: g.riding })),
     nextUp: (c?.now.journey ?? []).filter(g => g.status === 'pending' && g.riding > 0).sort((a, b) => b.riding - a.riding || a.kickoff.localeCompare(b.kickoff)).slice(0, 3)
-      .map(g => ({ game: g.game, kickoffUtc: g.kickoff.slice(11, 16), slipsRiding: g.riding })),
+      .map(g => ({ game: g.game, kickoffUtc: g.kickoff.slice(11, 16), slipsRiding: g.riding, ...(Date.parse(g.kickoff) < Date.now() - 20 * 60_000 ? { overdue: true } : {}) })),   // overdue: past kick-off but SportyBet says not started (delayed / postponed)
     floor: {
       total: floor.filter(placedish).length, won: floorWon.length, lost: floorLost.length, open: floor.filter(s => s.status === 'placed').length,
       returnedNaira: Math.round(floorWon.reduce((x, s) => x + (s.returned ?? 0), 0)), stakedNaira: Math.round(floor.filter(placedish).reduce((x, s) => x + s.stake, 0)),

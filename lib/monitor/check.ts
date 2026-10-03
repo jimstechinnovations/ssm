@@ -7,7 +7,7 @@ export interface MonitorFacts {
   newlyCut: { game: string; score: string; slipsCut: number; wasBeatenInPlay?: boolean }[]   // wasBeatenInPlay: those slips were already counted out while the game was live
   newlyBeatenInPlay: { game: string; score: string; pick: string }[]
   live: { game: string; score: string; minute: number | null; slipsRiding: number }[]
-  nextUp: { game: string; kickoffUtc: string; slipsRiding: number }[]
+  nextUp: { game: string; kickoffUtc: string; slipsRiding: number; overdue?: boolean }[]
   floor: { total: number; won: number; lost: number; open: number; returnedNaira: number; stakedNaira: number }
   placement: { placed: number; stakedNaira: number; openOnSportyBet: number | null; mismatches: string[]; checkNote: string | null }
   winners: { slip: string; paysNaira: number }[]
@@ -72,7 +72,8 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
 export const SYSTEM = `You write the live update for a betting session, like a calm sports desk. Use ONLY the facts given (JSON).
 Rules: 1-3 short sentences, under 60 words. Lead with what changed since the last update. Always state how many jackpot slips are alive
 and the chance of a win (as given, with %). If "firstCheck" is true, summarise "soFar" instead of listing games.
-Name at most 3 games. A newlyCut game with "wasBeatenInPlay": true only confirms slips that were ALREADY lost (no slip
+Name at most 3 games. A nextUp game with "overdue": true is past its kick-off time but SportyBet says it hasn't
+started — call it delayed or possibly postponed, never "kicks off at". A newlyCut game with "wasBeatenInPlay": true only confirms slips that were ALREADY lost (no slip
 died because of it) — say it confirmed earlier losses, never that it cut or knocked out slips. Mention floor tickets only if they changed. If "placement.mismatches" is not
 empty, say so first. Amounts are Nigerian naira (₦) — never £, $ or €. Never invent a number, game, score or prediction;
 never claim an edge. Don't say what made the chance change (it also moves as games are played) — just state it.
