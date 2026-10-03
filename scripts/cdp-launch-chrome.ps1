@@ -9,7 +9,8 @@
 #
 # Usage:  powershell -ExecutionPolicy Bypass -File scripts/cdp-launch-chrome.ps1 [-Mode dedicated|default]
 
-param([ValidateSet('dedicated','default')] [string]$Mode = 'dedicated', [int]$Port = 9222)
+param([ValidateSet('dedicated','default')] [string]$Mode = 'dedicated', [int]$Port = 9222, [string]$StartUrl = 'https://www.sportybet.com/ng/')
+# -StartUrl: the first page (the results browser on :9250 opens Sofascore, never SportyBet)
 # -Port: each extra placement window gets its own port AND its own profile (.chrome-bot-<port>), so each
 # has its own betslip. :9222 keeps the original .chrome-bot profile.
 
@@ -52,11 +53,11 @@ if ($Mode -eq 'default') {
   # Extra windows open staggered (not exactly on top of the main one). Keep them open and un-minimized:
   # a minimized window stops painting and its clicks hang (the placer restores one if it finds it).
   $place = @()
-  if ($Port -ne 9222) { $k = $Port - 9222; $place = @("--window-position=$(60 * $k),$(40 * $k)", "--window-size=1100,850") }
+  if ($Port -ne 9222 -and $Port -lt 9250) { $k = $Port - 9222; $place = @("--window-position=$(60 * $k),$(40 * $k)", "--window-size=1100,850") }
   $args = @(
     "--remote-debugging-port=$Port", "--remote-debugging-address=127.0.0.1",
     "--user-data-dir=$dedicated"
-  ) + $place + $antiThrottle + @("https://www.sportybet.com/ng/")
+  ) + $place + $antiThrottle + @($StartUrl)
 }
 
 # Launch DETACHED (Start-Process, not "& chrome | Out-Null"): the call operator blocks and Chrome dies
@@ -68,4 +69,4 @@ for ($i = 0; $i -lt 15; $i++) {
   try { $v = Invoke-RestMethod -Uri "http://127.0.0.1:$Port/json/version" -TimeoutSec 2; Write-Output "OK ($Mode): debug port up -> $($v.Browser)"; break }
   catch { }
 }
-if ($Mode -eq 'dedicated') { Write-Output "Log into SportyBet in the new window (once), then tell the bot to verify." }
+if ($Mode -eq 'dedicated' -and $StartUrl -like '*sportybet*') { Write-Output "Log into SportyBet in the new window (once), then tell the bot to verify." }

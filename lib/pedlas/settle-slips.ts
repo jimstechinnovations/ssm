@@ -6,7 +6,7 @@
 import { legRuleOf, needsOnlyTotal, ruleWins, type LegRule } from './selections'
 
 /** A finished game's result. home/away are needed for non-total markets (older results carried only total). */
-export interface GameResult { finished: boolean; total: number; home?: number; away?: number; live?: boolean; minute?: number }   // live/minute: in play (score so far)
+export interface GameResult { finished: boolean; total: number; home?: number; away?: number; live?: boolean; minute?: number; source?: 'sofascore' }   // live/minute: in play (score so far); source: set when not from SportyBet
 export type Verdict = 'won' | 'lost' | 'pending'
 export interface SlipLeg { fixtureId: number; side?: string; line?: number; rule?: LegRule; suspended?: boolean }
 

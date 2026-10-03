@@ -3,10 +3,15 @@
 // Chrome when one is up (cdpFetch — SportyBet's edge drops our raw server requests at times, 2026-10-01),
 // else a plain server fetch. total = home + away.
 // This is the ONE score source for every settlement path (session settle, Reports ledger, grading).
+// FALLBACK: lower-league games can sit at "Not start" with no score on SportyBet's feed while they're being
+// played (Truro v Cirencester, Salisbury v Dulwich, 2026-10-03). When SportyBet shows no play 20+ min after
+// kick-off we ask Sofascore (lib/results/sofascore.ts — its own browser, never the betting one), matched by
+// team names + kick-off, 90-minute score. RESULTS_FALLBACK=off disables it.
 
 import 'server-only'
 import type { GameResult } from './settle-slips'
 import { cdpFetch } from '../placement/cdp-fetch'
+import { sofascoreResult } from '../results/sofascore'
 
 const UA = 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/126.0 Safari/537.36'
 const FINISHED = /end|finish|\bft\b|full.?time|awarded|closed|\baet\b|\bap\b/i
@@ -22,6 +27,29 @@ export async function fetchResult(fixtureId: number): Promise<GameResult | null>
     const j = await cdpFetch<{ data?: unknown }>('https://www.sportybet.com', `/api/ng/factsCenter/event?eventId=sr:match:${fixtureId}&productId=1`, { headers: { 'User-Agent': UA, Accept: 'application/json' }, timeoutMs: 8000 })
     const d = j?.data as (Record<string, string> & { status?: number | string; gameScore?: unknown }) | undefined
     if (!d) return null
+    const r = fromSporty(d)
+    if (r.finished || r.live) return r
+    const alt = await fallback(d)
+    return alt ?? r
+  } catch { return null }
+}
+
+/** Sofascore's view of a game SportyBet shows as not started though its kick-off is 20+ min gone. */
+async function fallback(d: Record<string, unknown>): Promise<GameResult | null> {
+  if (process.env.RESULTS_FALLBACK === 'off') return null
+  const ko = Number(d.estimateStartTime)
+  const home = String(d.homeTeamName ?? ''), away = String(d.awayTeamName ?? '')
+  if (!ko || !home || !away || Date.now() - ko < 20 * 60_000) return null
+  try {
+    const cat = (d.sport as { category?: { id?: string; name?: string } } | undefined)?.category
+    const a = await sofascoreResult({ home, away, kickoffMs: ko, category: cat && { id: cat.id, name: cat.name } })
+    if (!a) return null
+    return { finished: a.finished, total: a.home + a.away, home: a.home, away: a.away, ...(a.live ? { live: true, minute: a.minute ?? 45 } : {}), source: 'sofascore' }
+  } catch { return null }
+}
+
+function fromSporty(d: Record<string, string> & { status?: number | string; gameScore?: unknown }): GameResult {
+  {
     // BETS SETTLE ON THE 90-MINUTE SCORE. A cup game that goes to extra time keeps counting goals in setScore
     // (Kashiwa 3-3 Gamba went 4-3 in extra time on 2026-10-03 and revived two slips SportyBet had already
     // lost). gameScore lists the score of each period — ["1:1","2:2","1:0"] = 1st half, 2nd half, extra time
@@ -44,7 +72,7 @@ export async function fetchResult(fixtureId: number): Promise<GameResult | null>
     const inPlay = !finished && ((played != null && Number(played[1]) > 0) || /^(H1|H2|HT|ET|1st|2nd|half|pause|extra|penalt)/i.test(d.matchStatus || ''))
     const minute = inPlay ? (/^HT|half|pause/i.test(d.matchStatus || '') ? 45 : played ? Number(played[1]) : 45) : undefined
     return { finished, total: score[0] + score[1], home: score[0], away: score[1], ...(inPlay ? { live: true, minute } : {}) }
-  } catch { return null }
+  }
 }
 
 /** Fetch results for many fixtures (bounded concurrency). */

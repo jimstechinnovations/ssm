@@ -72,7 +72,9 @@ export async function runCoverage(session: Session, opts: { combine?: boolean; s
         openInFamily: openKeys.size,
         aliveHereSettledOnSite: [...aliveKeys].filter(k => !openKeys.has(k)),       // site already settled (usually lost early)
         openOnSiteDeadHere: [...openKeys].filter(k => !aliveKeys.has(k)),           // site hasn't settled a finished/decided game yet
-        openNotInFamily: open.length - openKeys.size,
+        // against EVERY placed slip, floor tickets included (they're not in the jackpot family — counting them
+        // as strangers raised a false "37 open bets not in this session" on 2026-10-03)
+        openNotInFamily: open.length - placed.filter(r => openSigs.has(sigOf(r))).length,
       }
     } catch (e) { site = { error: e instanceof Error ? e.message : String(e) } }
   }
