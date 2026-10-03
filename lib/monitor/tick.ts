@@ -68,8 +68,10 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
     newlyCut: prev ? cutNow.filter(t => !prevCut.has(t.game)).map(t => ({ game: t.game, score: t.score ?? '', slipsCut: t.cut, wasBeatenInPlay: lostSince === 0 || (prev.inPlayKeys ?? []).some(k => k.endsWith(`|${t.game}`)) })) : [],
     newlyBeatenInPlay: prev ? ek.filter(k => !prevEk.has(`${k.key}|${k.game}`)).map(k => ({ game: k.game, score: k.score, pick: k.pick })) : [],
     live: (c?.now.journey ?? []).filter(g => g.status === 'live' && g.riding > 0).map(g => ({ game: g.game, score: g.liveScore ?? '', minute: g.minute ?? null, slipsRiding: g.riding })),
-    nextUp: (c?.now.journey ?? []).filter(g => g.status === 'pending' && g.riding > 0).sort((a, b) => b.riding - a.riding || a.kickoff.localeCompare(b.kickoff)).slice(0, 3)
-      .map(g => ({ game: g.game, kickoffUtc: g.kickoff.slice(11, 16), slipsRiding: g.riding, ...(Date.parse(g.kickoff) < Date.now() - 20 * 60_000 ? { overdue: true } : {}) })),   // overdue: past kick-off but SportyBet says not started (delayed / postponed)
+    // soonest first (sorting by slips riding listed tomorrow 13:00 as "next" ahead of tonight's 22:00 games);
+    // a kick-off on another UTC day carries the weekday ("Sun 13:00") so it can't read as today
+    nextUp: (c?.now.journey ?? []).filter(g => g.status === 'pending' && g.riding > 0).sort((a, b) => a.kickoff.localeCompare(b.kickoff) || b.riding - a.riding).slice(0, 3)
+      .map(g => ({ game: g.game, kickoffUtc: (g.kickoff.slice(0, 10) === new Date().toISOString().slice(0, 10) ? '' : new Date(g.kickoff).toUTCString().slice(0, 3) + ' ') + g.kickoff.slice(11, 16), slipsRiding: g.riding, ...(Date.parse(g.kickoff) < Date.now() - 20 * 60_000 ? { overdue: true } : {}) })),   // overdue: past kick-off but SportyBet says not started (delayed / postponed)
     floor: {
       total: floor.filter(placedish).length, won: floorWon.length, lost: floorLost.length, open: floor.filter(s => s.status === 'placed').length,
       returnedNaira: Math.round(floorWon.reduce((x, s) => x + (s.returned ?? 0), 0)), stakedNaira: Math.round(floor.filter(placedish).reduce((x, s) => x + s.stake, 0)),
