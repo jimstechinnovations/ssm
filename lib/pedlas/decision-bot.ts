@@ -63,6 +63,15 @@ export interface BotConfig {
    *  while 286 picks on the board kept ≥ 0.98 — candidates were drawn by chance/probability, never by
    *  margin, so cheap legs only turned up by luck. */
   valueFloor?: number
+  /** Never use a leg priced above this (default: no cap). SportyBet's margin grows with the odds: at fair
+   *  (Pinnacle + Kambi) prices a leg at 1.0–1.6 keeps ₦0.96–0.97 per ₦1, 3.5–6 keeps ₦0.86, 6+ keeps ₦0.80
+   *  (2026-10-02); on 1 Oct legs at 6+ were 24% of legs and 39% of the losses. */
+  maxLegOdds?: number
+  /** Reward for COVERING scorelines no earlier slip covers on the same game (default 0 = off). The operator's
+   *  idea (2026-10-03): across the family, picks on one game should together cover the likely results — e.g.
+   *  Under 4.5 on some slips (0–4 goals) and Over 1.5 on others (2+): whatever the score, some slip survives
+   *  that game. Greedy multiplies a candidate's gain by (1 + coverWeight × the average new mass it covers). */
+  coverWeight?: number
 }
 
 /** Per-game history the bot cites (and gates on). */
@@ -133,7 +142,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     band: cfg.band ?? 0.01, rule: cfg.rule ?? 'greedy', allowSubMinLegs: cfg.allowSubMinLegs ?? true,
     minLegOdds: cfg.minLegOdds ?? 1.20, seed: cfg.seed ?? 1, maxLegs: cfg.maxLegs ?? 40,
     maxPayout: cfg.maxPayout ?? Infinity, candidates: cfg.candidates ?? 24, skip: cfg.skip ?? false,
-    deadlineMs: cfg.deadlineMs ?? 90_000, legProb: cfg.legProb ?? 'panel', valueFloor: cfg.valueFloor ?? 0.95,
+    deadlineMs: cfg.deadlineMs ?? 90_000, legProb: cfg.legProb ?? 'panel', valueFloor: cfg.valueFloor ?? 0.95, maxLegOdds: cfg.maxLegOdds ?? Infinity, coverWeight: cfg.coverWeight ?? 0,
     evalDays: cfg.evalDays ?? 20000,
   }
   const boost = cfg.boost ?? boostFor
@@ -155,7 +164,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     : config.legProb === 'panel' && s.sharp && s.sharp.n >= 2 && s.sharp.spread <= 0.04 ? s.sharp.p
     : s.probability != null && s.probability > 0 && s.probability < 1 ? s.probability : devigged(s, games[gi].selections)
   const opts = games.map((g, gi) => g.selections
-    .filter(s => config.allowSubMinLegs || s.odds >= config.minLegOdds)
+    .filter(s => (config.allowSubMinLegs || s.odds >= config.minLegOdds) && s.odds <= config.maxLegOdds)
     .map(s => ({ s, p: legP(gi, s) })))
   const h2hWins = (gi: number, s: Selection) => {
     const h = games[gi].history?.h2h ?? []
@@ -298,6 +307,23 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
   }
   const pCache = new Map<string, number>()
   function probOfKey(gi: number, s: Selection) { const k = `${gi}:${s.key}`; let v = pCache.get(k); if (v == null) { v = legP(gi, s); pCache.set(k, v) } return v }
+  // ── per-game COVERAGE: the union of the scorelines the family's picks win on, game by game ──
+  const covered = new Map<number, Uint8Array>()
+  /** Probability mass of the scorelines this pick wins on that NO earlier slip's pick on this game covers. */
+  const newCover = (gi: number, sel: Selection) => {
+    const m = maskOf(gi, sel), cov = covered.get(gi), p = tables[gi].p
+    let x = 0; for (let i = 0; i < NCELL; i++) if (m[i] && !(cov && cov[i])) x += p[i]
+    return x
+  }
+  const coverOf = (legs: { gi: number; s: Selection }[]) => legs.length ? legs.reduce((x, l) => x + newCover(l.gi, l.s), 0) / legs.length : 0
+  const markCovered = (legs: { gi: number; s: Selection }[]) => {
+    for (const l of legs) { const m = maskOf(l.gi, l.s); let cov = covered.get(l.gi); if (!cov) { cov = new Uint8Array(NCELL); covered.set(l.gi, cov) } for (let i = 0; i < NCELL; i++) if (m[i]) cov[i] = 1 }
+  }
+  // generator: at each game prefer picks that cover what the family doesn't yet, weighted by P
+  const coverPick = (gi: number, rng: () => number) => opts[gi]
+    .map(o => { const nc = newCover(gi, o.s); return { ...o, nc, k: Math.pow(rng(), 1 / Math.max(1e-6, o.p * (1 + 4 * nc))) } })
+    .sort((a, b) => b.k - a.k)
+    .map(o => ({ s: o.s, p: o.p, why: `coverage pick: ${o.s.name} @${o.s.odds} (P=${(100 * o.p).toFixed(1)}%) covers ${(100 * o.nc).toFixed(0)}% of this game's results that no earlier slip covers` }))
   // Legs are aligned BY GAME (not by position), so slips that skip different games are still exact:
   // a game both slips bet → the joint from the table; a game only one bets → that leg's own p.
   const pBoth = (a: { gi: number; s: Selection }[], b: { gi: number; s: Selection }[]) => {
@@ -338,7 +364,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     if (Date.now() - t0 > config.deadlineMs) { timedOut = true; break }
     let chosen: BotSlip | null = null
     if (config.rule === 'greedy') {
-      type Cand = { b: { legs: Choice[]; backtracks: number }; gain: number; own: number; overlap: number; overlapping: number }
+      type Cand = { b: { legs: Choice[]; backtracks: number }; gain: number; own: number; overlap: number; overlapping: number; cover: number; pGain: number; pOwn: number }
       let best: Cand | null = null, bestDisjoint: Cand | null = null
       let built = 0
       // Overlap is measured against every earlier slip, or a fixed sample of 300 for very large families
@@ -354,11 +380,12 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
         // game, prefers the pick that shares no scoreline with the earlier slips this candidate still
         // overlaps — so it becomes disjoint from them — and VALUE (the lowest-margin picks), which reaches
         // the same payout at a higher win chance. Greedy then picks by real P(≥1 win) gained.
-        const gen = c % 4
+        const gen = c % (config.coverWeight > 0 ? 5 : 4)
         const b = gen === 0 ? buildSlip(gi => shuffled(gi, rng, 'random'), rng)
           : gen === 1 ? buildSlip(gi => weighted(gi, rng), rng)
             : gen === 2 ? buildSlip((gi, legs) => separator(gi, legs, familyMaps, rng), rng)
-              : buildSlip(gi => value(gi, rng), rng)
+              : gen === 3 ? buildSlip(gi => value(gi, rng), rng)
+                : buildSlip(gi => coverPick(gi, rng), rng)
         if (!b) continue
         const key = keyOf(b.legs); if (seen.has(key)) continue
         built++
@@ -366,16 +393,19 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
         let overlap = 0, overlapping = 0
         for (const f of family) { const o = pBoth(b.legs, f); if (o > 0) { overlap += o; overlapping++ } }
         overlap *= scale; overlapping = Math.round(overlapping * scale)
-        const cand: Cand = { b, gain: own - overlap, own, overlap, overlapping }
+        const cover = config.coverWeight > 0 ? coverOf(b.legs) : 0
+        const boost = 1 + config.coverWeight * cover
+        const cand: Cand = { b, gain: (own - overlap) * boost, own: own * boost, overlap, overlapping, cover, pGain: own - overlap, pOwn: own }   // gain/own rank (coverage-boosted); pGain/pOwn are the real chances
         if (!best || cand.gain > best.gain) best = cand
         if (overlapping === 0 && (!bestDisjoint || cand.own > bestDisjoint.own)) bestDisjoint = cand
       }
       // Prefer a fingerprint-DISJOINT candidate (adds its whole win chance, shares nothing) unless an
       // overlapping one still adds strictly more after its overlap is removed.
       const pick = bestDisjoint && (!best || bestDisjoint.gain >= best.gain) ? bestDisjoint : best
-      if (pick) chosen = finalize(pick.b, k + 1, pick.overlapping === 0
-        ? `greedy: best of ${built} candidates — fingerprint-disjoint from all ${slips.length} earlier slips (no scoreline combination wins two slips), adds its full ${(100 * pick.own).toFixed(4)}% to P(≥1 win)`
-        : `greedy: best of ${built} candidates — adds ${(100 * pick.gain).toFixed(4)}% to P(≥1 win) (wins ${(100 * pick.own).toFixed(4)}% alone, ${(100 * pick.overlap).toFixed(4)}% shared with ${pick.overlapping} earlier slip${pick.overlapping === 1 ? '' : 's'})`)
+      const coverNote = pick && config.coverWeight > 0 ? ` · covers ${(100 * pick.cover).toFixed(0)}% new results per game` : ''
+      if (pick) chosen = finalize(pick.b, k + 1, (pick.overlapping === 0
+        ? `greedy: best of ${built} candidates — fingerprint-disjoint from all ${slips.length} earlier slips (no scoreline combination wins two slips), adds its full ${(100 * pick.pOwn).toFixed(4)}% to P(≥1 win)`
+        : `greedy: best of ${built} candidates — adds ${(100 * pick.pGain).toFixed(4)}% to P(≥1 win) (wins ${(100 * pick.pOwn).toFixed(4)}% alone, ${(100 * pick.overlap).toFixed(4)}% shared with ${pick.overlapping} earlier slip${pick.overlapping === 1 ? '' : 's'})`) + coverNote)
     } else {
       for (let attempt = 0; attempt < 30 && !chosen; attempt++) {
         let b: { legs: Choice[]; backtracks: number } | null = null
@@ -398,6 +428,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     }
     if (!chosen) { failures++; k--; if (failures >= 40) notes.push(`stopped at ${slips.length} slips: no further distinct slip lands in the band`); continue }
     seen.add(keyOf(chosen.legs.map(l => ({ gi: l.game, s: l.selection }))))
+    markCovered(chosen.legs.map(l => ({ gi: l.game, s: l.selection })))
     slips.push(chosen)
   }
   if (slips.length === 0) notes.push(`no slip can reach ${naira(T)}–${naira(Tmax)} with these ${games.length} games`)
