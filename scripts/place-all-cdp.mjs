@@ -334,13 +334,33 @@ function makeWorker(page, tag, parallel) {
     for (const b of boxes) {
       const txt = (b.innerText || '')
       if (/about to pay|confirm to pay|accept change|place bet|total stake|booking code|potential win|submission/i.test(txt)) continue // placement UI — leave it
-      const btn = [...b.querySelectorAll('button,span,div,a,i')].find(e => vis(e) && e.children.length === 0 && /^(ok|okay|got it|close|accept( all)?|agree|allow|dismiss|continue|confirm|try again|reload|retry|×|✕|✖|x)$/i.test((e.textContent || '').trim()))
+      // never touch the betslip or a pay window, or anything containing them (a stray click there can STAKE)
+      if (b.closest('#j_betslip, .m-comfirm-wrapper, [class*=betslip]') || b.querySelector('#j_betslip, .m-comfirm-wrapper')) continue
+      const btn = [...b.querySelectorAll('button,span,div,a,i')].find(e => vis(e) && e.children.length === 0 && /^(ok|okay|got it|close|accept( all)?|agree|allow|dismiss|continue|try again|reload|retry|×|✕|✖|x)$/i.test((e.textContent || '').trim()))
       if (btn) { btn.click(); n++ }
     }
     return n
   }).catch(() => 0)
 
+  // Close an open pay window ("About to pay" / Flexi "Confirm to Pay") with CANCEL and wait until it is gone.
+  // Live 2026-10-03: a Flexi pay window left open under the betslip got a ₦10 floor ticket CONFIRMED by a
+  // cleanup force-click (force-clicks scroll their target into view, and the window scrolls with the betslip).
+  // So: no force-click anywhere until any pay window is closed.
+  const cancelPayWindow = async () => {
+    for (let i = 0; i < 4 && await bodyHas(PAY_DIALOG); i++) {
+      await page.evaluate(() => {
+        const vis = e => e && (e.offsetWidth || e.offsetHeight)
+        const scope = [...document.querySelectorAll('.m-comfirm-wrapper, [class*=dialog], [class*=modal]')].find(e => vis(e) && /about to pay|confirm to pay/i.test(e.innerText || '')) || document
+        const c = [...scope.querySelectorAll('button, span, div, a')].find(e => vis(e) && e.children.length === 0 && /^cancel$/i.test((e.textContent || '').trim()))
+        if (c) c.click()
+      }).catch(() => {})
+      await until(async () => !(await bodyHas(PAY_DIALOG)), 1500)
+    }
+    if (await bodyHas(PAY_DIALOG)) throw Object.assign(new Error('a pay window will not close — stopping before any further click could stake'), { fatal: true })
+  }
+
   const clearSlip = async () => {
+    await cancelPayWindow()
     // FAST PATH (the normal case between slips): Remove All → OK → the code box is back. The full sweep
     // below scans the whole page text several times per pass (~1s each on SportyBet) — only if this fails.
     if (!(await codeBoxVisible())) {
@@ -363,7 +383,7 @@ function makeWorker(page, tag, parallel) {
         await page.evaluate(() => { const vis = e => e && (e.offsetWidth || e.offsetHeight); const ok = [...document.querySelectorAll('button,span,div')].find(e => e.children.length === 0 && /^OK$/i.test((e.textContent || '').trim()) && vis(e)); if (ok) ok.click() })
         await page.waitForTimeout(700); continue
       }
-      if (await bodyHas(PAY_DIALOG)) { await clickLeaf('^cancel$'); await page.waitForTimeout(800); continue }
+      if (await bodyHas(PAY_DIALOG)) { await cancelPayWindow(); continue }
       const removeConfirm = await page.evaluate(() => { const w = [...document.querySelectorAll('.es-dialog-wrap,[class*=dialog-wrap]')].find(e => e.offsetWidth || e.offsetHeight); return w ? /remove betslip|remove all items/i.test(w.innerText) : false })
       if (removeConfirm) { await page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap] [class*=dialog-btn]', { hasText: /^OK$/i }).first().click({ force: true }).catch(() => {}); await until(codeBoxVisible, 800); continue }
       const ra = page.locator('[data-cms-key=remove_all]:visible').first()
