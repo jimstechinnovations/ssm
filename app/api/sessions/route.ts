@@ -139,7 +139,9 @@ export async function POST(request: Request): Promise<Response> {
         floorShare: req.floor_share, usePanel: req.use_panel,
       })
       if (!bot.slips || !bot.result) { bookResults.push({ bookId: id, error: bot.error, detail: bot.detail }); continue }
-      const saved = await saveSessionSlips(session.id, id, bot.slips)
+      let saved = 0
+      try { saved = await saveSessionSlips(session.id, id, bot.slips) }
+      catch (e) { bookResults.push({ bookId: id, error: 'save_failed', detail: e instanceof Error ? e.message : String(e) }); continue }
       totalSlips += saved
       const m = bot.meta as { variableLegs: { min: number; max: number }; gamesUsed: number; poolSize: number; withHistory: number; note: string }
       repL ??= m.gamesUsed; repPool ??= m.poolSize; repPAny ??= bot.result.pAnyWin
@@ -157,7 +159,9 @@ export async function POST(request: Request): Promise<Response> {
     })
     if (!built.book || !built.slips) { bookResults.push({ bookId: id, error: built.error, detail: built.detail }); continue }
     if (built.usedDateTo && built.usedDateTo > usedDateTo) usedDateTo = built.usedDateTo
-    const saved = await saveSessionSlips(session.id, id, built.slips)
+    let saved = 0
+    try { saved = await saveSessionSlips(session.id, id, built.slips) }
+    catch (e) { bookResults.push({ bookId: id, error: 'save_failed', detail: e instanceof Error ? e.message : String(e) }); continue }
     totalSlips += saved
     repL ??= built.book.L; repPool ??= built.book.poolSize; repPAny ??= built.book.pAnyWin
     bookMetas[id] = built.meta

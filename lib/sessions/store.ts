@@ -181,10 +181,13 @@ export async function saveSessionSlips(sessionId: string, bookId: string, slips:
       status:          'pending',
       attempts:        0,
     }))
-    const { data, error } = await (supabase.from('pedla_placements').insert(rows as any).select('id')) as { data: any[] | null; error: unknown }
-    if (error || !data) return 0
+    const { data, error } = await (supabase.from('pedla_placements').insert(rows as any).select('id')) as { data: any[] | null; error: { message?: string; details?: string } | null }
+    // never fail silently: a build that saves nothing must say why (2026-10-03: "0 slips" with no reason)
+    if (error || !data) throw new Error(`could not save slips: ${error?.message ?? 'no rows returned'}${error?.details ? ` (${error.details})` : ''}`)
     return data.length
-  } catch { return 0 }
+  } catch (e) {
+    throw e instanceof Error ? e : new Error(String(e))
+  }
 }
 
 /** Update one session slip's placement status (called by the placer as each slip resolves).
