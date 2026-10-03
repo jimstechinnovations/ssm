@@ -59,9 +59,10 @@ console.log(`pre-flight: checking ${need.size} game(s) × ${marketIds.length} ma
 // unwrapped native fetch (the same tab the app's cdp-fetch uses). The raw fetch is only the fallback.
 const portI = args.indexOf('--port')
 const CDP_PORT = portI >= 0 ? Number(args[portI + 1]) : 9222
-let feedTab = null
+let feedTab = null, browserDead = false
 async function feedJson(url) {
   try {
+    if (browserDead) throw new Error('browser fetch disabled')
     if (!feedTab) {
       const { chromium } = await import('playwright')
       const browser = await chromium.connectOverCDP(`http://127.0.0.1:${CDP_PORT}`, { timeout: 5000 })
@@ -70,9 +71,13 @@ async function feedJson(url) {
       if (!page) { page = await ctx.newPage(); await page.goto('https://www.sportybet.com/robots.txt', { waitUntil: 'domcontentloaded', timeout: 20_000 }) }
       feedTab = { browser, page }
     }
-    const j = await feedTab.page.evaluate(async u => { const r = await fetch(u, { signal: AbortSignal.timeout(15_000) }); return r.ok ? r.json() : { httpStatus: r.status } }, url)
+    // a frozen tab never settles evaluate() (hung this pre-flight 4+ min on 2026-10-03): cap it, then fall back
+    const j = await Promise.race([
+      feedTab.page.evaluate(async u => { const r = await fetch(u, { signal: AbortSignal.timeout(15_000) }); return r.ok ? r.json() : { httpStatus: r.status } }, url),
+      new Promise((_, rej) => setTimeout(() => rej(new Error('browser fetch timed out')), 20_000)),
+    ])
     if (j?.data) return { j, via: 'browser' }
-  } catch { /* no browser up / tab gone → raw fetch below */ }
+  } catch (e) { if (/timed out/.test(e?.message ?? '')) browserDead = true /* no browser up / tab frozen → raw fetch below */ }
   // the feed rejects requests without a full browser user-agent (HTTP 403)
   const fr = await fetch(url, { headers: { 'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64)', Accept: 'application/json' }, signal: AbortSignal.timeout(15_000) }).catch(e => ({ error: e?.cause?.code || e?.message }))
   const j = fr?.json ? await fr.json().catch(() => null) : null
