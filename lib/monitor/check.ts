@@ -60,7 +60,11 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
     if (Number(m) <= 1) continue                      // "one", "1 game", "0" — never a claim worth flagging
     if (!allowed.has(m) && !allowed.has(String(Number(m)))) issues.push(`number "${m}" is not in the facts`)
   }
-  if (!new RegExp(`\\b${facts.jackpot.aliveNow}\\b`).test(text)) issues.push(`doesn't state the ${facts.jackpot.aliveNow} slips alive`)
+  // the alive count may be written as a digit or a word ("five slips alive" was wrongly rejected, 2026-10-03)
+  const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty']
+  const n = facts.jackpot.aliveNow, word = WORDS[n]
+  const toks = text.toLowerCase().split(/[^a-z0-9]+/)
+  if (!toks.includes(String(n)) && !(word && toks.includes(word))) issues.push(`doesn't state the ${n} slips alive`)
   if (text.length > 900) issues.push('too long')
   return [...new Set(issues)]
 }

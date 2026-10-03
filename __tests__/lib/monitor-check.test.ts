@@ -21,6 +21,9 @@ describe('live monitor fact check', () => {
     expect(checkDraft('5 alive; floor returned £0.', facts)).toContain('uses a currency other than ₦')
     expect(checkDraft('Slips are still alive at 1.47%.', facts)).toContain("doesn't state the 5 slips alive")
   })
+  it('accepts the alive count written as a word', () => {
+    expect(checkDraft('The jackpot chance is 1.47% with five slips still alive.', facts)).toEqual([])
+  })
   it('rejects a model that answers with its working-out', () => {
     const leak = 'We need to produce a live update. Rules: 1-3 short sentences, under 60 words. aliveNow 5, chancePct 1.47 ...'
     expect(checkDraft(leak, facts).some(i => /not in the facts/.test(i))).toBe(true)
