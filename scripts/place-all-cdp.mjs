@@ -198,6 +198,10 @@ function makeWorker(page, tag, parallel) {
   const balNum = async () => { const t = await page.evaluate(() => document.querySelector('#j_balance, .m-balance')?.textContent ?? '').catch(() => ''); const m = t.match(/NGN\s*([\d,.]+)/); return m ? parseFloat(m[1].replace(/,/g, '')) : NaN }
   const readBalance = async () => { for (let i = 0; i < 10; i++) { const b = await balNum(); if (!Number.isNaN(b)) return b; await sleep(1200) } return NaN }
   const bodyHas = re => page.evaluate(rs => new RegExp(rs, 'i').test(document.body.innerText), re.source)
+  // The pay window's title depends on the bet type: "About to pay" for a plain multiple, "Confirm to Pay" for
+  // Flexi. Live 2026-10-03: the placer only knew the first, so every floor ticket's window went unrecognised
+  // ("pay dialog never opened" → skip), stayed open over the betslip, and blocked Remove All for every slip after.
+  const PAY_DIALOG = /about to pay|confirm to pay/
   // Fixture ids currently on the betslip, read from SportyBet's own betslip storage. null if unreadable
   // (callers then fall back to page text).
   const betslipFixtures = () => page.evaluate(() => {
@@ -329,7 +333,7 @@ function makeWorker(page, tag, parallel) {
     let n = 0
     for (const b of boxes) {
       const txt = (b.innerText || '')
-      if (/about to pay|accept change|place bet|total stake|booking code|potential win|submission/i.test(txt)) continue // placement UI — leave it
+      if (/about to pay|confirm to pay|accept change|place bet|total stake|booking code|potential win|submission/i.test(txt)) continue // placement UI — leave it
       const btn = [...b.querySelectorAll('button,span,div,a,i')].find(e => vis(e) && e.children.length === 0 && /^(ok|okay|got it|close|accept( all)?|agree|allow|dismiss|continue|confirm|try again|reload|retry|×|✕|✖|x)$/i.test((e.textContent || '').trim()))
       if (btn) { btn.click(); n++ }
     }
@@ -359,7 +363,7 @@ function makeWorker(page, tag, parallel) {
         await page.evaluate(() => { const vis = e => e && (e.offsetWidth || e.offsetHeight); const ok = [...document.querySelectorAll('button,span,div')].find(e => e.children.length === 0 && /^OK$/i.test((e.textContent || '').trim()) && vis(e)); if (ok) ok.click() })
         await page.waitForTimeout(700); continue
       }
-      if (await bodyHas(/about to pay/)) { await clickLeaf('^cancel$'); await page.waitForTimeout(800); continue }
+      if (await bodyHas(PAY_DIALOG)) { await clickLeaf('^cancel$'); await page.waitForTimeout(800); continue }
       const removeConfirm = await page.evaluate(() => { const w = [...document.querySelectorAll('.es-dialog-wrap,[class*=dialog-wrap]')].find(e => e.offsetWidth || e.offsetHeight); return w ? /remove betslip|remove all items/i.test(w.innerText) : false })
       if (removeConfirm) { await page.locator('.es-dialog-wrap:visible .es-dialog-btn, [class*=dialog-wrap] [class*=dialog-btn]', { hasText: /^OK$/i }).first().click({ force: true }).catch(() => {}); await until(codeBoxVisible, 800); continue }
       const ra = page.locator('[data-cms-key=remove_all]:visible').first()
@@ -579,7 +583,7 @@ function makeWorker(page, tag, parallel) {
           if ((await betLegs()) === 0) throw new Error('SKIP: betslip emptied by odds/leg changes — nothing left to place')
         }
         await clickBtn('^place bet$')
-        for (let p = 0; p < 10 && !dialog; p++) { await sleep(300); dialog = await bodyHas(/about to pay/) }
+        for (let p = 0; p < 10 && !dialog; p++) { await sleep(300); dialog = await bodyHas(PAY_DIALOG) }
       }
       if (!dialog) throw new Error('SKIP: odds unstable — pay dialog never opened after retries')
 
@@ -599,6 +603,12 @@ function makeWorker(page, tag, parallel) {
           }
         }
         if (!begun && !flexi && MIN_PAYOUT && receipt?.sitePayout != null && receipt.sitePayout < EFFECTIVE_FLOOR) throw Object.assign(new Error(`SKIP: after odds changes the site pays ₦${receipt.sitePayout.toLocaleString()} — below the ₦${EFFECTIVE_FLOOR.toLocaleString()} floor${floorNote}`), { rejected: true })
+        if (!begun && flexi) {
+          const w = await page.evaluate(() => { const e = document.querySelector('.m-comfirm-wrapper'); return e && e.offsetHeight ? e.innerText : document.body.innerText })
+          if (!(' ' + w.replace(/\s+/g, ' ') + ' ').includes(` ${flexi.k} of ${flexi.n} `)) throw Object.assign(new Error(`pay window doesn't show Flexi "${flexi.k} of ${flexi.n}" — NOT submitting`), { rejected: true })
+          const pw = /Potential Win\s*([\d,.]+)/i.exec(w), win = pw ? parseFloat(pw[1].replace(/,/g, '')) : NaN
+          if (Number.isFinite(win) && win < flexi.payout * 0.95) throw Object.assign(new Error(`SKIP: Flexi pay window shows ₦${win} — below 95% of the built ₦${flexi.payout}`), { rejected: true })
+        }
         if (!begun && hooks.beforeConfirm) await hooks.beforeConfirm()
         begun = true
         await clickBtn('^confirm$')
@@ -613,7 +623,7 @@ function makeWorker(page, tag, parallel) {
           // own success counts; anything unclear goes to verify (bet-history check).
           if (!parallel && !QUEUE) { const after = await balNum(); if (Math.abs((before - after) - stake) <= 0.5) { placed = true; how = 'balance-drop'; break } }
         }
-        if (!placed && !(await bodyHas(/about to pay/))) break
+        if (!placed && !(await bodyHas(PAY_DIALOG))) break
       }
     } finally { release(); if (unlockAccount) await unlockAccount() }
     await dismissSuccess()
