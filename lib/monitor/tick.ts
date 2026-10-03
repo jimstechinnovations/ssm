@@ -102,7 +102,7 @@ export async function writeUpdate(facts: MonitorFacts): Promise<Omit<MonitorEven
   try {
     // reasoning models sometimes answer with their working-out instead of the update (seen live 2026-10-03):
     // the fact check catches it, and one more try (slightly different sampling) usually comes back clean
-    const ask = (temperature: number) => nimChat([{ role: 'system', content: SYSTEM }, { role: 'user', content: JSON.stringify(forAi(facts)) }], { temperature, maxTokens: 600, timeoutMs: 60_000 }).then(x => x.trim())
+    const ask = (temperature: number) => nimChat([{ role: 'system', content: SYSTEM }, { role: 'user', content: JSON.stringify(forAi(facts)) }], { temperature, maxTokens: 1500, timeoutMs: 60_000 }).then(x => x.trim())
     let draft = await ask(0)
     let issues = checkDraft(draft, facts)
     if (issues.length || !draft) { const second = await ask(0.4); const i2 = checkDraft(second, facts); if (!i2.length && second) { draft = second; issues = [] } }
