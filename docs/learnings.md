@@ -4,7 +4,7 @@ A living record of what settled, real-money sessions say about the Decision Bot.
 after every run** (numbers come from `python scripts/session-learnings.py`), and treat every "proposed"
 change below as a hypothesis until a later session confirms it on data it wasn't fitted to.
 
-Last updated: 2026-10-02, after the ₦3,000 run of 1 October (299 slips, 24 still alive at writing).
+Last updated: 2026-10-03, after the ₦3,000 run of 3 October (S-0D52E6: 22 jackpot slips + 75 floor tickets, all settled).
 
 ---
 
@@ -14,8 +14,9 @@ Last updated: 2026-10-02, after the ₦3,000 run of 1 October (299 slips, 24 sti
 |---|---|---:|---:|---:|---:|---:|
 | 17–20 Jul (S-03CFC8, S-C76259, S-863EB4, S-BB610F, S-51A2A4) | legacy Under-4.5 | 2,098 | ₦20,980 | ₦100–₦500k | 0 | ≈ 28% combined (mostly S-51A2A4 at ₦60k and the 2-slip ₦100 test) |
 | 26 Sep (S-A1FA6F) | Decision Bot, no skip | 100 | ₦1,000 | ₦51k | 0 | 1.4% |
-| 1 Oct (S-2A4472, S-7A14B6, S-F2AA60, S-222131, S-3EC9BA, S-DB2F41) | Decision Bot, skip + 8-leg cap | 299 | ₦2,990 | ₦51k | 0 so far (24 alive) | ≈ 4.8% |
-| **Total** | | **2,497** | **₦24,970** | | **0** | **expected wins ≈ 0.35** |
+| 1 Oct (S-2A4472, S-7A14B6, S-F2AA60, S-222131, S-3EC9BA, S-DB2F41) | Decision Bot, skip + 8-leg cap | 299 | ₦2,990 | ₦51k | 0 (all cut by 2 Oct) | ≈ 4.8% |
+| 3 Oct (S-0D52E6) | Decision Bot, ₦100 slips + 25% floor (built before the odds cap) | 22 + 75 floor | ₦2,200 + ₦750 | ₦51k | 0 jackpot; floor 66/75 won, ₦1,048 back | 2.6% |
+| **Total** | | **2,519 + 75 floor** | **₦27,920** | | **0 jackpot** | **expected wins ≈ 0.38** |
 
 **Zero wins is the expected outcome, not a malfunction.** The honest win chances above add up to about 0.35
 expected wins across everything ever placed, so getting no win at all had roughly a 70% chance. Every
@@ -134,12 +135,35 @@ Status as of 2026-10-02. What was built is described in `algorithm_v1.md` §0.5.
 
 ---
 
+### 3 Oct (S-0D52E6): what the first floor run and the last slip taught
+
+- **Still calibrated.** 171 legs won 49.7% against 49.2% predicted. Game level: draws 2/15 (z −0.9),
+  Over 2.5 8/11 (z +1.0), both score 5/7 (z +0.9). Nothing to correct. The draw lean of 1 Oct didn't repeat.
+- **No slip was one leg away.** Every one of the 22 jackpot slips lost at least 2 legs (most 3–6). So no
+  single "wrong" leg cost a jackpot, and swapping one pick wouldn't have saved any slip.
+- **Long shots: what they did and didn't do.** This build predates the odds cap: 38 of 173 jackpot legs
+  were priced 3.5+ (up to 14), and they were the first leg lost on 6 of 22 slips. Since those slips lost
+  more legs anyway, the cap wouldn't have produced a win here. What it changes is how long slips stay alive
+  and how much the book keeps (legs at 6+ keep ₦0.80 per ₦1; legs at 1.0–1.6 keep ₦0.97).
+- **One game, many slips.** Kashiwa 3–3 Gamba was the first loss on 4 slips; Angelholms 3–0 on 3. That's
+  the "one result cuts every slip on a crowded game" problem the new per-game coverage targets.
+- **The floor paid for itself this time, by luck.** Priced at 60.7% average win chance (≈ ₦725 expected
+  back on ₦750), 66 of 75 won and returned ₦1,048. Tickets share games, so they win and lose together;
+  expect below-stake returns on average, not this.
+- **Settlement must not trust a feed that lags.** SportyBet showed two English non-league games as
+  "Not start" while they were played; slip #12 died on Salisbury 5–0 Dulwich (Under 4.5), which only the
+  Sofascore fallback saw. Results also now use the 90-minute score (Kashiwa's extra-time goal had revived
+  dead slips).
+
+---
+
 ## Session log (add a row to this table after every run — newest last)
 
 | Date | Sessions | Slips | Legs graded | Leg hit / predicted | Alive / expected | Draw z (games) | Notes |
 |---|---|---:|---:|---|---|---|---|
 | 2026-09-26 | S-A1FA6F | 100 | 856 | 45.1% / 43.5% | 0 / — | — | first Decision Bot run; floor feature born |
 | 2026-10-01 | S-2A4472 … S-DB2F41 (6) | 299 | 1,381 | 50.1% / 50.8% | 24 / 24.9 (mid-run) | +1.4 (45) | skip + 8-leg cap; CDP fixes; 2 slips never staked |
+| 2026-10-03 | S-0D52E6 | 22 + 75 floor | 171 | 49.7% / 49.2% | 66 / 75.0 (incl. floor) | −0.9 (15) | ₦100 slips; floor 66/75 won (₦1,048 on ₦750); every jackpot slip lost 2+ legs; pre-cap build |
 
 How to add a row: `python scripts/session-learnings.py <session codes>` once the games finish, then copy
 the CALIBRATION and GAME level lines into a new row.
