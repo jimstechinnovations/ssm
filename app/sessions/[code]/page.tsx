@@ -18,6 +18,7 @@ import { useParams, useRouter, useSearchParams } from 'next/navigation'
 import { Copy, Check, Spinner, Download, Refresh, Play, StopIcon } from '@/components/Icons'
 import { TotalsChart } from '@/components/TotalsChart'
 import { CoverageTab } from '@/components/CoverageTab'
+import { LiveMonitor } from '@/components/LiveMonitor'
 import { Page, PageHeader, Card, Stat, Button, LinkButton, Banner, Badge, StatusBadge, Progress, Tabs, Modal, Empty, naira, pct, ago, kickoff, cx, STATUS, inputCls } from '@/components/ui'
 
 interface Actual { source: 'site' | 'reconciled' | 'built'; stake: number; odds: number; payout: number; legCount: number }
@@ -147,16 +148,6 @@ function SessionPage() {
     try { const j = await post('clone'); if (j.session) setMsg({ text: `Duplicated → ${j.session.code}. Open it to place the same slips on another account.`, tone: 'ok' }) }
     finally { setBusy(null) }
   }
-  async function settle() {
-    setBusy('settle'); setMsg(null)
-    try {
-      const j = await post('settle')
-      setMsg(j.error ? { text: j.error, tone: 'error' } : j.checked === 0 ? { text: j.note ?? 'Nothing to settle yet.', tone: 'info' }
-        : { text: `${j.gamesFinished}/${j.of} games finished · settled ${j.settled} slip(s) (won ${j.won}, lost ${j.lost}) · ${j.pending} still in play.`, tone: j.won > 0 ? 'ok' : 'info' })
-      await load()
-    } catch { setMsg({ text: 'Could not check results.', tone: 'error' }) }
-    finally { setBusy(null) }
-  }
   async function reconcile() {
     setBusy('reconcile'); setMsg(null)
     try {
@@ -258,13 +249,9 @@ function SessionPage() {
                 <p className="text-xs text-zinc-500">Every slip is checked on the betslip before Confirm and recorded with the site&apos;s own numbers. <strong>Windows</strong> places in parallel on this PC (each window has its own betslip; about 12s per slip per window). One account submits one slip at a time, so about 4 windows is the most that helps per account — for more speed, add a PC with another SportyBet account and press <strong>Add this PC</strong>. The shared queue makes sure no slip is placed twice. <strong>Floor</strong> controls what happens when the site&apos;s odds have moved since the build: at 100% a slip below target is skipped (nothing staked); below 100%, it&apos;s still placed as long as the payout is at or above that % of target and never below the session budget.</p>
               </div>
             ) : placed > 0 ? (
-              <div className="flex flex-wrap items-center gap-2">
-                <span className="text-sm text-zinc-700 dark:text-zinc-300">{summary.open > 0 ? 'All slips are placed. Check results as games finish — slips settle the moment one leg is decided.' : 'Every placed slip is settled.'}</span>
-                <div className="ml-auto flex flex-wrap justify-end gap-2">
-                  <Button onClick={reconcile} loading={busy === 'reconcile'} icon={<Refresh className="h-3.5 w-3.5" />}>Check suspended games</Button>
-                  <Button variant="primary" onClick={settle} loading={busy === 'settle'} icon={<Check className="h-3.5 w-3.5" />}>Check results</Button>
-                </div>
-              </div>
+              // results settle automatically while the Live panel is open (lib/monitor/tick.ts)
+              <LiveMonitor code={code} active={summary.open > 0} embedded
+                extraAction={<Button size="sm" variant="ghost" onClick={reconcile} loading={busy === 'reconcile'}>Suspended games</Button>} />
             ) : (
               <Banner tone="warn" title="Nothing was placed">Every slip failed or was skipped. Open a failed slip to see why, then build a fresh session.</Banner>
             )}
