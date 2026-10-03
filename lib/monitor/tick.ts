@@ -80,7 +80,10 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
   if (receiptOff.length) facts.placement.mismatches.push(`${receiptOff.length} slip(s) where SportyBet's stake differs from ours: ${receiptOff.slice(0, 5).map(s => `#${s.slipId} ₦${s.siteStake} vs ₦${s.stake}`).join(', ')}`)
 
   const snap: Snapshot = {
-    aliveNow, chancePct, cutGames: cutNow.map(t => t.game), inPlayKeys: ek.map(k => `${k.key}|${k.game}`),
+    // CUMULATIVE: a game whose result briefly failed to load drops out of the timeline and would otherwise
+    // come back as a "new" cut (Chrobry 1-3 Warta, finished 12:50, reported as new at 14:08 on 2026-10-03)
+    aliveNow, chancePct, cutGames: [...new Set([...(prev?.cutGames ?? []), ...cutNow.map(t => t.game)])],
+    inPlayKeys: [...new Set([...(prev?.inPlayKeys ?? []), ...ek.map(k => `${k.key}|${k.game}`)])],
     floorWon: floorWon.length, floorLost: floorLost.length, winners: winnersNow.map(s => String(s.slipId)), at: facts.at,
   }
   const detail: MonitorDetail = {

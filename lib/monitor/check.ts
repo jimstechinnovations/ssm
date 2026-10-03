@@ -70,5 +70,6 @@ Rules: 1-3 short sentences, under 60 words. Lead with what changed since the las
 and the chance of a win (as given, with %). If "firstCheck" is true, summarise "soFar" instead of listing games.
 Name at most 3 games. Mention floor tickets only if they changed. If "placement.mismatches" is not
 empty, say so first. Amounts are Nigerian naira (₦) — never £, $ or €. Never invent a number, game, score or prediction;
-never claim an edge. No headings, no bullet points.`
+never claim an edge. Don't say what made the chance change (it also moves as games are played) — just state it.
+No headings, no bullet points.`
 
