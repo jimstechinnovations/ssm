@@ -44,7 +44,7 @@ export function factsText(f: MonitorFacts): string {
   if (f.winners.length) parts.push(`WINNER: ${f.winners.map(w => `${w.slip} pays ₦${w.paysNaira.toLocaleString()}`).join(', ')}.`)
   parts.push(`${f.jackpot.aliveNow} of ${f.jackpot.total} jackpot slips alive (${f.jackpot.chancePct}% chance).`)
   if (f.firstCheck) parts.push(`Watching from here: ${f.soFar.slipsCut} slips cut so far in ${f.soFar.cutGames} games.`)
-  if (f.newlyCut.length) parts.push(`Cut: ${list(f.newlyCut, c => `${c.game} ${c.score} (−${c.slipsCut}${c.wasBeatenInPlay ? ', already beaten in play' : ''})`)}.`)
+  if (f.newlyCut.length) parts.push(`Cut: ${list(f.newlyCut, c => `${c.game} ${c.score} (${c.wasBeatenInPlay ? 'confirms earlier losses' : `−${c.slipsCut}`})`)}.`)
   if (f.newlyBeatenInPlay.length) parts.push(`Beaten in play: ${list(f.newlyBeatenInPlay, k => `${k.game} ${k.score}`)}.`)
   if (!f.firstCheck && !f.newlyCut.length && !f.newlyBeatenInPlay.length && !f.winners.length) parts.push('No slips cut since the last check.')
   return parts.join(' ')
@@ -72,8 +72,8 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
 export const SYSTEM = `You write the live update for a betting session, like a calm sports desk. Use ONLY the facts given (JSON).
 Rules: 1-3 short sentences, under 60 words. Lead with what changed since the last update. Always state how many jackpot slips are alive
 and the chance of a win (as given, with %). If "firstCheck" is true, summarise "soFar" instead of listing games.
-Name at most 3 games. A newlyCut game with "wasBeatenInPlay": true only confirms slips already counted out during the game —
-say it confirmed them, not that it cut new ones. Mention floor tickets only if they changed. If "placement.mismatches" is not
+Name at most 3 games. A newlyCut game with "wasBeatenInPlay": true only confirms slips that were ALREADY lost (no slip
+died because of it) — say it confirmed earlier losses, never that it cut or knocked out slips. Mention floor tickets only if they changed. If "placement.mismatches" is not
 empty, say so first. Amounts are Nigerian naira (₦) — never £, $ or €. Never invent a number, game, score or prediction;
 never claim an edge. Don't say what made the chance change (it also moves as games are played) — just state it.
 No headings, no bullet points.`

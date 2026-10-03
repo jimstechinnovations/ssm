@@ -18,7 +18,7 @@ export type { MonitorFacts, MonitorDetail, MonitorEvent } from './check'
 
 type Session = NonNullable<Awaited<ReturnType<typeof getSession>>>
 
-interface Snapshot { aliveNow: number; chancePct: number; cutGames: string[]; inPlayKeys: string[]; floorWon: number; floorLost: number; winners: string[]; at: string }
+interface Snapshot { aliveKeys?: string[]; aliveNow: number; chancePct: number; cutGames: string[]; inPlayKeys: string[]; floorWon: number; floorLost: number; winners: string[]; at: string }
 interface MonitorState { last?: Snapshot; feed: MonitorEvent[] }
 
 const FEED_CAP = 80
@@ -45,6 +45,11 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
   const ek = c?.earlyKilled ?? []
   const prevEk = new Set(prev?.inPlayKeys ?? [])
   const winnersNow = jack.filter(s => s.status === 'won')
+  // which slips actually DIED since the last check: the survival timeline re-assigns a loss to an earlier-
+  // kicking-off game when that game finishes later, so "cut by game X" can appear with no slip newly lost
+  // (live 2026-10-03: "two matches each knocked out one slip" while 3 stayed alive)
+  const aliveKeysNow = (c?.aliveSlips ?? []).map(x => x.key)
+  const lostSince = prev?.aliveKeys ? prev.aliveKeys.filter(k => !aliveKeysNow.includes(k)).length : null
 
   const facts: MonitorFacts = {
     at: new Date().toISOString(),
@@ -52,7 +57,7 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
       total: jack.filter(placedish).length, aliveNow, aliveAtFullTime: c?.aliveAtFullTime ?? 0, chancePct,
       aliveChange: prev ? aliveNow - prev.aliveNow : 0, chanceChangePct: prev ? r2(chancePct - prev.chancePct) : 0,
     },
-    newlyCut: prev ? cutNow.filter(t => !prevCut.has(t.game)).map(t => ({ game: t.game, score: t.score ?? '', slipsCut: t.cut, wasBeatenInPlay: (prev.inPlayKeys ?? []).some(k => k.endsWith(`|${t.game}`)) })) : [],
+    newlyCut: prev ? cutNow.filter(t => !prevCut.has(t.game)).map(t => ({ game: t.game, score: t.score ?? '', slipsCut: t.cut, wasBeatenInPlay: lostSince === 0 || (prev.inPlayKeys ?? []).some(k => k.endsWith(`|${t.game}`)) })) : [],
     newlyBeatenInPlay: prev ? ek.filter(k => !prevEk.has(`${k.key}|${k.game}`)).map(k => ({ game: k.game, score: k.score, pick: k.pick })) : [],
     live: (c?.now.journey ?? []).filter(g => g.status === 'live' && g.riding > 0).map(g => ({ game: g.game, score: g.liveScore ?? '', minute: g.minute ?? null, slipsRiding: g.riding })),
     nextUp: (c?.now.journey ?? []).filter(g => g.status === 'pending' && g.riding > 0).sort((a, b) => b.riding - a.riding || a.kickoff.localeCompare(b.kickoff)).slice(0, 3)
@@ -82,7 +87,7 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
   const snap: Snapshot = {
     // CUMULATIVE: a game whose result briefly failed to load drops out of the timeline and would otherwise
     // come back as a "new" cut (Chrobry 1-3 Warta, finished 12:50, reported as new at 14:08 on 2026-10-03)
-    aliveNow, chancePct, cutGames: [...new Set([...(prev?.cutGames ?? []), ...cutNow.map(t => t.game)])],
+    aliveKeys: aliveKeysNow, aliveNow, chancePct, cutGames: [...new Set([...(prev?.cutGames ?? []), ...cutNow.map(t => t.game)])],
     inPlayKeys: [...new Set([...(prev?.inPlayKeys ?? []), ...ek.map(k => `${k.key}|${k.game}`)])],
     floorWon: floorWon.length, floorLost: floorLost.length, winners: winnersNow.map(s => String(s.slipId)), at: facts.at,
   }

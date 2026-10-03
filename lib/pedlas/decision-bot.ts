@@ -72,6 +72,15 @@ export interface BotConfig {
    *  Under 4.5 on some slips (0–4 goals) and Over 1.5 on others (2+): whatever the score, some slip survives
    *  that game. Greedy multiplies a candidate's gain by (1 + coverWeight × the average new mass it covers). Default 3. */
   coverWeight?: number
+  /** Coverage as a RULE (default off until benched): once a game has 2+ slips on it and their picks cover
+   *  less than 85% of its likely results, a new slip may only pick that game if its pick covers results not
+   *  yet covered — otherwise it skips the game. Fixes families where every slip on a game sits on one side
+   *  (2026-10-03 demo: three slips all "goals" on Detroit City vs Birmingham, so 0-0 / 1-0 / 2-1 killed all). */
+  coverRule?: boolean
+  /** Every leg must have at least this FAIR chance of happening (panel / book price, default 0 = off). The
+   *  operator's rule (2026-10-03): only picks the bookmaker itself prices as genuinely possible — never a
+   *  small team to score 2+ or a 1-in-4 shot. Stricter than maxLegOdds: it is judged on the fair price. */
+  minLegP?: number
 }
 
 /** Per-game history the bot cites (and gates on). */
@@ -142,7 +151,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     band: cfg.band ?? 0.01, rule: cfg.rule ?? 'greedy', allowSubMinLegs: cfg.allowSubMinLegs ?? true,
     minLegOdds: cfg.minLegOdds ?? 1.20, seed: cfg.seed ?? 1, maxLegs: cfg.maxLegs ?? 40,
     maxPayout: cfg.maxPayout ?? Infinity, candidates: cfg.candidates ?? 24, skip: cfg.skip ?? false,
-    deadlineMs: cfg.deadlineMs ?? 90_000, legProb: cfg.legProb ?? 'panel', valueFloor: cfg.valueFloor ?? 0.95, maxLegOdds: cfg.maxLegOdds ?? 3.5, coverWeight: cfg.coverWeight ?? 3,   // defaults since 2026-10-03 (scripts/bench-cover.ts: same win chance, ~80% more slips alive halfway, no long shots)
+    deadlineMs: cfg.deadlineMs ?? 90_000, legProb: cfg.legProb ?? 'panel', valueFloor: cfg.valueFloor ?? 0.95, maxLegOdds: cfg.maxLegOdds ?? 3.5, coverWeight: cfg.coverWeight ?? 3, coverRule: cfg.coverRule ?? false, minLegP: cfg.minLegP ?? 0,   // defaults since 2026-10-03 (scripts/bench-cover.ts: same win chance, ~80% more slips alive halfway, no long shots)
     evalDays: cfg.evalDays ?? 20000,
   }
   const boost = cfg.boost ?? boostFor
@@ -165,7 +174,8 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     : s.probability != null && s.probability > 0 && s.probability < 1 ? s.probability : devigged(s, games[gi].selections)
   const opts = games.map((g, gi) => g.selections
     .filter(s => (config.allowSubMinLegs || s.odds >= config.minLegOdds) && s.odds <= config.maxLegOdds)
-    .map(s => ({ s, p: legP(gi, s) })))
+    .map(s => ({ s, p: legP(gi, s) }))
+    .filter(o => o.p >= config.minLegP))
   const h2hWins = (gi: number, s: Selection) => {
     const h = games[gi].history?.h2h ?? []
     return h.length ? `${h.filter(m => ruleWins(s.rule, m.h, m.a)).length}/${h.length} past meetings` : 'no past meetings'
@@ -212,7 +222,7 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
       // here fails later, the search still falls back to skipping it (and vice versa).
       const skipFirst = config.skip && r ? r() < Math.max(0, Math.min(0.9, 1 - (config.maxLegs - legs.length) / Math.max(1, games.length - gi))) : false
       if (skipFirst && dfs(gi + 1)) return true
-      const ranked = order(gi, legs)
+      const ranked = config.coverRule ? order(gi, legs).filter(o => coverAllows(gi, o.s)) : order(gi, legs)
       const sels = legs.map(l => l.s)
       // 1) closing: any option that lands the payout inside the band ends the slip here
       for (const o of ranked) {
@@ -316,7 +326,15 @@ function* botSteps(inputGames: BotGame[], cfg: BotConfig): Generator<void, BotRe
     return x
   }
   const coverOf = (legs: { gi: number; s: Selection }[]) => legs.length ? legs.reduce((x, l) => x + newCover(l.gi, l.s), 0) / legs.length : 0
+  const slipsOnGame = new Map<number, number>()
+  const coveredMass = (gi: number) => { const cov = covered.get(gi), p = tables[gi].p; if (!cov) return 0; let x = 0; for (let i = 0; i < NCELL; i++) if (cov[i]) x += p[i]; return x }
+  /** The coverage RULE (config.coverRule): on a crowded, one-sided game a pick must add uncovered results. */
+  function coverAllows(gi: number, sel: Selection) {
+    if ((slipsOnGame.get(gi) ?? 0) < 2 || coveredMass(gi) >= 0.85) return true
+    return newCover(gi, sel) >= 0.05
+  }
   const markCovered = (legs: { gi: number; s: Selection }[]) => {
+    for (const l of legs) slipsOnGame.set(l.gi, (slipsOnGame.get(l.gi) ?? 0) + 1)
     for (const l of legs) { const m = maskOf(l.gi, l.s); let cov = covered.get(l.gi); if (!cov) { cov = new Uint8Array(NCELL); covered.set(l.gi, cov) } for (let i = 0; i < NCELL; i++) if (m[i]) cov[i] = 1 }
   }
   // generator: at each game prefer picks that cover what the family doesn't yet, weighted by P

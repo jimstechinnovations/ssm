@@ -11,12 +11,17 @@ import { analyzeCoverage, type CovGame, type CovSlip } from '../lib/pedlas/survi
 import type { Selection } from '../lib/pedlas/selections'
 
 const budget = Number(process.argv[2] ?? 2200), stake = Number(process.argv[3] ?? 100), target = Number(process.argv[4] ?? 51000)
-const VARIANTS: { name: string; maxLegOdds?: number; coverWeight?: number }[] = [
+const ALL: { name: string; maxLegOdds?: number; coverWeight?: number; coverRule?: boolean; minLegP?: number }[] = [
   { name: 'old (no cap, no coverage)', maxLegOdds: Infinity, coverWeight: 0 },
   { name: 'cap 3.5', maxLegOdds: 3.5, coverWeight: 0 },
   { name: 'coverage', maxLegOdds: Infinity, coverWeight: 3 },
-  { name: 'cap 3.5 + coverage', maxLegOdds: 3.5, coverWeight: 3 },
+  { name: 'cap 3.5 + coverage', maxLegOdds: 3.5, coverWeight: 3, coverRule: false },
+  { name: 'cap+coverage+RULE', maxLegOdds: 3.5, coverWeight: 3, coverRule: true },
+  { name: 'RULE + minP 0.35', maxLegOdds: 3.5, coverWeight: 3, coverRule: true, minLegP: 0.35 },
+  { name: 'RULE + minP 0.40', maxLegOdds: 3.5, coverWeight: 3, coverRule: true, minLegP: 0.40 },
 ]
+// ONLY="coverage,RULE" runs just the variants whose names contain one of those words
+const VARIANTS = process.env.ONLY ? ALL.filter(v => process.env.ONLY!.split(',').some(w => v.name.includes(w))) : ALL
 
 async function main() {
   const d = (n: number) => new Date(Date.now() + n * 864e5).toISOString().slice(0, 10)
@@ -31,14 +36,16 @@ async function main() {
   const rows: string[] = []
   for (const v of VARIANTS) {
     const t0 = Date.now()
-    const r: BotResult = await runDecisionBotAsync(games, { stake, target, budget, rule: 'greedy', seed: 21, bonusFn, boost: sportybet.boostFor, maxPayout: sportybet.maxPayout, skip: true, maxLegs: 8, deadlineMs: 15 * 60_000, legProb: 'panel', maxLegOdds: v.maxLegOdds, coverWeight: v.coverWeight })
+    const r: BotResult = await runDecisionBotAsync(games, { stake, target, budget, rule: 'greedy', seed: 21, bonusFn, boost: sportybet.boostFor, maxPayout: sportybet.maxPayout, skip: true, maxLegs: 8, deadlineMs: 15 * 60_000, legProb: 'panel', maxLegOdds: v.maxLegOdds, coverWeight: v.coverWeight, coverRule: v.coverRule, minLegP: v.minLegP })
     const covGames: CovGame[] = r.games.map(g => ({ fixtureId: g.fixtureId, game: g.game, kickoff: g.kickoff, state: { kind: 'pending' } }))
     const covSlips: CovSlip[] = r.slips.map(s => ({ key: String(s.slipId), slipId: s.slipId, stake, payout: s.payout, legs: s.legs.map(l => ({ fixtureId: r.games[l.game].fixtureId, rule: l.selection.rule, name: l.selection.name, p: fairP(l.selection) })) }))
     const cov = analyzeCoverage(covGames, covSlips, { days: 20000, stake, target })
     const j = cov.plan.journey, half = j[Math.floor(j.length / 2)]
     const legs = r.slips.flatMap(s => s.legs)
+    // the Detroit problem: crowded games (3+ slips) where one result cuts every slip on them ≥ 30% of the time
+    const oneSided = j.filter(g => g.riding >= 3 && g.pAllCut >= 0.3).length, crowded = j.filter(g => g.riding >= 3).length
     const odds = legs.map(l => l.selection.odds)
-    const row = `${v.name.padEnd(20)} slips ${String(r.slips.length).padStart(2)} · win chance ${(100 * cov.plan.pAnyWin).toFixed(2)}% · keep ${cov.plan.keep.toFixed(3)} · survives ≥90% through ${cov.plan.survivalDepth90}/${j.length} games · alive halfway ${half ? half.expectedAliveAfter.toFixed(1) : '—'} · legs ${legs.length}, odds ${Math.min(...odds).toFixed(2)}–${Math.max(...odds).toFixed(2)}, ≥6: ${odds.filter(o => o >= 6).length} · ${((Date.now() - t0) / 1000).toFixed(0)}s`
+    const row = `${v.name.padEnd(20)} slips ${String(r.slips.length).padStart(2)} · win chance ${(100 * cov.plan.pAnyWin).toFixed(2)}% · keep ${cov.plan.keep.toFixed(3)} · survives ≥90% through ${cov.plan.survivalDepth90}/${j.length} games · alive halfway ${half ? half.expectedAliveAfter.toFixed(1) : '—'} · one-sided crowded games ${oneSided}/${crowded} · legs ${legs.length}, odds ${Math.min(...odds).toFixed(2)}–${Math.max(...odds).toFixed(2)}, ≥6: ${odds.filter(o => o >= 6).length} · ${((Date.now() - t0) / 1000).toFixed(0)}s`
     console.log(row); rows.push(row)
   }
   console.log('\nSUMMARY\n' + rows.join('\n'))
