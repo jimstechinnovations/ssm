@@ -96,7 +96,10 @@ export async function nimChat(messages: NimMessage[], opts: NimOptions = {}): Pr
       return content
     } catch (e) {
       lastError = e instanceof Error ? e : new Error(String(e))
-      if (!/nimChat: (404|410)/.test(lastError.message)) throw lastError   // only a retired/unknown model moves on
+      // a retired/unknown model (404/410), a rate limit (429), a server error (5xx: a 500 on 2026-10-03 sent a
+      // live update to the plain-facts fallback) or a timeout moves on to the next model; anything else is ours.
+      // (This line once held a raw backspace byte where \b was meant, so no error ever moved on.)
+      if (!/nimChat: (404|410|429|5\d\d) |abort/i.test(lastError.message)) throw lastError
     }
   }
   throw lastError ?? new Error('nimChat: no model available')
