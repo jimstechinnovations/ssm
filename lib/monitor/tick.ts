@@ -32,7 +32,15 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
   await settleSessionNow(session).catch(() => null)
   const fresh = (await getSession(session.id)) ?? session
   const cov = await runCoverage(fresh, { site: opts.site ?? true })
-  const slips = await listSessionSlips(fresh.id, { withLegs: false })
+  let slips = await listSessionSlips(fresh.id, { withLegs: false })
+  // a game can finish between the settle above and the survival read: if the database still holds more
+  // unsettled jackpot slips than are alive at full time, settle again so both agree before writing
+  // (caught by the audit 2026-10-03: survival said 1 alive, the database still had 2 open)
+  const openJack = (xs: typeof slips) => xs.filter(s => (s.decision as { product?: string } | null)?.product !== 'flexi' && (s.status === 'placed' || s.status === 'won')).length
+  if ('mode' in cov && openJack(slips) !== cov.aliveAtFullTime) {
+    await settleSessionNow((await getSession(session.id)) ?? fresh).catch(() => null)
+    slips = await listSessionSlips(fresh.id, { withLegs: false })
+  }
   const isFloor = (s: { decision?: unknown }) => (s.decision as { product?: string } | null)?.product === 'flexi'
   const floor = slips.filter(isFloor), jack = slips.filter(s => !isFloor(s))
   const placedish = (s: { status: string }) => ['placed', 'won', 'lost'].includes(s.status)
