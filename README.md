@@ -13,6 +13,7 @@ placement bot can queue the slips (live placement is env-gated). See [pedla_v1.m
 
 ## Docs
 
+- [docs/deployment-plan.md](docs/deployment-plan.md) — the plan to host the website and place from any PC (agent + credential vault); start here to continue it
 - [algorithm_v1.md](algorithm_v1.md) — how the algorithm evolved, the honest win-chance identity, and the proposed Decision Bot (spec, worked on live odds)
 - [pedla_v1.md](pedla_v1.md) — CURRENT spec: PEDLA rules (S/E removed), multi-book, placement bot
 - [pedlas_engine.md](pedlas_engine.md) — how the original pipeline works, start to finish
