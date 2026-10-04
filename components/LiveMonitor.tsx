@@ -16,6 +16,7 @@ interface Detail {
   cuts: { game: string; score: string; slipsCut: number }[]
   beatenInPlay: { game: string; score: string; pick: string; slip: string }[]
   live: { game: string; score: string; minute: number | null; slipsRiding: number }[]
+  alive?: { slip: string; needs: number; chancePct: number; paysNaira: number; worthNaira: number }[]
 }
 interface MonitorEvent {
   at: string; kind: 'update' | 'heartbeat' | 'alert'; text: string; source: 'ai' | 'facts'; model?: string
@@ -39,10 +40,10 @@ function Tile({ label, value, sub, tone }: { label: string; value: React.ReactNo
   )
 }
 
-function Fold({ title, count, children }: { title: string; count: number; children: React.ReactNode }) {
+function Fold({ title, count, children, open }: { title: string; count: number; children: React.ReactNode; open?: boolean }) {
   if (!count) return null
   return (
-    <details className="group border-t border-zinc-100 dark:border-zinc-800">
+    <details open={open} className="group border-t border-zinc-100 dark:border-zinc-800">
       <summary className="flex cursor-pointer list-none items-center justify-between px-5 py-2.5 text-sm text-zinc-700 hover:bg-zinc-50 dark:text-zinc-300 dark:hover:bg-zinc-800/40">
         <span>{title} <span className="text-zinc-400">({count})</span></span>
         <span className="text-zinc-400 transition-transform group-open:rotate-90">›</span>
@@ -131,6 +132,19 @@ export function LiveMonitor({ code, active, extraAction, embedded }: { code: str
 
       {d && (
         <>
+          <Fold title="Slips still alive — worth now" count={d.alive?.length ?? 0} open={(d.alive?.length ?? 0) <= 10}>
+            <p className="mb-2 text-xs text-zinc-500">Worth now = its chance × what it pays. A cash-out offer below this gives up value; you&apos;re paying the bookmaker for certainty.</p>
+            <ul className="divide-y divide-zinc-100 text-sm dark:divide-zinc-800">{(d.alive ?? []).map(a => (
+              <li key={a.slip} className="flex items-center gap-3 py-1.5">
+                <span className="w-10 shrink-0 font-mono text-xs text-zinc-500">{a.slip}</span>
+                <span className="min-w-0 flex-1 text-xs text-zinc-600 dark:text-zinc-400">{a.needs} leg{a.needs === 1 ? '' : 's'} left · {a.chancePct}%</span>
+                <span className="shrink-0 text-right">
+                  <span className="block font-semibold tabular-nums text-zinc-900 dark:text-zinc-100">{naira(a.worthNaira)}</span>
+                  <span className="block text-[11px] tabular-nums text-zinc-500">pays {naira(a.paysNaira)}</span>
+                </span>
+              </li>
+            ))}</ul>
+          </Fold>
           <Fold title="Live games with slips riding" count={d.live.length}>
             <ul className="space-y-1 text-sm">{d.live.map(g => <li key={g.game} className="flex gap-3"><span className="w-10 shrink-0 tabular-nums text-zinc-500">{g.minute != null ? `${g.minute}'` : ''}</span><span className="min-w-0 flex-1 truncate">{g.game}</span><span className="tabular-nums font-medium">{g.score}</span><span className="w-16 shrink-0 text-right text-xs text-zinc-500">{g.slipsRiding} slip{g.slipsRiding === 1 ? '' : 's'}</span></li>)}</ul>
           </Fold>

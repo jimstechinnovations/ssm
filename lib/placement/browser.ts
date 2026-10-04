@@ -164,6 +164,36 @@ export function placerRunningOn(port: number): boolean {
 }
 
 /**
+ * Log back in after SportyBet expired the session (it did overnight on 3→4 Oct, twice in two days), for
+ * the monitor's account check. The old SportyBet tab still SHOWS "logged in" (its page is stale), so
+ * prepareBrowser alone trusts it — and a stale tab can also hang and block every CDP connection. So:
+ * open a fresh SportyBet tab, close the old ones over plain HTTP (works even on a hung tab), then run the
+ * normal prepare (logs in with the .env credentials; never touches REAL/SIM). Never while a placer is
+ * using this window. Returns what it did.
+ */
+export async function refreshLogin(port = MAIN_PORT): Promise<{ ok: boolean; steps: string[] }> {
+  const steps: string[] = []
+  if (placerRunningOn(port)) return { ok: false, steps: ['a placer is running in this window — not touching it'] }
+  if (!(await cdpUp(port))) return { ok: false, steps: ['browser not running'] }
+  try {
+    type T = { id: string; type: string; url: string }
+    const before = await (await fetch(`${cdpBase(port)}/json/list`, { signal: AbortSignal.timeout(5000) })).json() as T[]
+    const fresh = await (await fetch(`${cdpBase(port)}/json/new?https://www.sportybet.com/ng/`, { method: 'PUT', signal: AbortSignal.timeout(5000) })).json() as T
+    steps.push('opened a fresh SportyBet tab')
+    const stale = before.filter(t => t.type === 'page' && t.id !== fresh.id && /sportybet\.com\/(?!robots\.txt)/.test(t.url))
+    for (const t of stale) await fetch(`${cdpBase(port)}/json/close/${t.id}`, { signal: AbortSignal.timeout(5000) }).catch(() => {})
+    if (stale.length) steps.push(`closed ${stale.length} old SportyBet tab(s)`)
+    await new Promise(r => setTimeout(r, 8000))            // let the fresh page render its header
+    const st = await prepareBrowser(port)
+    steps.push(...st.steps)
+    return { ok: !!st.loggedIn, steps }
+  } catch (e) {
+    steps.push('re-login error: ' + (e instanceof Error ? e.message.slice(0, 80) : 'unknown'))
+    return { ok: false, steps }
+  }
+}
+
+/**
  * How many placement windows to run on this PC. One account can only SUBMIT one slip at a time (~3s of a
  * ~12s slip), so beyond ~4 windows extra ones just queue for the submit — hence the default cap of 4
  * (PLACEMENT_MAX_BROWSERS overrides). Small sessions don't need the extra windows' start-up cost.

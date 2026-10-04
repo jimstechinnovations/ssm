@@ -20,6 +20,7 @@ export interface MonitorDetail {
   cuts: { game: string; score: string; slipsCut: number }[]
   beatenInPlay: { game: string; score: string; pick: string; slip: string }[]
   live: { game: string; score: string; minute: number | null; slipsRiding: number }[]
+  alive?: { slip: string; needs: number; chancePct: number; paysNaira: number; worthNaira: number }[]   // worth = chance × pays
 }
 export interface MonitorEvent {
   at: string

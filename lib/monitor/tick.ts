@@ -12,6 +12,7 @@
 import { getSession, updateSession, listSessionSlips } from '../sessions/store'
 import { settleSessionNow } from '../sessions/settle'
 import { runCoverage } from '../pedlas/coverage-run'
+import { refreshLogin } from '../placement/browser'
 import { nimChat, nimConfigured, nimModel } from '../llm/nim'
 import { SYSTEM, checkDraft, factsText, forAi, type MonitorFacts, type MonitorDetail, type MonitorEvent } from './check'
 export type { MonitorFacts, MonitorDetail, MonitorEvent } from './check'
@@ -26,12 +27,23 @@ const MIN_GAP_MS = 4 * 60_000            // ticks closer than this return the fe
 const HEARTBEAT_MS = 30 * 60_000         // an update even when nothing changed, so the feed shows it's alive
 
 const r2 = (x: number) => Math.round(x * 100) / 100
+const RELOGIN_GAP_MS = 15 * 60_000      // at most one automatic re-login per 15 min (an OTP/captcha won't loop)
+let lastRelogin = 0
 
 /** Build the facts for one tick (also used by scripts/monitor-eval.ts to grade models). */
 export async function buildFacts(session: Session, prev: Snapshot | undefined, opts: { site?: boolean } = {}): Promise<{ facts: MonitorFacts; snap: Snapshot; detail: MonitorDetail }> {
   await settleSessionNow(session).catch(() => null)
   const fresh = (await getSession(session.id)) ?? session
-  const cov = await runCoverage(fresh, { site: opts.site ?? true })
+  let cov = await runCoverage(fresh, { site: opts.site ?? true })
+  // SportyBet expired the login (HTTP 401 on the account check): log back in once and check again
+  let relogin: string | null = null
+  const siteErr = 'site' in cov ? String((cov.site as { error?: string } | null)?.error ?? '') : ''
+  if (/401/.test(siteErr) && Date.now() - lastRelogin > RELOGIN_GAP_MS) {
+    lastRelogin = Date.now()
+    const r = await refreshLogin()
+    relogin = r.ok ? 'logged back into SportyBet automatically' : `automatic re-login failed (${r.steps.at(-1) ?? 'unknown'}) — log in in the Chrome window`
+    if (r.ok) cov = await runCoverage(fresh, { site: true })
+  }
   let slips = await listSessionSlips(fresh.id, { withLegs: false })
   // a game can finish between the settle above and the survival read: if the database still holds more
   // unsettled jackpot slips than are alive at full time, settle again so both agree before writing
@@ -89,11 +101,12 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
   const site = c?.site as Record<string, unknown> | null | undefined
   if (site && !site.error) {
     facts.placement.openOnSportyBet = Number(site.openInFamily ?? 0)
+    if (relogin) facts.placement.checkNote = relogin
     const a = (site.aliveHereSettledOnSite as string[] | undefined) ?? [], b = (site.openOnSiteDeadHere as string[] | undefined) ?? []
     if (a.length) facts.placement.mismatches.push(`${a.length} slip(s) alive here but already settled on SportyBet: ${a.slice(0, 5).join(', ')}`)
     if (b.length) facts.placement.mismatches.push(`${b.length} slip(s) still open on SportyBet but beaten here (site not settled yet): ${b.slice(0, 5).join(', ')}`)
     if (Number(site.openNotInFamily ?? 0) > 0) facts.placement.mismatches.push(`${site.openNotInFamily} open bet(s) on the account that are not in this session`)
-  } else facts.placement.checkNote = site?.error ? (/401|browser|ECONNREFUSED/i.test(String(site.error)) ? 'SportyBet check needs the browser open' : `SportyBet check unavailable (${String(site.error).slice(0, 60)})`) : 'SportyBet check skipped'
+  } else facts.placement.checkNote = relogin && !/^logged back/.test(relogin) ? relogin : site?.error ? (/401/.test(String(site.error)) ? 'SportyBet login expired — log in in the Chrome window' : /browser|ECONNREFUSED/i.test(String(site.error)) ? 'SportyBet check needs the browser open' : `SportyBet check unavailable (${String(site.error).slice(0, 60)})`) : 'SportyBet check skipped'
   // the site's receipts must match what was placed
   const receiptOff = slips.filter(s => placedish(s) && s.siteStake != null && Math.abs(s.siteStake - s.stake) > 0.5)
   if (receiptOff.length) facts.placement.mismatches.push(`${receiptOff.length} slip(s) where SportyBet's stake differs from ours: ${receiptOff.slice(0, 5).map(s => `#${s.slipId} ₦${s.siteStake} vs ₦${s.stake}`).join(', ')}`)
@@ -109,6 +122,10 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
     cuts: cutNow.map(t => ({ game: t.game, score: t.score ?? '', slipsCut: t.cut })).reverse(),
     beatenInPlay: ek.map(k => ({ game: k.game, score: k.score, pick: k.pick, slip: k.key })),
     live: facts.live,
+    // what each surviving slip is worth now = its chance × what it pays: the yardstick for a cash-out offer
+    // (on 2026-10-04 #22 was cashed out for ₦488 when it was worth ~₦730; later offers ran ~80-85%)
+    alive: (c?.aliveSlips ?? []).map(s => ({ slip: `#${s.slipId}`, needs: s.needs, chancePct: r2(100 * s.pWin), paysNaira: Math.round(s.payout), worthNaira: Math.round(s.pWin * s.payout) }))
+      .sort((a, b) => b.worthNaira - a.worthNaira),
   }
   return { facts, snap, detail }
 }
@@ -133,7 +150,19 @@ export async function writeUpdate(facts: MonitorFacts): Promise<Omit<MonitorEven
 }
 
 /** One monitor tick for a session. Returns the feed (unchanged when called again within MIN_GAP_MS). */
-export async function monitorTick(sessionId: string, opts: { force?: boolean } = {}): Promise<{ feed: MonitorEvent[]; ticked: boolean; event?: MonitorEvent }> {
+type TickResult = { feed: MonitorEvent[]; ticked: boolean; event?: MonitorEvent }
+// One tick per session at a time: the background scheduler, an open page and a forced "Check now" can all
+// ask at once, and two overlapping ticks would race on the same feed. A second caller shares the first's result.
+const inFlight = new Map<string, Promise<TickResult>>()
+export function monitorTick(sessionId: string, opts: { force?: boolean } = {}): Promise<TickResult> {
+  const cur = inFlight.get(sessionId)
+  if (cur) return cur
+  const p = tickOnce(sessionId, opts).finally(() => inFlight.delete(sessionId))
+  inFlight.set(sessionId, p)
+  return p
+}
+
+async function tickOnce(sessionId: string, opts: { force?: boolean }): Promise<TickResult> {
   const session = await getSession(sessionId)
   if (!session) throw new Error('Unknown session')
   const state = ((session.meta ?? {}) as { monitor?: MonitorState }).monitor ?? { feed: [] }
