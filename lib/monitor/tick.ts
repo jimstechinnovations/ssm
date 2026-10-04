@@ -43,7 +43,10 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
   }
   const isFloor = (s: { decision?: unknown }) => (s.decision as { product?: string } | null)?.product === 'flexi'
   const floor = slips.filter(isFloor), jack = slips.filter(s => !isFloor(s))
-  const placedish = (s: { status: string }) => ['placed', 'won', 'lost'].includes(s.status)
+  const placedish = (s: { status: string }) => ['placed', 'won', 'lost', 'cashed_out'].includes(s.status)
+  const cashed = slips.filter(s => s.status === 'cashed_out')
+  // cash-outs this check found on SportyBet and recorded (lib/pedlas/coverage-run.ts)
+  const newlyCashed = ('site' in cov ? (cov.site as { cashedOut?: { key: string; paid: number }[] } | null)?.cashedOut : undefined) ?? []
   const floorWon = floor.filter(s => s.status === 'won'), floorLost = floor.filter(s => s.status === 'lost')
 
   const c = 'mode' in cov ? cov : null
@@ -77,6 +80,7 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
       returnedNaira: Math.round(floorWon.reduce((x, s) => x + (s.returned ?? 0), 0)), stakedNaira: Math.round(floor.filter(placedish).reduce((x, s) => x + s.stake, 0)),
     },
     placement: { placed: slips.filter(placedish).length, stakedNaira: Math.round(slips.filter(placedish).reduce((x, s) => x + s.stake, 0)), openOnSportyBet: null, mismatches: [], checkNote: null },
+    cashedOut: { slips: cashed.length, returnedNaira: Math.round(cashed.reduce((x, s) => x + (s.returned ?? 0), 0)), newly: newlyCashed.map(k => ({ slip: `#${k.key.split('#')[1]}`, paidNaira: Math.round(k.paid) })) },
     winners: winnersNow.map(s => ({ slip: `#${s.slipId}`, paysNaira: Math.round(s.returned ?? s.sitePayout ?? s.potentialPayout ?? 0) })),
     firstCheck: !prev,
     soFar: { cutGames: cutNow.length, slipsCut: cutNow.reduce((x, t) => x + t.cut, 0), beatenInPlay: ek.length },

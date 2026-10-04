@@ -415,6 +415,19 @@ export async function settleSessionSlip(sessionId: string, slipId: number, won: 
   } catch { return false }
 }
 
+/** Record a slip the operator CASHED OUT on the bookmaker: settled, money back = what the site paid. Only a
+ *  still-open ('placed') slip can become cashed out, so a slip results already settled is never rewritten;
+ *  and results never touch a cashed-out slip (settlement only looks at 'placed'). */
+export async function cashOutSessionSlip(sessionId: string, slipId: number, paid: number): Promise<boolean> {
+  try {
+    const supabase = createServerClient()
+    const now = new Date().toISOString()
+    const row = { status: 'cashed_out', settled: true, settled_at: now, settled_by: 'site', won: false, returned: paid, notes: `cashed out on SportyBet for ₦${paid.toFixed(2)}`, updated_at: now }
+    const { error } = await ((supabase.from('pedla_placements') as any).update(row).eq('session_id', sessionId).eq('slip_id', slipId).eq('status', 'placed')) as { error: unknown }
+    return !error
+  } catch { return false }
+}
+
 /**
  * Return 'skipped' and/or 'failed' slips to the pending queue so they get another live attempt — e.g.
  * "skipped" because the site's odds had drifted below target at the time (safe: nothing was staked), or
@@ -447,6 +460,7 @@ export interface SessionSummary {
   inFlight: number  // claimed by a worker right now (placing / submitting)
   won: number
   lost: number
+  cashedOut: number // cashed out on the site before the result: money back, neither won nor lost
   open: number      // placed but not yet settled
   staked: number    // everything actually staked (site stake when captured)
   settledStaked: number
@@ -488,7 +502,7 @@ export async function cloneSession(sourceIdOrCode: string): Promise<SessionRow |
   return getSession(clone.id)
 }
 
-const emptySummary = (): SessionSummary => ({ slips: 0, pending: 0, placed: 0, failed: 0, skipped: 0, verify: 0, inFlight: 0, won: 0, lost: 0, open: 0, staked: 0, settledStaked: 0, returned: 0, net: 0 })
+const emptySummary = (): SessionSummary => ({ slips: 0, pending: 0, placed: 0, failed: 0, skipped: 0, verify: 0, inFlight: 0, won: 0, lost: 0, cashedOut: 0, open: 0, staked: 0, settledStaked: 0, returned: 0, net: 0 })
 
 /** Scoreboards for many sessions in ONE tiny query: only NON-pending rows (most slips are pending),
  *  deriving `pending` from each session's slip count. Fast even for many 500-slip sessions.
@@ -516,7 +530,7 @@ export async function scoreboards(sessions: { id: string; slipCount: number | nu
     }
     for (const r of data) {
       const s = out[r.session_id]; if (!s) continue
-      const placed = r.status === 'placed' || r.status === 'won' || r.status === 'lost'
+      const placed = r.status === 'placed' || r.status === 'won' || r.status === 'lost' || r.status === 'cashed_out'
       const stake = Number(r.site_stake ?? r.stake)
       if (placed) {
         s.placed++; s.staked += stake
@@ -526,8 +540,9 @@ export async function scoreboards(sessions: { id: string; slipCount: number | nu
       if (r.status === 'skipped') s.skipped++
       if (r.status === 'verify') s.verify++
       if (r.status === 'placing' || r.status === 'submitting') s.inFlight++
-      if (r.won === true) s.won++
-      if (r.won === false) s.lost++
+      if (r.status === 'cashed_out') s.cashedOut++                 // money back, but neither a win nor a loss
+      else if (r.won === true) s.won++
+      else if (r.won === false) s.lost++
     }
     for (const s of sessions) {
       const sum = out[s.id]

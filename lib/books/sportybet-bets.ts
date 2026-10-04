@@ -36,6 +36,31 @@ export async function fetchOpenBets(maxPages = 20): Promise<SiteBet[]> {
   return out
 }
 
+/** A settled bet: what it paid, and whether it was CASHED OUT. SportyBet has no cash-out flag on the order;
+ *  a cash-out is a PAID bet (winningStatus 20) settled while some of its legs were still unsettled (status 0)
+ *  — a real win can only pay once every leg has settled. Proven on 2026-10-04: #22 of S-B44EC5 (HA074L)
+ *  paid ₦487.81 with 4 games not yet started; a lost bet is winningStatus 30. */
+export interface SettledBet { orderId: string; shortId: string; code: string; stake: number; createdAt: number; paid: number; won: boolean; cashedOut: boolean }
+
+/** Settled bets, newest first, until `until(bets)` is satisfied or `maxPages` run out. */
+export async function fetchSettledBets(opts: { maxPages?: number; since?: number; until?: (bets: SettledBet[]) => boolean } = {}): Promise<SettledBet[]> {
+  const out: SettledBet[] = []
+  for (let page = 1; page <= (opts.maxPages ?? 10); page++) {
+    const j = await cdpFetch<{ bizCode?: number; message?: string; data?: { totalNum?: number; entityList?: (RawOrder & { shareCode?: string; totalWinnings?: string; winningStatus?: number })[] } }>(
+      'https://www.sportybet.com', `/api/ng/orders/order/v2/realbetlist?isSettled=1&pageSize=50&pageNo=${page}&_t=${Date.now()}`, { timeoutMs: 15_000 })
+    if (j.bizCode !== 10000) throw new Error(`SportyBet settled bets unavailable (bizCode ${j.bizCode}${j.message ? `: ${j.message}` : ''})`)
+    const list = j.data?.entityList ?? []
+    for (const o of list) {
+      const paid = Number(o.totalWinnings ?? 0), won = o.winningStatus === 20 && paid > 0
+      out.push({ orderId: o.orderId ?? '', shortId: o.shortId ?? '', code: o.shareCode ?? '', stake: Number(o.totalStake ?? 0), createdAt: o.createTime ?? 0,
+        paid, won, cashedOut: won && (o.selections ?? []).some(s => (s.status ?? 0) === 0) })
+    }
+    const oldest = list.at(-1)?.createTime ?? 0
+    if (list.length < 50 || (opts.since && oldest < opts.since) || opts.until?.(out)) break
+  }
+  return out
+}
+
 /** The signature a bet and our slip share: its exact selections, order-free. */
 export const selectionSig = (sels: { fixtureId: number; marketId: string; specifier: string; outcomeId: string }[]) =>
   sels.map(s => `${s.fixtureId}|${s.marketId}|${s.specifier}|${s.outcomeId}`).sort().join(',')

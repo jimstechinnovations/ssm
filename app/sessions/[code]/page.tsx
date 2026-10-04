@@ -23,7 +23,7 @@ import { Page, PageHeader, Card, Stat, Button, LinkButton, Banner, Badge, Status
 
 interface Actual { source: 'site' | 'reconciled' | 'built'; stake: number; odds: number; payout: number; legCount: number }
 interface Slip { id: string; slipId: number; decision?: { product?: string; k?: number; n?: number } | null; status: string; stake: number; combinedOdds: number; potentialPayout: number | null; legCount: number; bookingCode: string | null; betId: string | null; failureReason: string | null; won: boolean | null; returned: number | null; actual?: Actual }
-interface Summary { slips: number; pending: number; placed: number; failed: number; skipped: number; verify: number; inFlight: number; won: number; lost: number; open: number; staked: number; settledStaked: number; returned: number; net: number }
+interface Summary { slips: number; pending: number; placed: number; failed: number; skipped: number; verify: number; inFlight: number; won: number; lost: number; cashedOut?: number; open: number; staked: number; settledStaked: number; returned: number; net: number }
 interface Worker { workerId: string; host: string | null; account: string | null; live: boolean; state: string; currentSlip: number | null; placed: number; failed: number; lastSeenAgoMs: number }
 interface VerifySlip { slipId: number; stake: number; legs: { game: string; outcome?: string }[]; submitStartedAt: string | null; lastError: string | null }
 interface CutGame { order: number; game: string; overProb: number; ifOverCut: number; riskWeight: number }
@@ -198,7 +198,7 @@ function SessionPage() {
           { label: 'Built', state: 'done', detail: `${slipTotal} slips` },
           { label: 'Browser', state: liveReady || placed > 0 ? 'done' : 'active', detail: browser == null ? 'checking…' : browser.up ? (browser.loggedIn ? `${browser.mode ?? '—'} · ${naira(browser.balance)}` : 'not logged in') : 'not running' },
           { label: 'Place', state: allProcessed ? 'done' : (liveReady || placed > 0) ? 'active' : 'todo', detail: `${placed}/${slipTotal} placed` },
-          { label: 'Results', state: placed > 0 && summary.open === 0 && allProcessed ? 'done' : placed > 0 ? 'active' : 'todo', detail: summary.won + summary.lost > 0 ? `${summary.won} won · ${summary.lost} lost` : placed > 0 ? `${summary.open} in play` : '—' },
+          { label: 'Results', state: placed > 0 && summary.open === 0 && allProcessed ? 'done' : placed > 0 ? 'active' : 'todo', detail: summary.won + summary.lost + (summary.cashedOut ?? 0) > 0 ? `${summary.won} won · ${summary.lost} lost${summary.cashedOut ? ` · ${summary.cashedOut} cashed out` : ''}` : placed > 0 ? `${summary.open} in play` : '—' },
         ]} />
         <div className="border-t border-zinc-100 p-5 dark:border-zinc-800">
           <Progress total={slipTotal} parts={[
@@ -303,12 +303,12 @@ function Steps({ steps }: { steps: { label: string; state: 'done' | 'active' | '
 
 // ── Slips tab ──────────────────────────────────────────────────────────────────
 function SlipsTab(p: { slips: Slip[]; summary: Summary; total: number; page: number; setPage: (f: (n: number) => number) => void; filter: string; setFilter: (s: string) => void; query: string; setQuery: (s: string) => void; sort: { by: string; dir: 'asc' | 'desc' }; setSort: (s: { by: string; dir: 'asc' | 'desc' }) => void; onOpen: (id: number) => void; onCopy: (s: string) => void; copied: string | null }) {
-  const counts: Record<string, number> = { placed: p.summary.placed - p.summary.won - p.summary.lost, won: p.summary.won, lost: p.summary.lost, pending: p.summary.pending, failed: p.summary.failed, skipped: p.summary.skipped, verify: p.summary.verify }
+  const counts: Record<string, number> = { placed: p.summary.placed - p.summary.won - p.summary.lost - (p.summary.cashedOut ?? 0), won: p.summary.won, lost: p.summary.lost, cashed_out: p.summary.cashedOut ?? 0, pending: p.summary.pending, failed: p.summary.failed, skipped: p.summary.skipped, verify: p.summary.verify }
   return (
     <>
       <div className="mb-3 flex flex-wrap items-center gap-2">
         <div className="flex flex-wrap gap-1">
-          {(['all', 'pending', 'placed', 'won', 'lost', 'failed', 'skipped', 'verify'] as const).map(f => (
+          {(['all', 'pending', 'placed', 'won', 'lost', 'cashed_out', 'failed', 'skipped', 'verify'] as const).filter(f => f !== 'cashed_out' || counts.cashed_out > 0).map(f => (
             <button key={f} onClick={() => p.setFilter(f)}
               className={cx('rounded-full px-3 py-1 text-xs font-medium transition', p.filter === f ? 'bg-zinc-900 text-white dark:bg-white dark:text-zinc-900' : 'bg-zinc-100 text-zinc-600 hover:bg-zinc-200 dark:bg-zinc-800 dark:text-zinc-300 dark:hover:bg-zinc-700')}>
               {f === 'all' ? 'All' : STATUS[f]?.label ?? f}{f !== 'all' && counts[f] ? ` ${counts[f]}` : ''}
@@ -347,7 +347,7 @@ function SlipsTab(p: { slips: Slip[]; summary: Summary; total: number; page: num
                     </td>
                     <td className="px-4 py-2.5">
                       <StatusBadge status={s.status} />
-                      {s.status === 'won' && s.returned != null && <span className="ml-2 text-xs font-medium text-emerald-600">{naira(s.returned)}</span>}
+                      {(s.status === 'won' || s.status === 'cashed_out') && s.returned != null && <span className={cx('ml-2 text-xs font-medium', s.status === 'won' ? 'text-emerald-600' : 'text-amber-600')}>{naira(s.returned)}</span>}
                       {s.failureReason && (s.status === 'failed' || s.status === 'skipped') && <div className="mt-0.5 max-w-[16rem] truncate text-[11px] text-zinc-500" title={s.failureReason}>{s.failureReason}</div>}
                     </td>
                     <td className="px-4 py-2.5">
@@ -547,7 +547,7 @@ function SlipModal({ view, onClose, onCopy, copied }: { view: { slipId: number; 
           <div className="grid grid-cols-3 gap-px bg-zinc-100 text-center dark:bg-zinc-800">
             <Cell k="Stake" v={naira(d.site?.stake ?? d.stake)} />
             <Cell k="Odds" v={(d.site?.odds ?? d.combinedOdds)?.toFixed?.(2) ?? '—'} />
-            <Cell k={d.status === 'won' ? 'Returned' : 'Pays if it wins'} v={naira(d.status === 'won' ? d.returned : actualPay)} strong />
+            <Cell k={d.status === 'won' ? 'Returned' : d.status === 'cashed_out' ? 'Cashed out for' : 'Pays if it wins'} v={naira(d.status === 'won' || d.status === 'cashed_out' ? d.returned : actualPay)} strong />
           </div>
           <div className="space-y-2 border-b border-zinc-100 px-5 py-3 text-xs text-zinc-500 dark:border-zinc-800">
             {d.site ? <div className="text-emerald-700 dark:text-emerald-400">✓ Amounts confirmed on the SportyBet betslip at placement.</div>

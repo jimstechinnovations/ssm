@@ -128,6 +128,7 @@ export const STATUS: Record<string, { tone: Tone; label: string }> = {
   pending: { tone: 'zinc', label: 'Pending' }, placing: { tone: 'amber', label: 'Placing' },
   submitting: { tone: 'amber', label: 'Submitting' }, verify: { tone: 'amber', label: 'Check bet history' },
   placed: { tone: 'blue', label: 'Placed' }, won: { tone: 'green', label: 'Won' }, lost: { tone: 'zinc', label: 'Lost' },
+  cashed_out: { tone: 'amber', label: 'Cashed out' },
   failed: { tone: 'red', label: 'Failed' }, skipped: { tone: 'zinc', label: 'Skipped' },
   building: { tone: 'blue', label: 'Building' }, done: { tone: 'green', label: 'Done' }, stopped: { tone: 'zinc', label: 'Stopped' },
   running: { tone: 'amber', label: 'Placing' }, stalled: { tone: 'red', label: 'Stalled' }, complete: { tone: 'green', label: 'All placed' },

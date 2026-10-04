@@ -9,7 +9,7 @@ const facts: MonitorFacts = {
   live: [], nextUp: [],
   floor: { total: 75, won: 0, lost: 0, open: 75, returnedNaira: 0, stakedNaira: 750 },
   placement: { placed: 97, stakedNaira: 2950, openOnSportyBet: null, mismatches: [], checkNote: null },
-  winners: [], firstCheck: false, soFar: { cutGames: 7, slipsCut: 12, beatenInPlay: 5 },
+  winners: [], cashedOut: { slips: 0, returnedNaira: 0, newly: [] }, firstCheck: false, soFar: { cutGames: 7, slipsCut: 12, beatenInPlay: 5 },
 }
 
 describe('live monitor fact check', () => {

@@ -25,7 +25,7 @@ export interface PlacementRecord {
   legs: (PedlasLeg & { suspended?: boolean })[]
   trueProb: number | null
   /** won/lost = placed AND settled (same statuses the session settler writes). */
-  status: 'placed' | 'won' | 'lost' | 'failed' | 'simulated' | 'skipped' | 'pending' | 'placing'
+  status: 'placed' | 'won' | 'lost' | 'failed' | 'simulated' | 'skipped' | 'pending' | 'placing' | 'cashed_out'
   confirmedBy: string | null
   bookingCode: string | null
   betId: string | null
@@ -222,7 +222,7 @@ export async function ledgerSummary(): Promise<LedgerSummary> {
     for (let from = 0; from < 50_000; from += 1000) {
       // narrow columns only (never the legs JSON) — the ledger reads every real slip, so this must stay light
       const { data, error } = await ((supabase.from('pedla_placements').select('id,status,stake,site_stake,settled,won,returned')
-        .eq('dry_run', false).in('status', ['placed', 'won', 'lost'])
+        .eq('dry_run', false).in('status', ['placed', 'won', 'lost', 'cashed_out'])   // a cash-out was staked and paid something back
         .order('id', { ascending: true }).range(from, from + 999)) as any) as { data: any[] | null; error: unknown }
       if (error || !data) break
       rows.push(...data.map(r => ({ status: r.status, stake: Number(r.stake), siteStake: r.site_stake == null ? null : Number(r.site_stake), settled: Boolean(r.settled), won: r.won, returned: r.returned == null ? null : Number(r.returned) })))
@@ -236,7 +236,7 @@ export async function ledgerSummary(): Promise<LedgerSummary> {
     placed: rows.length,
     settled: settled.length,
     won: settled.filter(r => r.won).length,
-    lost: settled.filter(r => r.won === false).length,
+    lost: settled.filter(r => r.won === false && r.status !== 'cashed_out').length,
     staked: rows.reduce((s, r) => s + stakeOf(r), 0),
     returned,
     net: returned - settled.reduce((s, r) => s + stakeOf(r), 0),
