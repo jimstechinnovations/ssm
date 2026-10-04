@@ -1,11 +1,11 @@
 // lib/pedlas/coverage-run.ts — survivors now / both ways / slips & budget for a session (see survivors.ts).
 // Shared by GET /api/sessions/[id]/coverage and the live monitor (lib/monitor/tick.ts).
 
-import { getSession, listSessions, listSessionSlips, effectivePayout, cashOutSessionSlip, type SessionRow } from '@/lib/sessions/store'
+import { getSession, listSessions, listSessionSlips, effectivePayout, cashOutSessionSlip, settleSessionSlip, type SessionRow } from '@/lib/sessions/store'
 import { fetchResults } from '@/lib/pedlas/results'
 import { legRuleOf, type LegRule } from '@/lib/pedlas/selections'
 import { analyzeCoverage, type CovGame, type CovSlip } from '@/lib/pedlas/survivors'
-import { fetchOpenBets, fetchSettledBets, selectionSig, type SiteBet } from '@/lib/books/sportybet-bets'
+import { fetchOpenBets, fetchSettledBets, selectionSig, looseSig, type SiteBet } from '@/lib/books/sportybet-bets'
 
 
 type Leg = { fixtureId: number; game?: string; kickoff?: string; rule?: LegRule; line?: number; side?: string; outcome?: string; odds?: number; p?: number | null; marketId?: string; specifier?: string; outcomeId?: string; suspended?: boolean }
@@ -34,6 +34,7 @@ export async function runCoverage(session: Session, opts: { combine?: boolean; s
   // family at once and its money counts as returned. Results never touch it afterwards.
   let open: SiteBet[] | null = null, siteError: string | null = null
   const cashedOut: { key: string; slipId: number; paid: number }[] = []
+  const siteSettled: { key: string; won: boolean; paid: number }[] = []
   if (opts.site === true && mode === 'live') {
     try {
       open = await fetchOpenBets()
@@ -41,14 +42,26 @@ export async function runCoverage(session: Session, opts: { combine?: boolean; s
       const gone = placed.filter(r => r.status === 'placed' && r.bookingCode && !openSigs.has(sigOf(r)))
       if (gone.length) {
         const since = Math.min(...sessions.map(s => Date.parse(s.createdAt))) - 3_600_000
-        const want = new Set(gone.map(r => r.bookingCode))
-        const settled = await fetchSettledBets({ since, until: bets => [...want].every(c => bets.some(b => b.code === c)) })
+        const settled = await fetchSettledBets({ since, maxPages: 10 })
         for (const r of gone) {
           // newest settled bet with this code, placed after the session began, same stake (codes get reused)
-          const b = settled.find(x => x.code === r.bookingCode && x.createdAt >= since && Math.abs(x.stake - Number(r.siteStake ?? r.stake)) < 0.5)
-          if (b?.cashedOut && await cashOutSessionSlip(sessions.find(s => s.code === r.code)!.id, r.slipId, b.paid)) {
+          const stakeOk = (x: (typeof settled)[number]) => x.createdAt >= since && Math.abs(x.stake - Number(r.siteStake ?? r.stake)) < 0.5
+          // by booking code (plain slips keep it); else by game + market + pick (a Flexi ticket gets its own
+          // code on placement), and only when exactly one settled bet fits
+          const loose = looseSig((r.legs as Leg[]).filter(l => !l.suspended && l.marketId).map(l => ({ fixtureId: l.fixtureId, marketId: String(l.marketId), outcomeId: String(l.outcomeId) })))
+          const byCode = settled.find(x => x.code === r.bookingCode && stakeOk(x))
+          const bySig = settled.filter(x => x.looseSig === loose && stakeOk(x))
+          const b = byCode ?? (bySig.length === 1 ? bySig[0] : undefined)
+          const sid = sessions.find(s => s.code === r.code)!.id
+          if (b?.cashedOut && await cashOutSessionSlip(sid, r.slipId, b.paid)) {
             r.status = 'cashed_out'; r.settled = true; r.returned = b.paid
             cashedOut.push({ key: `${r.code}#${r.slipId}`, slipId: r.slipId, paid: b.paid })
+          } else if (b && (b.won || b.lost) && await settleSessionSlip(sid, r.slipId, b.won, b.paid, `settled by SportyBet (${b.won ? `paid ₦${b.paid.toFixed(2)}` : 'lost'})`)) {
+            // SportyBet settled it before our results could: a void/cancelled leg (Terrassa v Girona B,
+            // 2026-10-04 — its rules for void legs on a Flexi ticket are its own), a frozen feed, or simply
+            // being faster. What the site paid is the truth for money, so take it.
+            r.status = b.won ? 'won' : 'lost'; r.settled = true; r.returned = b.paid
+            siteSettled.push({ key: `${r.code}#${r.slipId}`, won: b.won, paid: b.paid })
           }
         }
       }
@@ -105,6 +118,7 @@ export async function runCoverage(session: Session, opts: { combine?: boolean; s
         // as strangers raised a false "37 open bets not in this session" on 2026-10-03)
         openNotInFamily: open.length - placed.filter(r => openSigs.has(sigOf(r))).length,
         cashedOut,                                                                   // recorded by this check
+        siteSettled,                                                                 // won/lost taken from SportyBet's own settlement
       }
     } catch (e) { site = { error: e instanceof Error ? e.message : String(e) } }
   }

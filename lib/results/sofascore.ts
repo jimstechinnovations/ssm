@@ -65,7 +65,9 @@ function api<T>(path: string, ttl = 60_000): Promise<T> {
     return j.body as T
   })()
   cache.set(path, { at: Date.now(), p })
-  p.catch(() => { if (cache.get(path)?.p === p) cache.delete(path) })
+  // a failed or timed-out read drops the page too: a hung page would otherwise be reused for ever (the
+  // frozen-feed fallback missed Enyimba 2-0 on 2026-10-04 that way; the retry on a fresh page found it)
+  p.catch(() => { if (cache.get(path)?.p === p) cache.delete(path); pageP = null })
   return p
 }
 

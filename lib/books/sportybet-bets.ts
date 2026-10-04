@@ -40,7 +40,12 @@ export async function fetchOpenBets(maxPages = 20): Promise<SiteBet[]> {
  *  a cash-out is a PAID bet (winningStatus 20) settled while some of its legs were still unsettled (status 0)
  *  — a real win can only pay once every leg has settled. Proven on 2026-10-04: #22 of S-B44EC5 (HA074L)
  *  paid ₦487.81 with 4 games not yet started; a lost bet is winningStatus 30. */
-export interface SettledBet { orderId: string; shortId: string; code: string; stake: number; createdAt: number; paid: number; won: boolean; cashedOut: boolean }
+export interface SettledBet { orderId: string; shortId: string; code: string; stake: number; createdAt: number; paid: number; won: boolean; lost: boolean; cashedOut: boolean; looseSig: string }
+
+/** Game + market + pick, order-free, WITHOUT the line: the settled list omits `specifier`, and a placed Flexi
+ *  ticket gets its own code (not the booking code), so this is how a settled ticket is matched to our slip. */
+export const looseSig = (sels: { fixtureId: number; marketId: string; outcomeId: string }[]) =>
+  sels.map(s => `${s.fixtureId}|${s.marketId}|${s.outcomeId}`).sort().join(',')
 
 /** Settled bets, newest first, until `until(bets)` is satisfied or `maxPages` run out. */
 export async function fetchSettledBets(opts: { maxPages?: number; since?: number; until?: (bets: SettledBet[]) => boolean } = {}): Promise<SettledBet[]> {
@@ -53,7 +58,8 @@ export async function fetchSettledBets(opts: { maxPages?: number; since?: number
     for (const o of list) {
       const paid = Number(o.totalWinnings ?? 0), won = o.winningStatus === 20 && paid > 0
       out.push({ orderId: o.orderId ?? '', shortId: o.shortId ?? '', code: o.shareCode ?? '', stake: Number(o.totalStake ?? 0), createdAt: o.createTime ?? 0,
-        paid, won, cashedOut: won && (o.selections ?? []).some(s => (s.status ?? 0) === 0) })
+        paid, won, lost: o.winningStatus === 30, cashedOut: won && (o.selections ?? []).some(s => (s.status ?? 0) === 0),
+        looseSig: looseSig((o.selections ?? []).map(s => ({ fixtureId: Number(String(s.eventId ?? '').split(':').pop()), marketId: String(s.marketId ?? ''), outcomeId: String(s.outcomeId ?? '') }))) })
     }
     const oldest = list.at(-1)?.createTime ?? 0
     if (list.length < 50 || (opts.since && oldest < opts.since) || opts.until?.(out)) break
