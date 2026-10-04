@@ -1,6 +1,6 @@
 # Deployment plan: hosted website + a placer agent on any PC
 
-Status: **planned, not started** (written 2026-10-03). Decisions in §2 are pending; each has a
+Status: **planned, not started** (written 2026-10-03; Phase 0, a free hosted monitor, proposed 2026-10-04). Decisions in §2 are pending; each has a
 recommended default, so work can start on the defaults if nothing else is decided. Each phase in §5 is
 sized to fit one working session. Tick the boxes and update **Status** as phases land.
 
@@ -62,6 +62,55 @@ Rules:
   - On a PC: one revocable **agent token** in `%APPDATA%\pedla\agent.json`. Nothing else.
 
 ## 5. Phases (each one session, each shippable on its own)
+
+### Phase 0 — Hosted live monitor (free, independent of any PC) — proposed 2026-10-04
+
+**Why first:** on 3–4 Oct the PC slept 22:03–06:23 UTC and 11 of 13 slips were cut with nobody watching.
+Keep-awake and the in-server scheduler (commit "Live monitor runs on its own") fix that while the PC is
+on, but not when it's off, travelling, or the lid is closed.
+
+**What moves to the cloud:** results → survival → chance → AI update → fact check → write the feed to
+Supabase. None of it needs a SportyBet login: results come from SportyBet's public event feed (and the
+Sofascore fallback). **What stays on the PC:** the account check (open bets, cash-outs), which needs the
+logged-in browser. It runs whenever the PC is on, and the cloud never holds the SportyBet password.
+
+**Options compared (all free):**
+
+| Option | Runs Chrome? | Cadence | Upkeep | Verdict |
+|---|---|---|---|---|
+| **GitHub Actions schedule** | yes (headless) | every 10 min (GitHub may delay 5–15 min) | none | **recommended**, if step 1 passes |
+| Oracle Cloud Always-Free VM (Johannesburg) | yes | any | a server to patch and secure; card needed to sign up | fallback if SportyBet blocks GitHub's IPs |
+| Vercel Cron (Hobby) | no | once a day | none | too slow |
+| Supabase Edge Functions + pg_cron | no | any | none | SportyBet drops non-browser requests: unreliable |
+| Cloudflare Workers + Browser Rendering | yes (10 browser-min/day free) | any | low | too little browser time for 15+ checks a session |
+
+**Budget check (GitHub Actions, private repo: 2,000 free minutes/month):** a check is ~2–3 min with
+Chrome. A 20-hour session at one check per 10 min = 120 checks ≈ 300 min, so ~6 sessions a month fit in
+the free tier. A public repo would be unlimited, but its logs would be public — keep it private.
+
+**Steps:**
+1. **Feasibility probe (no secrets):** a manual workflow that opens headless Chrome on the GitHub
+   runner and fetches one SportyBet event and the Sofascore day list, printing only HTTP status codes.
+   If SportyBet refuses a US datacenter IP, switch to the Oracle VM option (same code, different host).
+2. `scripts/monitor-cloud.ts`: for each session with open bets, run the same tick as the site (settle →
+   coverage without `site` → AI update → fact check → feed). Reuses `lib/monitor/tick.ts`; the only new
+   part is choosing "no logged-in browser" mode.
+3. Workflow `.github/workflows/monitor.yml`: every 10 min, skips in seconds when no session is open.
+   Secrets in GitHub's encrypted store: `SUPABASE_URL`, `SUPABASE_SERVICE`, `NVIDIA_API_KEY`. Nothing else.
+4. Ticks from the cloud and from the PC share the feed safely: the 4-minute gap check stays, and the
+   write re-reads the feed first (already the case).
+5. **Remote viewing:** a read-only page on Vercel behind a login (Phase 1's login, view-only: no Build,
+   Place or Prepare buttons when not on the PC). Until then, the feed is readable in Supabase.
+
+**Security:**
+- The cloud holds only the database key and the AI key, in GitHub's encrypted secrets. No SportyBet
+  password, no ability to place: placing still needs the PC's logged-in Chrome.
+- The repo stays private; the workflow never prints slips, amounts or keys (only counts and status codes).
+- The remote site is read-only until Phase 1's login and lock-down are done.
+
+**Needs from the operator:** approve the GitHub Actions route; install the GitHub CLI or add a token so
+the probe and secrets can be set from this PC (or add the three secrets in GitHub's settings by hand);
+for remote viewing later, a free Vercel account.
 
 ### Phase 1 — Login and lock-down
 - [ ] Supabase Auth (email + password). An allow-list table `app_users` decides who may sign in.
