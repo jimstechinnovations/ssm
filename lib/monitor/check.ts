@@ -118,6 +118,8 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
     }
   }
   if (text.length > 900) issues.push('too long')
+  // a reply cut off mid-sentence ("…Anagennisi Karditsas 1904 is", 2026-10-04) is not an update
+  if (!/[.!?)"’”]\s*$/.test(text.trim())) issues.push('ends mid-sentence (the reply was cut off)')
   return [...new Set(issues)]
 }
 

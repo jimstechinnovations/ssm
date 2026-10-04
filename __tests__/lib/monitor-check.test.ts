@@ -46,6 +46,9 @@ describe('live monitor fact check', () => {
     expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B lead 1-3 at 81.', live).some(i => /Bilbao B is ahead/.test(i))).toBe(true)
     expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B trail 1-3 at 81; Extremadura lead.', live)).toEqual([])
   })
+  it('rejects a reply cut off mid-sentence', () => {
+    expect(checkDraft('The jackpot chance fell to 1.47% with 5 slips alive. Albacete Balompie vs Eibar is', facts)).toContain('ends mid-sentence (the reply was cut off)')
+  })
   it('rejects a model that answers with its working-out', () => {
     const leak = 'We need to produce a live update. Rules: 1-3 short sentences, under 60 words. aliveNow 5, chancePct 1.47 ...'
     expect(checkDraft(leak, facts).some(i => /not in the facts/.test(i))).toBe(true)
