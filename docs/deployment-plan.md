@@ -77,7 +77,7 @@ logged-in browser. It runs whenever the PC is on, and the cloud never holds the 
 **Options compared (all free):**
 
 | Option | Runs Chrome? | Cadence | Upkeep | Verdict |
-|---|---|---|---|---|
+| --- | --- | --- | --- | --- |
 | **GitHub Actions schedule** | yes (headless) | every 10 min (GitHub may delay 5–15 min) | none | **recommended**, if step 1 passes |
 | Oracle Cloud Always-Free VM (Johannesburg) | yes | any | a server to patch and secure; card needed to sign up | fallback if SportyBet blocks GitHub's IPs |
 | Vercel Cron (Hobby) | no | once a day | none | too slow |
@@ -89,6 +89,7 @@ Chrome. A 20-hour session at one check per 10 min = 120 checks ≈ 300 min, so ~
 the free tier. A public repo would be unlimited, but its logs would be public — keep it private.
 
 **Steps:**
+
 1. **Feasibility probe (no secrets):** a manual workflow that opens headless Chrome on the GitHub
    runner and fetches one SportyBet event and the Sofascore day list, printing only HTTP status codes.
    If SportyBet refuses a US datacenter IP, switch to the Oracle VM option (same code, different host).
@@ -103,6 +104,7 @@ the free tier. A public repo would be unlimited, but its logs would be public �
    Place or Prepare buttons when not on the PC). Until then, the feed is readable in Supabase.
 
 **Security:**
+
 - The cloud holds only the database key and the AI key, in GitHub's encrypted secrets. No SportyBet
   password, no ability to place: placing still needs the PC's logged-in Chrome.
 - The repo stays private; the workflow never prints slips, amounts or keys (only counts and status codes).
