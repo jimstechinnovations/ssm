@@ -4,7 +4,7 @@ A living record of what settled, real-money sessions say about the Decision Bot.
 after every run** (numbers come from `python scripts/session-learnings.py`), and treat every "proposed"
 change below as a hypothesis until a later session confirms it on data it wasn't fitted to.
 
-Last updated: 2026-10-03, after the ₦3,000 run of 3 October (S-0D52E6: 22 jackpot slips + 75 floor tickets, all settled).
+Last updated: 2026-10-04, after the ₦3,000 run of 3–4 October (S-B44EC5: 22 jackpot slips + 75 floor tickets, all settled).
 
 ---
 
@@ -16,7 +16,8 @@ Last updated: 2026-10-03, after the ₦3,000 run of 3 October (S-0D52E6: 22 jack
 | 26 Sep (S-A1FA6F) | Decision Bot, no skip | 100 | ₦1,000 | ₦51k | 0 | 1.4% |
 | 1 Oct (S-2A4472, S-7A14B6, S-F2AA60, S-222131, S-3EC9BA, S-DB2F41) | Decision Bot, skip + 8-leg cap | 299 | ₦2,990 | ₦51k | 0 (all cut by 2 Oct) | ≈ 4.8% |
 | 3 Oct (S-0D52E6) | Decision Bot, ₦100 slips + 25% floor (built before the odds cap) | 22 + 75 floor | ₦2,200 + ₦750 | ₦51k | 0 jackpot; floor 66/75 won, ₦1,048 back | 2.6% |
-| **Total** | | **2,519 + 75 floor** | **₦27,920** | | **0 jackpot** | **expected wins ≈ 0.38** |
+| 3–4 Oct (S-B44EC5) | Decision Bot, odds cap 3.5 + per-game coverage, ₦100 slips + 25% floor | 22 + 75 floor | ₦2,200 + ₦750 | ₦51k | 0 jackpot (last slip reached 21%); #22 cashed out ₦487.81; floor 33/75 won, ₦509.99 back | 2.6% |
+| **Total** | | **2,541 + 150 floor** | **₦30,870** | | **0 jackpot** | **expected wins ≈ 0.41** |
 
 **Zero wins is the expected outcome, not a malfunction.** The honest win chances above add up to about 0.35
 expected wins across everything ever placed, so getting no win at all had roughly a 70% chance. Every
@@ -155,6 +156,33 @@ Status as of 2026-10-02. What was built is described in `algorithm_v1.md` §0.5.
   Sofascore fallback saw. Results also now use the 90-minute score (Kashiwa's extra-time goal had revived
   dead slips).
 
+### 3–4 Oct (S-B44EC5): the first run with the odds cap and per-game coverage
+
+Final: ₦2,950 staked, ₦997.80 back (#22 cashed out ₦487.81 + 33 floor wins ₦509.99), net −₦1,952.20.
+The account balance (₦1,048.06) matched the app's ledger to the kobo.
+
+- **Calibrated again.** 168 legs won 47.0% vs 46.5% predicted. Across every Decision Bot run: 3,478 legs,
+  44.0% vs 44.1%.
+- **The cap and coverage did what they were built for.** No jackpot leg above 3.50 (yesterday's went to
+  14); no game cut more than 2 slips (yesterday Kashiwa cut 4); 7 slips alive the next morning; the chance
+  peaked at 21% with one slip needing one result. That's the best position of any run. It lost on the
+  last leg (VVV 2-0 Roda), which is what a 1-in-5 shot does 4 times in 5.
+- **Most of the money was decided overnight.** 11 of 13 slips cut by morning died in US/Mexican lower
+  leagues, 22:00–04:00 UTC, while the PC slept and SportyBet's login expired. Fixed: keep-awake, the
+  in-server scheduler and automatic re-login; a hosted monitor is proposed (deployment-plan.md Phase 0).
+- **Cash-outs pay below value.** #22 was cashed out at ₦488 when worth ~₦730 (67%); later offers on the
+  best slips ran ~80–85% of value. The live panel now shows each slip's worth to judge an offer.
+- **The floor underdelivered this time** (33/75 won, ₦510 on ₦750 vs ~₦710 expected at build): the
+  tickets share afternoon games, so a run of late results took many down together. Over two runs the
+  floor returned ₦1,558 on ₦1,500.
+- **Settlement gaps found and closed:** a cancelled game (Terrassa v Girona B) and a frozen feed (Enyimba
+  "108 min") left 8 tickets unsettled; the account check now takes SportyBet's own settlement (and
+  matches Flexi tickets by their picks, since they get a new code when placed).
+- **Ideas benched, both worse:** goal markets only (3.08–3.29% vs 3.77%, lower keep); Flexi tickets aimed
+  at the target (keep 0.63–0.72 vs 0.75 for plain). Kept the current design.
+- **Watch list:** Over 2.5 now 59/90 vs 48.3 expected (z = +2.3, 90/150 games); draws −0.3; both-score
+  +1.1. If Over 2.5 holds at 150 games: a small Over tilt inside the bot, never overs-only.
+
 ---
 
 ## Session log (add a row to this table after every run — newest last)
@@ -164,6 +192,7 @@ Status as of 2026-10-02. What was built is described in `algorithm_v1.md` §0.5.
 | 2026-09-26 | S-A1FA6F | 100 | 856 | 45.1% / 43.5% | 0 / — | — | first Decision Bot run; floor feature born |
 | 2026-10-01 | S-2A4472 … S-DB2F41 (6) | 299 | 1,381 | 50.1% / 50.8% | 24 / 24.9 (mid-run) | +1.4 (45) | skip + 8-leg cap; CDP fixes; 2 slips never staked |
 | 2026-10-03 | S-0D52E6 | 22 + 75 floor | 171 | 49.7% / 49.2% | 66 / 75.0 (incl. floor) | −0.9 (15) | ₦100 slips; floor 66/75 won (₦1,048 on ₦750); every jackpot slip lost 2+ legs; pre-cap build |
+| 2026-10-04 | S-B44EC5 | 22 + 75 floor | 168 | 47.0% / 46.5% | 0 / — (last slip peaked at 21%) | −1.6 (19) | first cap 3.5 + coverage run; #22 cashed out ₦488; floor 33/75 (₦510 on ₦750); Over 2.5 13/18 (z +1.9) |
 
 How to add a row: `python scripts/session-learnings.py <session codes>` once the games finish, then copy
 the CALIBRATION and GAME level lines into a new row.

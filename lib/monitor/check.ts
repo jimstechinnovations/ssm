@@ -121,6 +121,9 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
   if (text.length > 900) issues.push('too long')
   // a floor-ticket change is news: an update that leaves it out isn't complete
   if (((facts.floor.newlyWon ?? 0) > 0 || (facts.floor.newlyLost ?? 0) > 0) && !/floor/i.test(text)) issues.push("doesn't mention the floor tickets that just settled")
+  // "no change" / "no new losses" next to floor tickets that just settled contradicts itself ("No new cuts or
+  // losses… Floor lost 12 tickets", 2026-10-04)
+  if (((facts.floor.newlyWon ?? 0) > 0 || (facts.floor.newlyLost ?? 0) > 0) && /\bno (?:new )?(?:[a-z-]+ (?:or|and) )?(?:changes?|losses|wins)\b|\bnothing changed\b/i.test(text)) issues.push('says nothing changed while floor tickets just settled')
   // a reply cut off mid-sentence ("…Anagennisi Karditsas 1904 is", 2026-10-04) is not an update
   if (!/[.!?)"’”]\s*$/.test(text.trim())) issues.push('ends mid-sentence (the reply was cut off)')
   return [...new Set(issues)]

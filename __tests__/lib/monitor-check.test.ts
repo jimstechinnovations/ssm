@@ -50,6 +50,7 @@ describe('live monitor fact check', () => {
     const fl: MonitorFacts = { ...facts, floor: { ...facts.floor, won: 5, open: 70, returnedNaira: 81, newlyWon: 5, newlyLost: 0 } }
     expect(checkDraft('No jackpot slips were cut; 5 slips remain alive at 1.47%.', fl)).toContain("doesn't mention the floor tickets that just settled")
     expect(checkDraft('5 floor tickets won (₦81 back so far); 5 jackpot slips alive at 1.47%.', fl)).toEqual([])
+    expect(checkDraft('No new cuts or losses; 5 jackpot slips alive at 1.47%. 5 floor tickets won, ₦81 back.', fl)).toContain('says nothing changed while floor tickets just settled')
     const t = factsText(fl)
     expect(t).toContain('Floor tickets: 5 more won')
     expect(checkDraft(t, fl)).toEqual([])
