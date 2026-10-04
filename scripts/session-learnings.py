@@ -105,3 +105,24 @@ def test(name, key, happened):
 test('DRAW', 'pD', lambda h, a: h == a)
 test('OVER 2.5', 'pO25', lambda h, a: h + a > 2.5)
 test('BOTH SCORE', 'pBTTS', lambda h, a: h > 0 and a > 0)
+
+# ── WATCH LIST — the leans we track before changing anything (docs/learnings.md). A lean only becomes an
+# action when it holds at |z| >= 2 over at least MIN_GAMES games, counted once per game. Run with no
+# session codes for the cumulative verdict across every Decision Bot session.
+MIN_GAMES, Z_ACT = 150, 2.0
+def verdict(name, key, happened, action):
+    gs = [g for g in games.values() if g[key]]
+    if not gs: return f'  {name:12} no games yet'
+    pr = [sum(g[key]) / len(g[key]) for g in gs]
+    act = sum(happened(*g['score']) for g in gs); e = sum(pr); z = (act - e) / math.sqrt(max(sum(x * (1 - x) for x in pr), 1e-9))
+    head = f'  {name:12} {len(gs):4} games  {act} happened vs {e:.1f} expected  z={z:+.1f}  → '
+    if len(gs) < MIN_GAMES: return head + f'WATCHING ({len(gs)}/{MIN_GAMES} games{"; leaning " + ("more" if z > 0 else "less") if abs(z) >= 1 else ""})'
+    if abs(z) >= Z_ACT: return head + f'ACT: {action}'
+    return head + 'no lean — leave the pricing alone'
+print(f'\n== WATCH LIST (act only at |z| >= {Z_ACT} over >= {MIN_GAMES} games; sessions: {len(codes)})')
+print(verdict('DRAWS', 'pD', lambda h, a: h == a, 'add a draw correction (Dixon-Coles) to the scoreline table'))
+print(verdict('OVER 2.5', 'pO25', lambda h, a: h + a > 2.5, 'shift the goal-total prices toward the observed rate'))
+print(verdict('BOTH SCORE', 'pBTTS', lambda h, a: h > 0 and a > 0, 'adjust both-teams-score prices'))
+z_all = (w - p) / math.sqrt(max(sum(l['p'] * (1 - l['p']) for l in legs), 1e-9))
+print(f'  {"LEG CALIB.":12} {n:4} legs  won {100*w/n:.1f}% vs {100*p/n:.1f}% predicted  z={z_all:+.1f} (leg level, overstated)  → '
+      + ('fine' if abs(z_all) < 3 else 'CHECK: the leg probabilities are off — compare against the game-level lines above'))
