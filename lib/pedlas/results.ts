@@ -28,13 +28,22 @@ export async function fetchResult(fixtureId: number): Promise<GameResult | null>
     const d = j?.data as (Record<string, string> & { status?: number | string; gameScore?: unknown }) | undefined
     if (!d) return null
     const r = fromSporty(d)
-    if (r.finished || r.live) return r
+    if (r.finished) return r
+    // FROZEN live feed: Kolos Kovalivka 2 (kick-off 09:30) still read "H2 67:04" at 11:53 on 2026-10-04,
+    // half an hour after it must have ended. Past 2h15m from kick-off, a game SportyBet still shows live is
+    // checked on Sofascore too, and its final score is used once Sofascore has the game finished.
+    const ko = Number((d as Record<string, unknown>).estimateStartTime)
+    if (r.live) {
+      if (!ko || Date.now() - ko < 135 * 60_000) return r
+      const alt = await fallback(d)
+      return alt?.finished ? alt : r
+    }
     const alt = await fallback(d)
     return alt ?? r
   } catch { return null }
 }
 
-/** Sofascore's view of a game SportyBet shows as not started though its kick-off is 20+ min gone. */
+/** Sofascore's view of a game SportyBet shows as not started 20+ min after kick-off (or still live 2h15m after). */
 async function fallback(d: Record<string, unknown>): Promise<GameResult | null> {
   if (process.env.RESULTS_FALLBACK === 'off') return null
   const ko = Number(d.estimateStartTime)
