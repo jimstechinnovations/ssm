@@ -24,6 +24,15 @@ describe('live monitor fact check', () => {
   it('accepts the alive count written as a word', () => {
     expect(checkDraft('The jackpot chance is 1.47% with five slips still alive.', facts)).toEqual([])
   })
+  it('checks counts written as words against the facts (2026-10-04: "five slips cut across four matches" when 12 were cut in 11)', () => {
+    const many: MonitorFacts = { ...facts, jackpot: { ...facts.jackpot, aliveNow: 9, total: 22, aliveChange: -13, chancePct: 6.66 },
+      newlyCut: Array.from({ length: 11 }, (_, i) => ({ game: `G${i} vs H${i}`, score: '1-0', slipsCut: i === 0 ? 2 : 1, wasBeatenInPlay: false })),
+      soFar: { cutGames: 11, slipsCut: 12, beatenInPlay: 1 } }
+    const bad = checkDraft('Five slips were cut across four finished matches, leaving 9 jackpot slips alive at a 6.66% chance.', many)
+    expect(bad.some(i => /five slips were cut/.test(i))).toBe(true)
+    expect(bad.some(i => /four games/.test(i))).toBe(true)
+    expect(checkDraft('Twelve slips were cut across 11 games, leaving nine jackpot slips alive at a 6.66% chance.', many)).toEqual([])
+  })
   it('rejects a model that answers with its working-out', () => {
     const leak = 'We need to produce a live update. Rules: 1-3 short sentences, under 60 words. aliveNow 5, chancePct 1.47 ...'
     expect(checkDraft(leak, facts).some(i => /not in the facts/.test(i))).toBe(true)

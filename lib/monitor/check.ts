@@ -34,7 +34,12 @@ export interface MonitorEvent {
   detail?: MonitorDetail
 }
 /** What the AI sees: the facts minus the long lists (the UI shows those itself). */
-export const forAi = (f: MonitorFacts) => ({ ...f, live: f.live.slice(0, 4), newlyCut: f.newlyCut.slice(0, 4), newlyBeatenInPlay: f.newlyBeatenInPlay.slice(0, 4), nextUp: f.nextUp.slice(0, 2) })
+// The lists are cut to a few examples, so the TOTALS go alongside: shown only the first 4 of 11 cut games,
+// the AI reported "five slips cut across four matches" when 12 were cut in 11 (2026-10-04).
+export const forAi = (f: MonitorFacts) => ({
+  ...f, live: f.live.slice(0, 4), newlyCut: f.newlyCut.slice(0, 4), newlyBeatenInPlay: f.newlyBeatenInPlay.slice(0, 4), nextUp: f.nextUp.slice(0, 2),
+  cutSinceLastCheck: { games: f.newlyCut.filter(c => !c.wasBeatenInPlay).length, slips: f.newlyCut.filter(c => !c.wasBeatenInPlay).reduce((x, c) => x + c.slipsCut, 0), gamesListed: Math.min(4, f.newlyCut.length) },
+})
 
 /** The plain factual update — always correct, used when the AI is off or its draft fails the check. */
 export function factsText(f: MonitorFacts): string {
@@ -63,8 +68,22 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
   // the alive count may be written as a digit or a word ("five slips alive" was wrongly rejected, 2026-10-03)
   const WORDS = ['zero', 'one', 'two', 'three', 'four', 'five', 'six', 'seven', 'eight', 'nine', 'ten', 'eleven', 'twelve', 'thirteen', 'fourteen', 'fifteen', 'sixteen', 'seventeen', 'eighteen', 'nineteen', 'twenty']
   const n = facts.jackpot.aliveNow, word = WORDS[n]
-  const toks = text.toLowerCase().split(/[^a-z0-9]+/)
+  const lower = text.toLowerCase()
+  const toks = lower.split(/[^a-z0-9]+/)
   if (!toks.includes(String(n)) && !(word && toks.includes(word))) issues.push(`doesn't state the ${n} slips alive`)
+  // Counts written as WORDS are claims too. "Five slips were cut across four finished matches" passed on
+  // 2026-10-04 when 12 slips were cut in 11 games: only digits were checked.
+  const val = (t: string) => /^\d+$/.test(t) ? Number(t) : WORDS.indexOf(t)
+  for (const t of toks) { const v = WORDS.indexOf(t); if (v >= 2 && !allowed.has(String(v))) issues.push(`number "${t}" is not in the facts`) }
+  const cutNew = facts.newlyCut.filter(c => !c.wasBeatenInPlay)
+  const slipsCut = new Set([cutNew.reduce((x, c) => x + c.slipsCut, 0), facts.soFar.slipsCut, -facts.jackpot.aliveChange])
+  for (const m of lower.matchAll(/\b([a-z]+|\d+) (?:more |jackpot |more jackpot )?slips? (?:were |was |have been |has been |got )?(?:cut|knocked out|eliminated)/g)) {
+    const v = val(m[1]); if (v >= 0 && !slipsCut.has(v)) issues.push(`says ${m[1]} slips were cut; the facts say ${[...slipsCut].join(' / ')}`)
+  }
+  const games = new Set([cutNew.length, facts.newlyCut.length, facts.soFar.cutGames, facts.live.length, facts.nextUp.length, facts.newlyBeatenInPlay.length])
+  for (const m of lower.matchAll(/\b([a-z]+|\d+) (?:finished |completed |live |more )?(?:matches|games)\b/g)) {
+    const v = val(m[1]); if (v >= 2 && !games.has(v)) issues.push(`says ${m[1]} games; no game count in the facts is ${v}`)
+  }
   if (text.length > 900) issues.push('too long')
   return [...new Set(issues)]
 }
@@ -72,7 +91,7 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
 export const SYSTEM = `You write the live update for a betting session, like a calm sports desk. Use ONLY the facts given (JSON).
 Rules: 1-3 short sentences, under 60 words. Lead with what changed since the last update. Always state how many jackpot slips are alive
 and the chance of a win (as given, with %). If "firstCheck" is true, summarise "soFar" instead of listing games.
-Name at most 3 games. A nextUp game with "overdue": true is past its kick-off time but SportyBet says it hasn't
+Name at most 3 games. The lists are examples only: for how many slips or games were cut, use "cutSinceLastCheck" (never count the list). A nextUp game with "overdue": true is past its kick-off time but SportyBet says it hasn't
 started — call it delayed or possibly postponed, never "kicks off at". A newlyCut game with "wasBeatenInPlay": true only confirms slips that were ALREADY lost (no slip
 died because of it) — say it confirmed earlier losses, never that it cut or knocked out slips. Mention floor tickets only if they changed. If "placement.mismatches" is not
 empty, say so first. Amounts are Nigerian naira (₦) — never £, $ or €. Never invent a number, game, score or prediction;
