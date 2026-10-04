@@ -90,6 +90,8 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
     floor: {
       total: floor.filter(placedish).length, won: floorWon.length, lost: floorLost.length, open: floor.filter(s => s.status === 'placed').length,
       returnedNaira: Math.round(floorWon.reduce((x, s) => x + (s.returned ?? 0), 0)), stakedNaira: Math.round(floor.filter(placedish).reduce((x, s) => x + s.stake, 0)),
+      // what changed since the last check (the AI only saw totals and left out 5 floor wins, 2026-10-04)
+      newlyWon: prev ? floorWon.length - prev.floorWon : 0, newlyLost: prev ? floorLost.length - prev.floorLost : 0,
     },
     placement: { placed: slips.filter(placedish).length, stakedNaira: Math.round(slips.filter(placedish).reduce((x, s) => x + s.stake, 0)), openOnSportyBet: null, mismatches: [], checkNote: null },
     cashedOut: { slips: cashed.length, returnedNaira: Math.round(cashed.reduce((x, s) => x + (s.returned ?? 0), 0)), newly: newlyCashed.map(k => ({ slip: `#${k.key.split('#')[1]}`, paidNaira: Math.round(k.paid) })) },

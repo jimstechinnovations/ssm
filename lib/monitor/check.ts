@@ -16,7 +16,7 @@ export interface MonitorFacts {
   newlyBeatenInPlay: { game: string; score: string; pick: string }[]
   live: { game: string; score: string; minute: number | null; slipsRiding: number; leading?: string }[]   // score is home-away; leading = team ahead or 'level'
   nextUp: { game: string; kickoffUtc: string; slipsRiding: number; overdue?: boolean }[]
-  floor: { total: number; won: number; lost: number; open: number; returnedNaira: number; stakedNaira: number }
+  floor: { total: number; won: number; lost: number; open: number; returnedNaira: number; stakedNaira: number; newlyWon?: number; newlyLost?: number }
   placement: { placed: number; stakedNaira: number; openOnSportyBet: number | null; mismatches: string[]; checkNote: string | null }
   winners: { slip: string; paysNaira: number }[]
   cashedOut: { slips: number; returnedNaira: number; newly: { slip: string; paidNaira: number }[] }   // cashed out on SportyBet by the operator
@@ -62,7 +62,8 @@ export function factsText(f: MonitorFacts): string {
   if (f.firstCheck) parts.push(`Watching from here: ${f.soFar.slipsCut} slips cut so far in ${f.soFar.cutGames} games.`)
   if (f.newlyCut.length) parts.push(`Cut: ${list(f.newlyCut, c => `${c.game} ${c.score} (${c.wasBeatenInPlay ? 'confirms earlier losses' : `−${c.slipsCut}`})`)}.`)
   if (f.newlyBeatenInPlay.length) parts.push(`Beaten in play: ${list(f.newlyBeatenInPlay, k => `${k.game} ${k.score}`)}.`)
-  if (!f.firstCheck && !f.newlyCut.length && !f.newlyBeatenInPlay.length && !f.winners.length) parts.push('No slips cut since the last check.')
+  if ((f.floor.newlyWon ?? 0) > 0 || (f.floor.newlyLost ?? 0) > 0) parts.push(`Floor tickets: ${f.floor.newlyWon ?? 0} more won, ${f.floor.newlyLost ?? 0} more lost — ${f.floor.won} won so far, ₦${f.floor.returnedNaira.toLocaleString()} back, ${f.floor.open} open.`)
+  if (!f.firstCheck && !f.newlyCut.length && !f.newlyBeatenInPlay.length && !f.winners.length && !(f.floor.newlyWon ?? 0) && !(f.floor.newlyLost ?? 0)) parts.push('No slips cut since the last check.')
   return parts.join(' ')
 }
 /** Every number in the AI's text must appear in the facts; amounts must be ₦. Returns the problems. */
@@ -118,6 +119,8 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
     }
   }
   if (text.length > 900) issues.push('too long')
+  // a floor-ticket change is news: an update that leaves it out isn't complete
+  if (((facts.floor.newlyWon ?? 0) > 0 || (facts.floor.newlyLost ?? 0) > 0) && !/floor/i.test(text)) issues.push("doesn't mention the floor tickets that just settled")
   // a reply cut off mid-sentence ("…Anagennisi Karditsas 1904 is", 2026-10-04) is not an update
   if (!/[.!?)"’”]\s*$/.test(text.trim())) issues.push('ends mid-sentence (the reply was cut off)')
   return [...new Set(issues)]
@@ -128,7 +131,7 @@ Rules: 1-3 short sentences, under 60 words. Lead with what changed since the las
 and the chance of a win (as given, with %). If "firstCheck" is true, summarise "soFar" instead of listing games.
 Name at most 3 games. A live score is HOME-AWAY (the game is "Home vs Away"); "leading" says who is ahead — use it. The lists are examples only: for how many slips or games were cut, use "cutSinceLastCheck" (never count the list). A nextUp game with "overdue": true is past its kick-off time but SportyBet says it hasn't
 started — call it delayed or possibly postponed, never "kicks off at". A newlyCut game with "wasBeatenInPlay": true only confirms slips that were ALREADY lost (no slip
-died because of it) — say it confirmed earlier losses, never that it cut or knocked out slips. Mention floor tickets only if they changed. If "cashedOut.newly" is not empty, say which slip was cashed out and for how much — it's money back, neither a win nor a loss. If "placement.mismatches" is not
+died because of it) — say it confirmed earlier losses, never that it cut or knocked out slips. Mention floor tickets only if they changed (floor.newlyWon / floor.newlyLost > 0) — and then you must, with the ₦ returned so far. If "cashedOut.newly" is not empty, say which slip was cashed out and for how much — it's money back, neither a win nor a loss. If "placement.mismatches" is not
 empty, say so first. Amounts are Nigerian naira (₦) — never £, $ or €. Never invent a number, game, score or prediction;
 never claim an edge. Don't say what made the chance change (it also moves as games are played) — just state it.
 No headings, no bullet points.`

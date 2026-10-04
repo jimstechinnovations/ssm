@@ -46,6 +46,14 @@ describe('live monitor fact check', () => {
     expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B lead 1-3 at 81.', live).some(i => /Bilbao B is ahead/.test(i))).toBe(true)
     expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B trail 1-3 at 81; Extremadura lead.', live)).toEqual([])
   })
+  it('an update must mention floor tickets that just settled', () => {
+    const fl: MonitorFacts = { ...facts, floor: { ...facts.floor, won: 5, open: 70, returnedNaira: 81, newlyWon: 5, newlyLost: 0 } }
+    expect(checkDraft('No jackpot slips were cut; 5 slips remain alive at 1.47%.', fl)).toContain("doesn't mention the floor tickets that just settled")
+    expect(checkDraft('5 floor tickets won (₦81 back so far); 5 jackpot slips alive at 1.47%.', fl)).toEqual([])
+    const t = factsText(fl)
+    expect(t).toContain('Floor tickets: 5 more won')
+    expect(checkDraft(t, fl)).toEqual([])
+  })
   it('rejects a reply cut off mid-sentence', () => {
     expect(checkDraft('The jackpot chance fell to 1.47% with 5 slips alive. Albacete Balompie vs Eibar is', facts)).toContain('ends mid-sentence (the reply was cut off)')
   })
