@@ -14,7 +14,7 @@ import { settleSessionNow } from '../sessions/settle'
 import { runCoverage } from '../pedlas/coverage-run'
 import { refreshLogin } from '../placement/browser'
 import { nimChat, nimConfigured, nimModel } from '../llm/nim'
-import { SYSTEM, checkDraft, factsText, forAi, type MonitorFacts, type MonitorDetail, type MonitorEvent } from './check'
+import { SYSTEM, checkDraft, factsText, forAi, leaderOf, type MonitorFacts, type MonitorDetail, type MonitorEvent } from './check'
 export type { MonitorFacts, MonitorDetail, MonitorEvent } from './check'
 
 type Session = NonNullable<Awaited<ReturnType<typeof getSession>>>
@@ -82,7 +82,7 @@ export async function buildFacts(session: Session, prev: Snapshot | undefined, o
     },
     newlyCut: prev ? cutNow.filter(t => !prevCut.has(t.game)).map(t => ({ game: t.game, score: t.score ?? '', slipsCut: t.cut, wasBeatenInPlay: lostSince === 0 || (prev.inPlayKeys ?? []).some(k => k.endsWith(`|${t.game}`)) })) : [],
     newlyBeatenInPlay: prev ? ek.filter(k => !prevEk.has(`${k.key}|${k.game}`)).map(k => ({ game: k.game, score: k.score, pick: k.pick })) : [],
-    live: (c?.now.journey ?? []).filter(g => g.status === 'live' && g.riding > 0).map(g => ({ game: g.game, score: g.liveScore ?? '', minute: g.minute ?? null, slipsRiding: g.riding })),
+    live: (c?.now.journey ?? []).filter(g => g.status === 'live' && g.riding > 0).map(g => ({ game: g.game, score: g.liveScore ?? '', minute: g.minute ?? null, slipsRiding: g.riding, leading: leaderOf(g.game, g.liveScore) })),
     // soonest first (sorting by slips riding listed tomorrow 13:00 as "next" ahead of tonight's 22:00 games);
     // a kick-off on another UTC day carries the weekday ("Sun 13:00") so it can't read as today
     nextUp: (c?.now.journey ?? []).filter(g => g.status === 'pending' && g.riding > 0).sort((a, b) => a.kickoff.localeCompare(b.kickoff) || b.riding - a.riding).slice(0, 3)

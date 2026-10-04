@@ -1,12 +1,20 @@
 // lib/monitor/check.ts — the pure half of the live monitor (no I/O): the facts' shape, the plain factual
 // update, the AI's instructions, and the fact check every AI draft must pass. Unit-tested.
 
+/** Who is ahead in a live game: scores are HOME-AWAY and the game is "Home vs Away". Given to the AI so it
+ *  never reads "Athletic Bilbao B 1-3" as Bilbao leading (it did, 2026-10-04). */
+export function leaderOf(game: string, score?: string | null): string {
+  const m = /^(\d+)-(\d+)$/.exec((score ?? '').replace(/\s/g, '')); const [home, away] = game.split(' vs ')
+  if (!m || !away) return 'unknown'
+  return Number(m[1]) > Number(m[2]) ? home : Number(m[1]) < Number(m[2]) ? away : 'level'
+}
+
 export interface MonitorFacts {
   at: string
   jackpot: { total: number; aliveNow: number; aliveAtFullTime: number; chancePct: number; aliveChange: number; chanceChangePct: number }
   newlyCut: { game: string; score: string; slipsCut: number; wasBeatenInPlay?: boolean }[]   // wasBeatenInPlay: those slips were already counted out while the game was live
   newlyBeatenInPlay: { game: string; score: string; pick: string }[]
-  live: { game: string; score: string; minute: number | null; slipsRiding: number }[]
+  live: { game: string; score: string; minute: number | null; slipsRiding: number; leading?: string }[]   // score is home-away; leading = team ahead or 'level'
   nextUp: { game: string; kickoffUtc: string; slipsRiding: number; overdue?: boolean }[]
   floor: { total: number; won: number; lost: number; open: number; returnedNaira: number; stakedNaira: number }
   placement: { placed: number; stakedNaira: number; openOnSportyBet: number | null; mismatches: string[]; checkNote: string | null }
@@ -95,6 +103,20 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
     const sc = `${m[1]}-${m[2]}`
     if (!scores.has(sc)) issues.push(`score "${m[0].trim()}" is not a score in the facts`)
   }
+  // "<team> lead(s)/ahead" must name the team the facts say is leading (and "trail/behind" the other one)
+  const keyWord = (team: string) => team.toLowerCase().split(/\s+/).find(w => w.length >= 4 && !/^(club|real|sporting|athletic|atletico|deportivo|city|united)$/.test(w)) ?? team.toLowerCase()
+  for (const g of facts.live) {
+    if (!g.leading || g.leading === 'unknown') continue
+    const [home, away] = g.game.split(' vs '); if (!away) continue
+    for (const team of [home, away]) {
+      const w = keyWord(team).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+      const near = new RegExp(`${w}[^.;,]{0,25}?\\b(leads?|leading|ahead|trails?|trailing|behind|draw|level)\\b`, 'i').exec(text)
+      if (!near) continue
+      const says = /lead|ahead/i.test(near[1]) ? 'ahead' : /trail|behind/i.test(near[1]) ? 'behind' : 'level'
+      const truth = g.leading === 'level' ? 'level' : g.leading === team ? 'ahead' : 'behind'
+      if (says !== truth) issues.push(`says ${team} is ${says} in ${g.game}; the score ${g.score} has them ${truth}`)
+    }
+  }
   if (text.length > 900) issues.push('too long')
   return [...new Set(issues)]
 }
@@ -102,7 +124,7 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
 export const SYSTEM = `You write the live update for a betting session, like a calm sports desk. Use ONLY the facts given (JSON).
 Rules: 1-3 short sentences, under 60 words. Lead with what changed since the last update. Always state how many jackpot slips are alive
 and the chance of a win (as given, with %). If "firstCheck" is true, summarise "soFar" instead of listing games.
-Name at most 3 games. The lists are examples only: for how many slips or games were cut, use "cutSinceLastCheck" (never count the list). A nextUp game with "overdue": true is past its kick-off time but SportyBet says it hasn't
+Name at most 3 games. A live score is HOME-AWAY (the game is "Home vs Away"); "leading" says who is ahead — use it. The lists are examples only: for how many slips or games were cut, use "cutSinceLastCheck" (never count the list). A nextUp game with "overdue": true is past its kick-off time but SportyBet says it hasn't
 started — call it delayed or possibly postponed, never "kicks off at". A newlyCut game with "wasBeatenInPlay": true only confirms slips that were ALREADY lost (no slip
 died because of it) — say it confirmed earlier losses, never that it cut or knocked out slips. Mention floor tickets only if they changed. If "cashedOut.newly" is not empty, say which slip was cashed out and for how much — it's money back, neither a win nor a loss. If "placement.mismatches" is not
 empty, say so first. Amounts are Nigerian naira (₦) — never £, $ or €. Never invent a number, game, score or prediction;

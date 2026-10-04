@@ -1,5 +1,5 @@
 import { describe, it, expect } from 'vitest'
-import { checkDraft, factsText, type MonitorFacts } from '@/lib/monitor/check'
+import { checkDraft, factsText, leaderOf, type MonitorFacts } from '@/lib/monitor/check'
 
 const facts: MonitorFacts = {
   at: '2026-10-03T14:00:00Z',
@@ -38,6 +38,13 @@ describe('live monitor fact check', () => {
     expect(checkDraft('5 slips alive at 1.47%. Live: FC Kolos Kovalivka 2–1 FC Oleksandriya, 61st minute.', live).some(i => /score "2–1"/.test(i))).toBe(true)
     expect(checkDraft('5 slips alive at 1.47%. Live: Kolos Kovalivka 2 trail Oleksandriya 0‑1 (61′); Valencia Mestalla lead 3–2.', live)).toEqual([])
     expect(checkDraft('5 slips alive at 1.47%. Next: Azerbaijan vs Lithuania at 13:00.', { ...live, nextUp: [{ game: 'Azerbaijan vs Lithuania', kickoffUtc: '13:00', slipsRiding: 1 }] })).toEqual([])
+  })
+  it('rejects a sentence that names the wrong team as leading (2026-10-04: "Athletic Bilbao B lead 1-3")', () => {
+    const g = 'Athletic Bilbao B vs CD Extremadura'
+    const live: MonitorFacts = { ...facts, live: [{ game: g, score: '1-3', minute: 81, slipsRiding: 2, leading: leaderOf(g, '1-3') }] }
+    expect(leaderOf(g, '1-3')).toBe('CD Extremadura')
+    expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B lead 1-3 at 81.', live).some(i => /Bilbao B is ahead/.test(i))).toBe(true)
+    expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B trail 1-3 at 81; Extremadura lead.', live)).toEqual([])
   })
   it('rejects a model that answers with its working-out', () => {
     const leak = 'We need to produce a live update. Rules: 1-3 short sentences, under 60 words. aliveNow 5, chancePct 1.47 ...'
