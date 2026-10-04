@@ -153,11 +153,17 @@ export async function writeUpdate(facts: MonitorFacts): Promise<Omit<MonitorEven
 type TickResult = { feed: MonitorEvent[]; ticked: boolean; event?: MonitorEvent }
 // One tick per session at a time: the background scheduler, an open page and a forced "Check now" can all
 // ask at once, and two overlapping ticks would race on the same feed. A second caller shares the first's result.
+// A tick that never finishes must not block every later one: on 4 Oct a check started while the internet
+// was down hung, and every check for 2 hours waited on it. After TICK_LIMIT_MS the waiters give up and the
+// next tick starts fresh (the stuck one can't be cancelled, but it re-reads the feed before it writes).
+const TICK_LIMIT_MS = 4 * 60_000
 const inFlight = new Map<string, Promise<TickResult>>()
 export function monitorTick(sessionId: string, opts: { force?: boolean } = {}): Promise<TickResult> {
   const cur = inFlight.get(sessionId)
   if (cur) return cur
-  const p = tickOnce(sessionId, opts).finally(() => inFlight.delete(sessionId))
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const limit = new Promise<never>((_, reject) => { timer = setTimeout(() => reject(new Error(`monitor check gave up after ${TICK_LIMIT_MS / 60_000} min (network or browser not answering)`)), TICK_LIMIT_MS) })
+  const p = Promise.race([tickOnce(sessionId, opts), limit]).finally(() => { clearTimeout(timer); inFlight.delete(sessionId) })
   inFlight.set(sessionId, p)
   return p
 }
