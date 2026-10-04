@@ -87,6 +87,14 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
   for (const m of lower.matchAll(/\b([a-z]+|\d+) (?:finished |completed |live |more )?(?:matches|games)\b/g)) {
     const v = val(m[1]); if (v >= 2 && !games.has(v)) issues.push(`says ${m[1]} games; no game count in the facts is ${v}`)
   }
+  // A SCORE must be one the facts give, as a pair: checking its numbers one by one passed "Kolos Kovalivka
+  // 2–1 Oleksandriya" (the team's "2" run into the 0-1 score) on 2026-10-04, since 2 and 1 appear elsewhere.
+  const scores = new Set([...facts.live, ...facts.newlyCut, ...facts.newlyBeatenInPlay].map(g => g.score.replace(/\s/g, '').replace(/[–‑:]/g, '-')))
+  // a dash only: "13:00" is a kick-off time, not a score
+  for (const m of text.matchAll(/(\d+)\s*[-–‑]\s*(\d+)(?!\s*(?:%|′|'|min))/g)) {
+    const sc = `${m[1]}-${m[2]}`
+    if (!scores.has(sc)) issues.push(`score "${m[0].trim()}" is not a score in the facts`)
+  }
   if (text.length > 900) issues.push('too long')
   return [...new Set(issues)]
 }

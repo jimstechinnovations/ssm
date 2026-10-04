@@ -33,6 +33,12 @@ describe('live monitor fact check', () => {
     expect(bad.some(i => /four games/.test(i))).toBe(true)
     expect(checkDraft('Twelve slips were cut across 11 games, leaving nine jackpot slips alive at a 6.66% chance.', many)).toEqual([])
   })
+  it('rejects a score that is not a score in the facts (2026-10-04: "Kolos Kovalivka 2–1" when it was 0-1)', () => {
+    const live: MonitorFacts = { ...facts, live: [{ game: 'FC Kolos Kovalivka 2 vs FC Oleksandriya', score: '0-1', minute: 61, slipsRiding: 1 }, { game: 'Valencia CF Mestalla vs SCR Pena Deportiva', score: '3-2', minute: 83, slipsRiding: 1 }] }
+    expect(checkDraft('5 slips alive at 1.47%. Live: FC Kolos Kovalivka 2–1 FC Oleksandriya, 61st minute.', live).some(i => /score "2–1"/.test(i))).toBe(true)
+    expect(checkDraft('5 slips alive at 1.47%. Live: Kolos Kovalivka 2 trail Oleksandriya 0‑1 (61′); Valencia Mestalla lead 3–2.', live)).toEqual([])
+    expect(checkDraft('5 slips alive at 1.47%. Next: Azerbaijan vs Lithuania at 13:00.', { ...live, nextUp: [{ game: 'Azerbaijan vs Lithuania', kickoffUtc: '13:00', slipsRiding: 1 }] })).toEqual([])
+  })
   it('rejects a model that answers with its working-out', () => {
     const leak = 'We need to produce a live update. Rules: 1-3 short sentences, under 60 words. aliveNow 5, chancePct 1.47 ...'
     expect(checkDraft(leak, facts).some(i => /not in the facts/.test(i))).toBe(true)
