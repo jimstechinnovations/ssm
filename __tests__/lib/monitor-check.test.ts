@@ -45,6 +45,12 @@ describe('live monitor fact check', () => {
     expect(leaderOf(g, '1-3')).toBe('CD Extremadura')
     expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B lead 1-3 at 81.', live).some(i => /Bilbao B is ahead/.test(i))).toBe(true)
     expect(checkDraft('5 slips alive at 1.47%. Athletic Bilbao B trail 1-3 at 81; Extremadura lead.', live)).toEqual([])
+    // the word belongs to the team named closest before it (a correct draft was rejected on 2026-10-06)
+    const two: MonitorFacts = { ...facts, live: [
+      { game: 'Algeria vs Niger', score: '0-1', minute: 22, slipsRiding: 4, leading: 'Niger' },
+      { game: 'Cyprus vs San Marino', score: '1-0', minute: 22, slipsRiding: 3, leading: 'Cyprus' }] }
+    expect(checkDraft('5 slips alive at 1.47%. Algeria vs Niger 0-1 (Niger leading), Cyprus vs San Marino 1-0 (Cyprus leading).', two)).toEqual([])
+    expect(checkDraft('5 slips alive at 1.47%. Algeria vs Niger 0-1 (Algeria leading).', two).some(i => /Algeria is ahead/.test(i))).toBe(true)
   })
   it('an update must mention floor tickets that just settled', () => {
     const fl: MonitorFacts = { ...facts, floor: { ...facts.floor, won: 5, open: 70, returnedNaira: 81, newlyWon: 5, newlyLost: 0 } }

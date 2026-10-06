@@ -106,16 +106,20 @@ export function checkDraft(text: string, facts: MonitorFacts): string[] {
   }
   // "<team> lead(s)/ahead" must name the team the facts say is leading (and "trail/behind" the other one)
   const keyWord = (team: string) => team.toLowerCase().split(/\s+/).find(w => w.length >= 4 && !/^(club|real|sporting|athletic|atletico|deportivo|city|united)$/.test(w)) ?? team.toLowerCase()
+  // The word belongs to the team named CLOSEST before it: "Algeria vs Niger 0-1 (Niger leading)" is about
+  // Niger — matching any team within reach wrongly flagged "Algeria leading" (2026-10-06).
   for (const g of facts.live) {
     if (!g.leading || g.leading === 'unknown') continue
     const [home, away] = g.game.split(' vs '); if (!away) continue
-    for (const team of [home, away]) {
-      const w = keyWord(team).replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
-      const near = new RegExp(`${w}[^.;,]{0,25}?\\b(leads?|leading|ahead|trails?|trailing|behind|draw|level)\\b`, 'i').exec(text)
-      if (!near) continue
-      const says = /lead|ahead/i.test(near[1]) ? 'ahead' : /trail|behind/i.test(near[1]) ? 'behind' : 'level'
-      const truth = g.leading === 'level' ? 'level' : g.leading === team ? 'ahead' : 'behind'
-      if (says !== truth) issues.push(`says ${team} is ${says} in ${g.game}; the score ${g.score} has them ${truth}`)
+    const teams = [home, away].map(team => ({ team, w: keyWord(team) }))
+    for (const m of lower.matchAll(/\b(leads?|leading|ahead|trails?|trailing|behind|draw|level)\b/g)) {
+      const before = lower.slice(Math.max(0, (m.index ?? 0) - 30), m.index)
+      let named: { team: string; pos: number } | null = null
+      for (const t of teams) { const pos = before.lastIndexOf(t.w); if (pos >= 0 && (!named || pos > named.pos)) named = { team: t.team, pos } }
+      if (!named || /[.;]/.test(before.slice(named.pos))) continue      // no team in this sentence just before the word
+      const says = /lead|ahead/.test(m[1]) ? 'ahead' : /trail|behind/.test(m[1]) ? 'behind' : 'level'
+      const truth = g.leading === 'level' ? 'level' : g.leading === named.team ? 'ahead' : 'behind'
+      if (says !== truth) issues.push(`says ${named.team} is ${says} in ${g.game}; the score ${g.score} has them ${truth}`)
     }
   }
   if (text.length > 900) issues.push('too long')
