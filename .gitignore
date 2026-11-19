@@ -66,3 +66,15 @@ backtest-cutters.json
 session-*.json
 500-slips.json
 engine-screenshots/
+
+# ad-hoc session scratch output (pool/picks caches, generated slip previews) —
+# regenerated every session by scripts/*.mjs, not source code. Keep config
+# files explicitly un-ignored below.
+/*.json
+!/package.json
+!/package-lock.json
+!/tsconfig.json
+/.*.json
+
+# CDP automation debug screenshots — can show live account/login/bet-history screens
+*.png
